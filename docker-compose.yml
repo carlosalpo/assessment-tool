@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: assessment-tool-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: assessment
+      POSTGRES_PASSWORD: assessment
+      POSTGRES_DB: assessment_tool
+    ports:
+      - "5433:5432"
+    volumes:
+      - assessment_tool_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U assessment -d assessment_tool"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  assessment_tool_postgres:

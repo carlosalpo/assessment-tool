@@ -1,0 +1,197 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 210 28% 10%;
+  --foreground: 210 28% 94%;
+  --muted: 210 22% 18%;
+  --muted-foreground: 212 14% 68%;
+  --border: 210 18% 25%;
+  --primary: 145 70% 38%;
+  --primary-foreground: 0 0% 100%;
+  --accent: 203 92% 52%;
+  --accent-foreground: 0 0% 100%;
+  --destructive: 348 72% 46%;
+  --surface: 210 25% 14%;
+  --surface-raised: 210 24% 17%;
+  --surface-muted: 210 22% 20%;
+}
+
+.light {
+  --background: 210 25% 98%;
+  --foreground: 222 28% 12%;
+  --muted: 210 18% 92%;
+  --muted-foreground: 215 12% 42%;
+  --border: 214 18% 84%;
+  --primary: 199 89% 32%;
+  --primary-foreground: 0 0% 100%;
+  --accent: 164 60% 34%;
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 70% 43%;
+  --surface: 0 0% 100%;
+  --surface-raised: 0 0% 100%;
+  --surface-muted: 210 18% 96%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top left, hsl(205 40% 16%), transparent 34rem),
+    linear-gradient(135deg, hsl(var(--background)), hsl(210 31% 8%));
+  color: hsl(var(--foreground));
+}
+
+.light body {
+  background: hsl(var(--background));
+}
+
+html.dark {
+  color-scheme: dark;
+}
+
+html.light {
+  color-scheme: light;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+html.dark .bg-white,
+html.dark .hover\:bg-white:hover {
+  background-color: hsl(var(--surface)) !important;
+}
+
+html.dark .bg-muted {
+  background-color: hsl(var(--muted)) !important;
+}
+
+html.dark [class*="bg-muted/"] {
+  background-color: hsl(var(--muted) / 0.44) !important;
+}
+
+html.dark .bg-slate-50 {
+  background-color: hsl(var(--surface-muted)) !important;
+}
+
+html.dark .border-white\/70 {
+  border-color: hsl(var(--border)) !important;
+}
+
+html.dark .bg-white\/70,
+html.dark .bg-primary-foreground\/15 {
+  background-color: hsl(var(--surface-raised) / 0.82) !important;
+}
+
+html.dark input,
+html.dark textarea,
+html.dark select {
+  background-color: hsl(var(--surface-raised)) !important;
+  color: hsl(var(--foreground)) !important;
+}
+
+html.dark input::placeholder,
+html.dark textarea::placeholder {
+  color: hsl(var(--muted-foreground)) !important;
+}
+
+html.dark .shadow-subtle {
+  box-shadow: 0 16px 36px hsl(210 45% 5% / 0.22);
+}
+
+html.dark .text-slate-700 {
+  color: hsl(var(--foreground)) !important;
+}
+
+html.dark .bg-emerald-50,
+html.dark .bg-emerald-100 {
+  background-color: hsl(151 46% 16%) !important;
+}
+
+html.dark .border-emerald-200 {
+  border-color: hsl(151 54% 34%) !important;
+}
+
+html.dark .text-emerald-700,
+html.dark .text-emerald-800,
+html.dark .text-emerald-900 {
+  color: hsl(151 70% 72%) !important;
+}
+
+html.dark .bg-sky-50 {
+  background-color: hsl(204 54% 16%) !important;
+}
+
+html.dark .border-sky-200 {
+  border-color: hsl(204 70% 38%) !important;
+}
+
+html.dark .text-sky-800 {
+  color: hsl(204 86% 74%) !important;
+}
+
+html.dark .bg-amber-50,
+html.dark .bg-amber-100,
+html.dark .bg-amber-400 {
+  background-color: hsl(40 52% 18%) !important;
+}
+
+html.dark .border-amber-200 {
+  border-color: hsl(40 76% 42%) !important;
+}
+
+html.dark .text-amber-900,
+html.dark .text-amber-950 {
+  color: hsl(43 92% 76%) !important;
+}
+
+html.dark .bg-rose-50 {
+  background-color: hsl(346 47% 17%) !important;
+}
+
+html.dark .border-rose-200 {
+  border-color: hsl(346 70% 39%) !important;
+}
+
+html.dark .text-rose-800,
+html.dark .text-rose-900 {
+  color: hsl(346 90% 76%) !important;
+}
+
+.table-grid {
+  display: grid;
+  grid-template-columns: var(--grid-columns);
+}
+
+.assessment-tab-scroll {
+  scrollbar-gutter: stable;
+  padding-bottom: 8px;
+}
+
+.assessment-tab-scroll::-webkit-scrollbar {
+  height: 10px;
+}
+
+.assessment-tab-scroll::-webkit-scrollbar-track {
+  background: hsl(var(--muted));
+  border-radius: 999px;
+  margin: 0 8px;
+}
+
+.assessment-tab-scroll::-webkit-scrollbar-thumb {
+  background: hsl(var(--primary) / 0.55);
+  border: 2px solid hsl(var(--muted));
+  border-radius: 999px;
+}
+
+.assessment-tab-scroll::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--primary) / 0.75);
+}

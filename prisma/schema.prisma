@@ -1,0 +1,242 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum DomainType {
+  ENTERPRISE_NETWORKING
+  DATACENTER_NETWORKING
+}
+
+enum AssessmentStatus {
+  DRAFT
+  EVIDENCE
+  REVIEW
+  ROADMAP
+  DELIVERED
+}
+
+enum FindingStatus {
+  AI_DRAFT
+  VALIDATED
+  DISCARDED
+}
+
+enum RiskLevel {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+  INFO
+}
+
+enum RemediationType {
+  SERVICE
+  INVESTMENT
+  MIXED
+  PENDING_VALIDATION
+}
+
+model Client {
+  id          String       @id @default(cuid())
+  name        String
+  industry    String?
+  owner       String?
+  assessments Assessment[]
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+}
+
+model Assessment {
+  id          String             @id @default(cuid())
+  clientId    String
+  client      Client             @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  name        String
+  status      AssessmentStatus   @default(DRAFT)
+  domains     AssessmentDomain[]
+  evidence    EvidenceFile[]
+  devices     Device[]
+  interfaces  DeviceInterface[]
+  relations   NeighborRelation[]
+  findings    Finding[]
+  roadmap     RoadmapItem[]
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+}
+
+model AssessmentDomain {
+  id           String     @id @default(cuid())
+  assessmentId String
+  assessment   Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  domain       DomainType
+
+  @@unique([assessmentId, domain])
+}
+
+model EvidenceFile {
+  id           String     @id @default(cuid())
+  assessmentId String
+  assessment   Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  fileName     String
+  fileType     String
+  storageKey   String?
+  sha256       String?
+  parsedAt     DateTime?
+  createdAt    DateTime   @default(now())
+}
+
+model Device {
+  id              String            @id @default(cuid())
+  assessmentId    String
+  assessment      Assessment        @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  hostname        String
+  model           String?
+  serial          String?
+  softwareVersion String?
+  suggestedRole   String?
+  evidence        Json
+  interfaces      DeviceInterface[]
+  findings        FindingDevice[]
+
+  @@unique([assessmentId, hostname])
+}
+
+model DeviceInterface {
+  id           String     @id @default(cuid())
+  assessmentId String
+  assessment   Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  deviceId     String
+  device       Device     @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  name         String
+  status       String?
+  vlan         String?
+  duplex       String?
+  speed        String?
+  mediaType    String?
+  description  String?
+  evidence     Json
+
+  @@unique([deviceId, name])
+}
+
+model NeighborRelation {
+  id              String     @id @default(cuid())
+  assessmentId    String
+  assessment      Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  localDeviceId   String
+  localHostname   String
+  localInterface  String
+  remoteHostname  String
+  remoteInterface String
+  protocol        String
+  platform        String?
+  managementIp    String?
+  confidence      Float
+  evidence        Json
+}
+
+model Finding {
+  id              String          @id @default(cuid())
+  assessmentId    String
+  assessment      Assessment      @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  title           String
+  category        String
+  risk            RiskLevel
+  confidence      Float
+  status          FindingStatus   @default(AI_DRAFT)
+  evidence        Json
+  recommendation  String
+  remediationType RemediationType
+  serviceOffer    String?
+  architectNotes  String?
+  devices         FindingDevice[]
+  roadmapItems    RoadmapFinding[]
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+}
+
+model FindingDevice {
+  findingId String
+  deviceId  String
+  finding   Finding @relation(fields: [findingId], references: [id], onDelete: Cascade)
+  device    Device  @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@id([findingId, deviceId])
+}
+
+model RoadmapItem {
+  id              String           @id @default(cuid())
+  assessmentId    String
+  assessment      Assessment       @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  quarter         String
+  initiative      String
+  remediationType RemediationType
+  investmentBand  String
+  dependencies    String?
+  findings        RoadmapFinding[]
+}
+
+model RoadmapFinding {
+  roadmapItemId String
+  findingId     String
+  roadmapItem   RoadmapItem @relation(fields: [roadmapItemId], references: [id], onDelete: Cascade)
+  finding       Finding     @relation(fields: [findingId], references: [id], onDelete: Cascade)
+
+  @@id([roadmapItemId, findingId])
+}
+
+model AssessmentSnapshot {
+  id             String   @id
+  clientName     String
+  assessmentName String
+  status         String
+  recordUpdatedAt DateTime?
+  data           Json
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([clientName])
+  @@index([assessmentName])
+  @@index([updatedAt])
+}
+
+model DocumentTemplateSnapshot {
+  id                          String   @id
+  documentType                String
+  templateName                String
+  templateVersion             String
+  templateFileName            String
+  templateFileDataUrl         String   @db.Text
+  uploadedBy                  String
+  uploadedAt                  DateTime?
+  status                      String
+  validationResult            Json
+  compatibleDefinitionVersion String
+  notes                       String?
+  data                        Json
+  createdAt                   DateTime @default(now())
+  updatedAt                   DateTime @updatedAt
+
+  @@index([documentType])
+  @@index([status])
+  @@index([updatedAt])
+}
+
+model AssessmentUserSnapshot {
+  id        String   @id
+  name      String
+  email     String
+  role      String
+  status    String
+  data      Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([email])
+  @@index([role])
+  @@index([status])
+}
