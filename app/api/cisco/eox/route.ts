@@ -21,6 +21,8 @@ type CiscoEoxResponse = {
   EOXRecord?: CiscoEoxRecord | CiscoEoxRecord[];
 };
 
+type NormalizedEoxRecord = ReturnType<typeof normalizeCiscoRecord> | ReturnType<typeof publicRecord>;
+
 const CISCO_EOX_BASE_URL = "https://apix.cisco.com/supporttools/eox/rest/5/EOXByProductID";
 
 export async function POST(request: Request) {
@@ -32,14 +34,19 @@ export async function POST(request: Request) {
 
   try {
     const records = await fetchCiscoEoxByProductIds(productIds, request.headers.get("x-cisco-api-token") ?? undefined);
-    return NextResponse.json({ records, source: "support-api" });
+    return NextResponse.json({
+      records,
+      source: "support-api",
+      lookupResults: buildLookupResults(productIds, records, "support-api")
+    });
   } catch (error) {
     const supportApiError = error instanceof Error ? error.message : "No se pudo consultar Cisco EoX.";
     const records = await fetchPublicCiscoEoxByProductIds(productIds);
     return NextResponse.json({
       records,
       source: "public-cisco",
-      warning: `Support API no disponible (${supportApiError}). Se uso fallback publico Cisco.`
+      warning: `Support API no disponible (${supportApiError}). Se uso fallback publico Cisco.`,
+      lookupResults: buildLookupResults(productIds, records, "public-cisco", supportApiError)
     });
   }
 }
@@ -108,6 +115,12 @@ async function findPublicCiscoRecord(productId: string) {
     const listingHtml = await fetchText(listingUrl);
     if (!listingHtml) continue;
 
+    const listingText = htmlToText(listingHtml);
+    if (textContainsProductId(listingText, productId) && /End-of-Sale|End-of-Life|End of Sale|End of Life/i.test(listingText)) {
+      const title = listingHtml.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1] ?? listingHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? productId;
+      return publicRecord(productId, htmlToText(title), listingUrl, extractPublicNoticeDates(listingText));
+    }
+
     const candidateLinks = publicNoticeLinks(listingHtml, listingUrl, productId);
     for (const link of candidateLinks.slice(0, 12)) {
       const noticeHtml = await fetchText(link.url);
@@ -152,6 +165,7 @@ function publicListingUrlsForProduct(productId: string) {
   if (/^N9K|^N3K/.test(value)) urls.push("https://www.cisco.com/c/en/us/products/switches/nexus-9000-series-switches/eos-eol-notice-listing.html");
   if (/^N7K|^N77/.test(value)) urls.push("https://www.cisco.com/c/en/us/products/switches/nexus-7000-series-switches/eos-eol-notice-listing.html");
   if (/^WS-C65|^C65|^C68/.test(value)) urls.push("https://www.cisco.com/c/en/us/products/switches/catalyst-6500-series-switches/eos-eol-notice-listing.html");
+  if (/^ISR4|^C1-CISCO4/.test(value)) urls.push("https://www.cisco.com/c/en/us/products/collateral/routers/4000-series-integrated-services-routers-isr/select-isr4k-series-platform-eol.html");
 
   urls.push("https://www.cisco.com/c/en/us/products/eos-eol-listing.html");
   return Array.from(new Set(urls));
@@ -197,15 +211,19 @@ async function fetchText(url: string) {
 function textContainsProductId(text: string, productId: string) {
   const normalizedText = text.toUpperCase();
   const variants = productIdVariants(productId);
+  if (variants.length === 0) return false;
   return variants.some((variant) => normalizedText.includes(variant));
 }
 
 function productIdVariants(productId: string) {
   const upper = productId.toUpperCase();
+  if (!isConsultableCiscoProductId(upper)) return [];
   const variants = new Set([upper]);
   variants.add(upper.replace(/=$/, ""));
   variants.add(upper.replace(/-(E|A|K9|S)$/i, ""));
-  return Array.from(variants).filter((item) => item.length >= 5);
+  variants.add(upper.replace(/\/K9=?$/i, "/K9"));
+  variants.add(upper.replace(/\/K9=?$/i, ""));
+  return Array.from(variants).filter(isConsultableCiscoProductId);
 }
 
 function extractPublicNoticeDates(text: string) {
@@ -223,10 +241,18 @@ function extractPublicNoticeDates(text: string) {
 }
 
 function findDateAfterLabel(text: string, labels: string[]) {
+  const datePattern = /([A-Z][a-z]+\.?\s+\d{1,2},\s+\d{4}|\d{1,2}\/[A-Z][a-z]{2}\/\d{4}|\d{4}-\d{2}-\d{2})/;
   for (const label of labels) {
     const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const match = text.match(new RegExp(`${escaped}\\s+([A-Z][a-z]+\\s+\\d{1,2},\\s+\\d{4}|\\d{1,2}/[A-Z][a-z]{2}/\\d{4}|\\d{4}-\\d{2}-\\d{2})`, "i"));
+    const match = text.match(new RegExp(`${escaped}\\s+${datePattern.source}`, "i"));
     if (match?.[1]) return match[1];
+
+    const labelIndex = text.search(new RegExp(escaped, "i"));
+    if (labelIndex >= 0) {
+      const nearbyText = text.slice(labelIndex + label.length, labelIndex + label.length + 900);
+      const nearbyMatch = nearbyText.match(datePattern);
+      if (nearbyMatch?.[1]) return nearbyMatch[1];
+    }
   }
   return "";
 }
@@ -253,9 +279,58 @@ function uniqueProductIds(value: unknown) {
     new Set(
       value
         .map((item) => (typeof item === "string" ? item.trim() : ""))
-        .filter((item) => item && item !== "No identificado" && item !== "Pendiente")
+        .filter(isConsultableCiscoProductId)
     )
   ).slice(0, 200);
+}
+
+function buildLookupResults(
+  productIds: string[],
+  records: NormalizedEoxRecord[],
+  source: "support-api" | "public-cisco",
+  supportApiError?: string
+) {
+  return productIds.map((productId) => {
+    const record = records.find((item) => recordMatchesProductId(item, productId));
+    const attempts = [
+      `PID solicitado: ${productId}`,
+      source === "support-api"
+        ? "Consulta ejecutada contra Cisco Support EoX API."
+        : "Consulta ejecutada contra boletines publicos de Cisco.",
+      ...(supportApiError ? [`Support API no disponible: ${supportApiError}`] : []),
+      record
+        ? `Registro encontrado para ${record.productId || record.inputValue || productId}.`
+        : "No se encontro registro EoX para este PID en la fuente consultada."
+    ];
+
+    return {
+      productId,
+      normalizedProductId: productId.toUpperCase(),
+      source,
+      status: record ? "matched" : "not-found",
+      matchedProductId: record?.productId || "",
+      bulletinNumber: record?.bulletinNumber || "",
+      bulletinUrl: record?.bulletinUrl || "",
+      datesFound: Boolean(record?.announcementDate || record?.endOfSaleDate || record?.lastDateOfSupport),
+      attempts
+    };
+  });
+}
+
+function recordMatchesProductId(record: NormalizedEoxRecord, productId: string) {
+  const variants = productIdVariants(productId);
+  if (variants.length === 0) return false;
+  const recordValues = [record.productId, record.inputValue].map((item) => item.toUpperCase()).filter(Boolean);
+  return recordValues.some((value) => variants.includes(value) || variants.some((variant) => value.includes(variant)));
+}
+
+function isConsultableCiscoProductId(value: string) {
+  const normalized = value.trim().toUpperCase();
+  if (!normalized) return false;
+  if (["NO IDENTIFICADO", "PENDIENTE", "N/A", "NA", "UNKNOWN", "CISCO", "PID", "CHASSIS", "MODULE"].includes(normalized)) return false;
+  if (!/[0-9]/.test(normalized)) return false;
+  if (normalized.length < 5) return false;
+  return /^[A-Z0-9][A-Z0-9./_-]+=?$/.test(normalized);
 }
 
 function clean(value?: string) {

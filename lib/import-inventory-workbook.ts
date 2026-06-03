@@ -11,6 +11,7 @@ export type InventoryWorkbookRow = {
   platform: string;
   role: string;
   site: string;
+  topologyLayer: string;
   priority: string;
   notes: string;
 };
@@ -41,21 +42,11 @@ export async function importInventoryWorkbook(file: File): Promise<InventoryWork
 
   const documentXml = parseXml(sheetXml);
   const rawRows = Array.from(documentXml.getElementsByTagName("row")).map((row) => readRow(row, sharedStrings));
-  const [headerRow, ...dataRows] = rawRows;
-  if (!headerRow) return { rows: [], errors: ["El archivo no contiene encabezados."] };
+  const headerMatch = findHeaderRow(rawRows);
+  if (!headerMatch) return { rows: [], errors: ["El archivo no contiene los encabezados requeridos de inventario."] };
 
-  const headerMap = headerRow.reduce<Record<string, number>>((map, value, index) => {
-    map[normalizeHeader(value)] = index;
-    return map;
-  }, {});
-
-  const missingHeaders = requiredHeaders.filter((header) => headerMap[header] === undefined);
-  if (missingHeaders.length > 0) {
-    return {
-      rows: [],
-      errors: [`Formato invalido. Faltan columnas requeridas: ${missingHeaders.join(", ")}.`]
-    };
-  }
+  const { headerMap, rowIndex } = headerMatch;
+  const dataRows = rawRows.slice(rowIndex + 1);
 
   const parsedRows = dataRows
     .map((row) => ({
@@ -67,6 +58,7 @@ export async function importInventoryWorkbook(file: File): Promise<InventoryWork
       platform: cell(row, headerMap, "platform"),
       role: cell(row, headerMap, "role"),
       site: cell(row, headerMap, "site"),
+      topologyLayer: cell(row, headerMap, "topologylayer"),
       priority: cell(row, headerMap, "priority"),
       notes: cell(row, headerMap, "notes")
     }))
@@ -137,8 +129,65 @@ function cell(row: string[], headerMap: Record<string, number>, key: string) {
   return index === undefined ? "" : (row[index] ?? "").trim();
 }
 
+function findHeaderRow(rows: string[][]) {
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    const headerMap = rows[rowIndex].reduce<Record<string, number>>((map, value, index) => {
+      const normalized = canonicalHeader(value);
+      if (normalized && map[normalized] === undefined) map[normalized] = index;
+      return map;
+    }, {});
+    const missingHeaders = requiredHeaders.filter((header) => headerMap[header] === undefined);
+    if (missingHeaders.length === 0) return { headerMap, rowIndex };
+  }
+  return null;
+}
+
+function canonicalHeader(value: string) {
+  const normalized = normalizeHeader(value);
+  const aliases: Record<string, string> = {
+    hostname: "hostname",
+    equipo: "hostname",
+    dispositivo: "hostname",
+    ipgestion: "managementip",
+    ipdegestion: "managementip",
+    ipgestión: "managementip",
+    managementip: "managementip",
+    mgmtip: "managementip",
+    serial: "serial",
+    serie: "serial",
+    numerodeserie: "serial",
+    model: "model",
+    modelo: "model",
+    devicetype: "devicetype",
+    tipodeequipo: "devicetype",
+    tipoequipo: "devicetype",
+    tipo: "devicetype",
+    platform: "platform",
+    plataforma: "platform",
+    role: "role",
+    rol: "role",
+    site: "site",
+    sitio: "site",
+    ubicacion: "site",
+    ubicación: "site",
+    topologylayer: "topologylayer",
+    segmentotopologico: "topologylayer",
+    segmentotopológico: "topologylayer",
+    segmentotopologia: "topologylayer",
+    segmentodetopologia: "topologylayer",
+    priority: "priority",
+    prioridad: "priority",
+    criticality: "priority",
+    criticidad: "priority",
+    notes: "notes",
+    notas: "notes",
+    comentarios: "notes"
+  };
+  return aliases[normalized] ?? "";
+}
+
 function normalizeHeader(value: string) {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
 function parseXml(xml: string) {

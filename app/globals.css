@@ -58,6 +58,43 @@ html.light {
   color-scheme: light;
 }
 
+.topology-layer-zone {
+  --topology-layer-bg: var(--topology-layer-bg-dark);
+  --topology-layer-border: var(--topology-layer-border-dark);
+  --topology-layer-header-bg: #0f1720;
+  --topology-layer-title: #e5eef8;
+  --topology-layer-muted: #94a3b8;
+}
+
+html.light .topology-layer-zone {
+  --topology-layer-bg: var(--topology-layer-bg-light);
+  --topology-layer-border: var(--topology-layer-border-light);
+  --topology-layer-header-bg: rgba(255, 255, 255, 0.82);
+  --topology-layer-title: #0f172a;
+  --topology-layer-muted: #475569;
+}
+
+.topology-relation-group {
+  background:
+    linear-gradient(180deg, hsl(var(--surface-raised) / 0.96), hsl(var(--surface-muted) / 0.78));
+  box-shadow: inset 4px 0 0 hsl(var(--primary) / 0.72);
+}
+
+.topology-relation-group-header {
+  background: hsl(var(--surface-muted) / 0.88);
+}
+
+html.light .topology-relation-group {
+  background:
+    linear-gradient(180deg, hsl(204 100% 98%), hsl(210 35% 94%));
+  border-color: hsl(207 42% 75%);
+  box-shadow: inset 4px 0 0 hsl(var(--primary) / 0.8);
+}
+
+html.light .topology-relation-group-header {
+  background: hsl(207 60% 96%);
+}
+
 button,
 input,
 select,

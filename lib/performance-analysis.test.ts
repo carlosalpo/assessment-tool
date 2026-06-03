@@ -53,6 +53,27 @@ test("processPerformanceEvidence extracts metrics and keeps evidence traceabilit
   assert.equal(processed.summary.detectedDevices, 1);
 });
 
+test("processPerformanceEvidence separates multiple devices in one CLI file", () => {
+  const input = evidence([
+    "hostname core-01",
+    "CPU utilization for five seconds: 91%",
+    "Gi1/0/1 input errors 22 output errors 0 crc 4 drops 11 util 88%",
+    "hostname branch-01",
+    "CPU utilization for five seconds: 63%",
+    "Gi0/0 input errors 3 output errors 1 crc 0 drops 2 util 42%"
+  ].join("\n"));
+
+  const processed = processPerformanceEvidence("assess_test", [input], "snapshot");
+  const deviceIds = new Set(processed.metrics.map((metric) => metric.deviceId));
+
+  assert.equal(processed.summary.detectedDevices, 2);
+  assert.equal(processed.files[0].deviceName, "2 dispositivos");
+  assert.ok(deviceIds.has("core-01"));
+  assert.ok(deviceIds.has("branch-01"));
+  assert.ok(processed.metrics.some((metric) => metric.deviceId === "core-01" && metric.metricType === "cpu" && metric.value === 91));
+  assert.ok(processed.metrics.some((metric) => metric.deviceId === "branch-01" && metric.metricType === "cpu" && metric.value === 63));
+});
+
 test("generatePerformanceFindings creates findings only from critical metrics with evidence", () => {
   const input = evidence("hostname core-01\nGi1/0/1 input errors 22 crc 4 drops 11 util 88%");
   const processed = processPerformanceEvidence("assess_test", [input], "snapshot");

@@ -11,6 +11,8 @@ import {
   Bot,
   Building2,
   Check,
+  ChevronDown,
+  ChevronRight,
   ClipboardList,
   FileCode2,
   FileArchive,
@@ -128,8 +130,9 @@ import {
   type PerformanceTechnicalViewData,
   type PerformanceTopPriority
 } from "@/lib/performance-visualization-service";
-import type { Assessment, Client, Domain, EvidenceFile, Finding, ParsedAssessment, RemediationType, RiskLevel } from "@/lib/types";
+import type { Assessment, Client, Domain, EvidenceFile, Finding, NeighborRelation, ParsedAssessment, RemediationType, RiskLevel } from "@/lib/types";
 import { assessmentTabLabel, assessmentTabs as tabs, type AssessmentTab as Tab } from "@/lib/assessment-navigation";
+import type { AIAnalysisJobSnapshot, AIAnalysisScopeId } from "@/lib/ai-analysis-jobs";
 import { cn, formatDate, uid } from "@/lib/utils";
 
 const domains: Array<{ id: Domain; label: string }> = [
@@ -147,13 +150,13 @@ type TopologyView = "relations" | "graph";
 type EvaluationArea = "topology" | "configuration" | "security" | "lifecycle" | "operations" | "logs";
 type DeviceType = "switch" | "router" | "nexus-switch" | "aci" | "wireless-controller" | "firewall" | "other";
 type SortDirection = "asc" | "desc";
-type InventorySortKey = "included" | "hostname" | "managementIp" | "serial" | "model" | "deviceType" | "role" | "priority";
+type InventorySortKey = "included" | "hostname" | "managementIp" | "serial" | "model" | "deviceType" | "role" | "topologyLayer" | "priority";
 type EvidenceRequirementId = "identity" | "configuration" | "interfaces" | "topology-l2" | "routing-overlay" | "operations-security";
 type UiMode = "dark" | "light";
 type UserRole = "admin" | "architect" | "viewer";
 type UserStatus = "active" | "disabled";
 type SharePermission = "view" | "edit";
-type TopologyLayerId = "perimeter" | "core" | "datacenter" | "campus" | "other";
+type TopologyLayerId = "branches" | "perimeter" | "core" | "datacenter" | "campus" | "other";
 
 type AppUser = {
   id: string;
@@ -241,7 +244,9 @@ type TopologyLayerBand = {
   description: string;
   color: string;
   bg: string;
+  lightBg: string;
   border: string;
+  lightBorder: string;
   y: number;
   height: number;
   nodeCount: number;
@@ -268,6 +273,7 @@ type InventoryAsset = {
   platform: string;
   role: string;
   site: string;
+  topologyLayer?: TopologyLayerId;
   priority: "critical" | "high" | "medium" | "low";
   included: boolean;
 };
@@ -282,8 +288,21 @@ type LifecycleEoxRecord = {
   endOfSecurityVulSupportDate: string;
   endOfSvcAttachDate: string;
   lastDateOfSupport: string;
+  inputValue?: string;
   source?: "support-api" | "public-cisco";
   sourceNote?: string;
+};
+
+type LifecycleEoxLookupResult = {
+  productId: string;
+  normalizedProductId: string;
+  source: "support-api" | "public-cisco";
+  status: "matched" | "not-found";
+  matchedProductId: string;
+  bulletinNumber: string;
+  bulletinUrl: string;
+  datesFound: boolean;
+  attempts: string[];
 };
 
 type LifecycleHardwareRow = {
@@ -295,6 +314,7 @@ type LifecycleHardwareRow = {
   serial: string;
   source: string;
   eox?: LifecycleEoxRecord;
+  lookup?: LifecycleEoxLookupResult;
   consulted: boolean;
 };
 
@@ -306,6 +326,7 @@ type LifecycleSoftwareRow = {
   softwareVersion: string;
   source: string;
   eox?: LifecycleEoxRecord;
+  lookup?: LifecycleEoxLookupResult;
   consulted: boolean;
 };
 
@@ -336,6 +357,38 @@ type EvaluationRun = {
   generatedFindingIds?: string[];
 };
 
+type AIAssessmentAnalysisStatus = {
+  assessmentId: string;
+  jobs: AIAnalysisJobSnapshot[];
+  scopes: Array<{
+    id: AIAnalysisScopeId;
+    label: string;
+    description: string;
+    status: string;
+    inputHash: string | null;
+    updatedAt: string | null;
+    stale: boolean;
+  }>;
+};
+
+type AIAssessmentAnalysisResults = {
+  assessmentId: string;
+  results: Array<{
+    id: string;
+    scopeId: AIAnalysisScopeId;
+    status: string;
+    inputHash: string;
+    executiveSummary?: string | null;
+    findings: unknown;
+    recommendations: unknown;
+    updatedAt: string;
+  }>;
+};
+
+type RunEvaluationOptions = {
+  forceReevaluate?: boolean;
+};
+
 type AssessmentRecord = {
   id: string;
   ownerUserId: string;
@@ -345,6 +398,7 @@ type AssessmentRecord = {
   scope: ScopeDefinition;
   targetInventory: InventoryAsset[];
   lifecycleEoxRecords: Record<string, LifecycleEoxRecord>;
+  lifecycleEoxLookupResults: Record<string, LifecycleEoxLookupResult>;
   lifecycleConsultedProductIds: string[];
   lifecycleEoxMessage?: string;
   supportCoverageRecords: Record<string, SupportCoverageRecord>;
@@ -468,6 +522,16 @@ const riskTone: Record<RiskLevel, "neutral" | "info" | "success" | "warning" | "
   info: "neutral"
 };
 
+const riskSummaryOrder: RiskLevel[] = ["critical", "high", "medium", "low", "info"];
+
+const riskSummaryLabel: Record<RiskLevel, string> = {
+  critical: "Critica",
+  high: "Alta",
+  medium: "Media",
+  low: "Baja",
+  info: "Info"
+};
+
 const statusLabel: Record<Assessment["status"], string> = {
   draft: "Draft",
   evidence: "Evidencia",
@@ -522,7 +586,7 @@ const evidenceRequirements: Array<{ id: EvidenceRequirementId; label: string; sh
   { id: "operations-security", label: "Logs, NTP, reloj, redundancia, ambiente y seguridad/perimetro", shortLabel: "Operacion" }
 ];
 
-const topologyLayerOrder: TopologyLayerId[] = ["perimeter", "core", "datacenter", "campus", "other"];
+const topologyLayerOrder: TopologyLayerId[] = ["branches", "perimeter", "core", "datacenter", "campus", "other"];
 
 const topologyLayerConfig: Record<TopologyLayerId, {
   label: string;
@@ -530,15 +594,29 @@ const topologyLayerConfig: Record<TopologyLayerId, {
   description: string;
   color: string;
   bg: string;
+  lightBg: string;
   border: string;
+  lightBorder: string;
 }> = {
+  branches: {
+    label: "BRANCHES",
+    shortLabel: "Branches",
+    description: "Sucursales, sedes remotas y equipos branch que normalmente se conectan hacia perimetro/WAN.",
+    color: "#fbbf24",
+    bg: "#241d0b",
+    lightBg: "#fff7d6",
+    border: "#9a6b12",
+    lightBorder: "#eab308"
+  },
   perimeter: {
     label: "PERIMETRO / WAN EDGE",
     shortLabel: "Perimetro",
     description: "Routers WAN, Internet edge, firewalls, VPN y bordes externos.",
     color: "#fb7185",
     bg: "#22161b",
-    border: "#7f2a35"
+    lightBg: "#fff1f2",
+    border: "#7f2a35",
+    lightBorder: "#fb7185"
   },
   core: {
     label: "CORE / BACKBONE",
@@ -546,7 +624,9 @@ const topologyLayerConfig: Record<TopologyLayerId, {
     description: "Backbone real, core switching/routing y agregacion troncal explicita.",
     color: "#60a5fa",
     bg: "#142033",
-    border: "#2b5ea8"
+    lightBg: "#eff6ff",
+    border: "#2b5ea8",
+    lightBorder: "#60a5fa"
   },
   datacenter: {
     label: "DATACENTER NETWORKING",
@@ -554,7 +634,9 @@ const topologyLayerConfig: Record<TopologyLayerId, {
     description: "Nexus, spine/leaf, ACI, UCS/FI y fabric de datacenter.",
     color: "#a78bfa",
     bg: "#1d1830",
-    border: "#6d4bb6"
+    lightBg: "#f5f3ff",
+    border: "#6d4bb6",
+    lightBorder: "#8b5cf6"
   },
   campus: {
     label: "CAMPUS",
@@ -562,7 +644,9 @@ const topologyLayerConfig: Record<TopologyLayerId, {
     description: "Switching de distribucion/acceso, wireless y red de usuarios.",
     color: "#34d399",
     bg: "#10251f",
-    border: "#21765e"
+    lightBg: "#ecfdf5",
+    border: "#21765e",
+    lightBorder: "#10b981"
   },
   other: {
     label: "OTROS / NO CLASIFICADOS",
@@ -570,7 +654,9 @@ const topologyLayerConfig: Record<TopologyLayerId, {
     description: "Nodos sin rol claro o con evidencia insuficiente para ubicar capa.",
     color: "#94a3b8",
     bg: "#17202b",
-    border: "#475569"
+    lightBg: "#f1f5f9",
+    border: "#475569",
+    lightBorder: "#94a3b8"
   }
 };
 
@@ -579,6 +665,9 @@ const topologyNodeHeight = 92;
 
 export default function HomePage() {
   const postgresPersistenceEnabled = useRef(false);
+  const aiPollingTimerRef = useRef<number | null>(null);
+  const aiPollingInFlightRef = useRef(false);
+  const importedAIJobIdsRef = useRef<Set<string>>(new Set());
   const [isHydrated, setIsHydrated] = useState(false);
   const [users, setUsers] = useState<AppUser[]>(() => createDefaultUsers());
   const [currentUserId, setCurrentUserId] = useState("");
@@ -601,6 +690,7 @@ export default function HomePage() {
     message: "Cargando persistencia..."
   });
   const [documentTemplates, setDocumentTemplates] = useState<DocumentTemplateVersion[]>([]);
+  const [aiAnalysisStatusByAssessment, setAiAnalysisStatusByAssessment] = useState<Record<string, AIAssessmentAnalysisStatus>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -744,6 +834,85 @@ export default function HomePage() {
 
   const currentUser = users.find((user) => user.id === currentUserId && user.status === "active") ?? null;
   const selectedRecord = records.find((record) => record.id === selectedRecordId) ?? records[0];
+  const selectedAIAnalysisStatus = selectedRecord ? aiAnalysisStatusByAssessment[selectedRecord.id] : undefined;
+  const aiPollingEnabled = activeTab === "Evaluacion AI";
+  const selectedHasRunningAIJob = hasRunningAIJob(selectedAIAnalysisStatus);
+
+  useEffect(() => {
+    if (aiPollingTimerRef.current) {
+      window.clearTimeout(aiPollingTimerRef.current);
+      aiPollingTimerRef.current = null;
+    }
+    if (!isHydrated || !selectedRecord?.id || !aiPollingEnabled) return;
+    let cancelled = false;
+    const assessmentId = selectedRecord.id;
+
+    async function refresh() {
+      if (cancelled || aiPollingInFlightRef.current) return;
+      aiPollingInFlightRef.current = true;
+      let shouldContinuePolling = false;
+      try {
+        const status = await fetchAIAnalysisStatus(assessmentId).catch(() => null);
+        if (!status || cancelled) return;
+        shouldContinuePolling = hasRunningAIJob(status);
+        setAiAnalysisStatusByAssessment((current) => {
+          const previous = current[assessmentId];
+          if (previous && JSON.stringify(previous) === JSON.stringify(status)) return current;
+          return { ...current, [assessmentId]: status };
+        });
+      } finally {
+        aiPollingInFlightRef.current = false;
+        if (!cancelled && shouldContinuePolling) aiPollingTimerRef.current = window.setTimeout(refresh, 1800);
+      }
+    }
+
+    aiPollingTimerRef.current = window.setTimeout(refresh, selectedHasRunningAIJob ? 1000 : 250);
+    return () => {
+      cancelled = true;
+      if (aiPollingTimerRef.current) {
+        window.clearTimeout(aiPollingTimerRef.current);
+        aiPollingTimerRef.current = null;
+      }
+    };
+  }, [activeTab, isHydrated, aiPollingEnabled, selectedHasRunningAIJob, selectedRecord?.id]);
+
+  useEffect(() => {
+    if (!currentUser || !selectedRecord?.id || !selectedAIAnalysisStatus) return;
+    const latestJob = selectedAIAnalysisStatus.jobs[0];
+    if (!latestJob || latestJob.status === "queued" || latestJob.status === "running") return;
+    if (importedAIJobIdsRef.current.has(latestJob.id)) return;
+    importedAIJobIdsRef.current.add(latestJob.id);
+    const recordId = selectedRecord.id;
+    queueMicrotask(async () => {
+      const response = await fetch(`/api/ai-analysis/assessments/${recordId}/results`, { cache: "no-store" });
+      const payload = await response.json().catch(() => null) as AIAssessmentAnalysisResults | null;
+      if (!response.ok || !payload) return;
+      const jobScopeIds = new Set(latestJob.steps.map((step) => step.scopeId));
+      const findings = persistentAIResultsToFindings(
+        payload.results.filter((result) => latestJob.mode === "full" || jobScopeIds.has(result.scopeId)),
+        recordId
+      );
+
+      setRecords((current) =>
+        current.map((record) => {
+          if (record.id !== recordId || !canEditAssessment(currentUser, record)) return record;
+          const existingKeys = new Set(record.parsed.findings.map((finding) => `${finding.category}:${finding.title}:${finding.affectedAssets.join(",")}`));
+          const nextFindings = findings.filter((finding) => !existingKeys.has(`${finding.category}:${finding.title}:${finding.affectedAssets.join(",")}`));
+          return {
+            ...record,
+            parsed: {
+              ...record.parsed,
+              findings: [...record.parsed.findings, ...nextFindings]
+            },
+            evaluationRuns: markPersistentAIRuns(record.evaluationRuns, latestJob, nextFindings.length),
+            assessment: { ...record.assessment, status: nextFindings.length > 0 ? "review" : record.assessment.status },
+            updatedAt: new Date().toISOString()
+          };
+        })
+      );
+    });
+  }, [currentUser, selectedAIAnalysisStatus, selectedRecord?.id]);
+
   const activeFindings = useMemo(
     () => selectedRecord?.parsed.findings.filter((finding) => finding.status !== "discarded") ?? [],
     [selectedRecord]
@@ -757,10 +926,17 @@ export default function HomePage() {
     () => (selectedRecord ? getExecutiveRiskDashboard(selectedRecord) : null),
     [selectedRecord]
   );
-  const filteredRecords = records.filter((record) => {
-    const value = `${record.client.name} ${record.assessment.name} ${record.client.owner} ${record.client.industry}`.toLowerCase();
-    return value.includes(query.toLowerCase());
-  });
+  const filteredRecords = useMemo(() => {
+    const normalizedQuery = query.toLowerCase();
+    return records.filter((record) => {
+      const value = `${record.client.name} ${record.assessment.name} ${record.client.owner} ${record.client.industry}`.toLowerCase();
+      return value.includes(normalizedQuery);
+    });
+  }, [query, records]);
+  const dashboardExecutiveSummaries = useMemo(
+    () => new Map(filteredRecords.map((record) => [record.id, getExecutiveRiskDashboard(record)])),
+    [filteredRecords]
+  );
   const portfolio = useMemo(() => summarizePortfolio(records), [records]);
 
   function updateRecord(recordId: string, updater: (record: AssessmentRecord) => AssessmentRecord) {
@@ -901,10 +1077,31 @@ export default function HomePage() {
     }));
   }
 
+  function clearInventoryAssets() {
+    if (!confirmAction("Esto borrara todos los equipos del inventario objetivo para cargar una nueva version. Deseas continuar?")) return;
+    updateSelectedRecord((record) => ({
+      ...record,
+      targetInventory: [],
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
   function toggleInventoryAssetIncluded(assetId: string) {
     updateSelectedRecord((record) => ({
       ...record,
       targetInventory: record.targetInventory.map((asset) => (asset.id === assetId ? { ...asset, included: !asset.included } : asset)),
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function updateInventoryAssetTopologyLayer(assetId: string, topologyLayer: TopologyLayerId | null) {
+    updateSelectedRecord((record) => ({
+      ...record,
+      targetInventory: record.targetInventory.map((asset) => (
+        asset.id === assetId
+          ? { ...asset, topologyLayer: topologyLayer ?? undefined }
+          : asset
+      )),
       updatedAt: new Date().toISOString()
     }));
   }
@@ -941,6 +1138,7 @@ export default function HomePage() {
       evidenceFiles: nextEvidence,
       parsed: nextParsed,
       lifecycleEoxRecords: {},
+      lifecycleEoxLookupResults: {},
       lifecycleConsultedProductIds: [],
       lifecycleEoxMessage: "",
       supportCoverageRecords: {},
@@ -1068,6 +1266,7 @@ export default function HomePage() {
   }
 
   function removeEvidenceFile(fileId: string) {
+    if (!confirmAction("Esto borrara este archivo de evidencia STATUS/CONFIG y recalculara la informacion derivada. Deseas continuar?")) return;
     updateSelectedRecord((record) => {
       const nextEvidence = record.evidenceFiles.filter((file) => file.id !== fileId);
       const nextParsed = parseCiscoEvidence(nextEvidence);
@@ -1077,6 +1276,7 @@ export default function HomePage() {
         evidenceFiles: nextEvidence,
         parsed: nextParsed,
         lifecycleEoxRecords: {},
+        lifecycleEoxLookupResults: {},
         lifecycleConsultedProductIds: [],
         lifecycleEoxMessage: "",
         supportCoverageRecords: {},
@@ -1089,6 +1289,37 @@ export default function HomePage() {
         }
       };
     });
+  }
+
+  function clearEvidenceFiles() {
+    if (!confirmAction("Esto borrara todos los archivos de evidencia STATUS/CONFIG y limpiara la informacion derivada. Deseas continuar?")) return;
+    updateSelectedRecord((record) => ({
+      ...record,
+      evidenceFiles: [],
+      parsed: parseCiscoEvidence([]),
+      lifecycleEoxRecords: {},
+      lifecycleEoxLookupResults: {},
+      lifecycleConsultedProductIds: [],
+      lifecycleEoxMessage: "",
+      supportCoverageRecords: {},
+      supportCoverageConsultedSerials: [],
+      supportCoverageMessage: "",
+      updatedAt: new Date().toISOString(),
+      assessment: {
+        ...record.assessment,
+        status: "draft"
+      }
+    }));
+  }
+
+  function removePerformanceEvidenceFile(fileId: string) {
+    if (!confirmAction("Esto borrara este archivo de evidencia PERFORMANCE y recalculara las metricas derivadas. Deseas continuar?")) return;
+    updateSelectedRecord((record) => rebuildPerformanceState(record, record.performance.evidenceFiles.filter((file) => file.id !== fileId)));
+  }
+
+  function clearPerformanceEvidenceFiles() {
+    if (!confirmAction("Esto borrara todos los archivos de evidencia PERFORMANCE, metricas y hallazgos derivados. Deseas continuar?")) return;
+    updateSelectedRecord((record) => rebuildPerformanceState(record, []));
   }
 
   function toggleEvidenceRowSkip(assetId: string) {
@@ -1113,23 +1344,55 @@ export default function HomePage() {
     });
   }
 
-  async function runEvaluation(area: EvaluationArea | "complete") {
+  async function runEvaluation(area: EvaluationArea | "complete", options?: RunEvaluationOptions) {
     if (!selectedRecord) return;
-    let areas = area === "complete" ? evaluationAreas.map((item) => item.id) : [area];
-    let evaluationRecord = selectedRecord;
-
-    if (areas.includes("lifecycle")) {
-      try {
-        evaluationRecord = await consultLifecycleEox(selectedRecord.id, { silent: true, failOnError: true });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "No se pudo consultar Cisco EoX.";
-        blockEvaluationRun(selectedRecord.id, "lifecycle", message);
-        areas = areas.filter((item) => item !== "lifecycle");
-        if (area === "lifecycle") return;
-      }
+    const mode = area === "complete" ? "full" : "scope";
+    const scopeId = area === "complete" ? null : evaluationAreaToAIScope(area);
+    if (area === "complete") {
+      evaluationAreas.forEach((item) => startEvaluationRun(selectedRecord.id, item.id));
+    } else {
+      startEvaluationRun(selectedRecord.id, area);
+    }
+    const response = await fetch("/api/ai-analysis/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        assessmentId: selectedRecord.id,
+        mode,
+        scopeId,
+        forceReevaluate: Boolean(options?.forceReevaluate),
+        requestedBy: currentUser?.email ?? currentUser?.name ?? "local-user"
+      })
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      const message = payload?.error || "No se pudo crear el job AI.";
+      if (area !== "complete") blockEvaluationRun(selectedRecord.id, area, message);
+      return;
     }
 
-    await Promise.all(areas.map((currentArea) => runAiEvaluationForArea(evaluationRecord, currentArea)));
+    const status = await fetchAIAnalysisStatus(selectedRecord.id).catch(() => null);
+    if (status) setAiAnalysisStatusByAssessment((current) => ({ ...current, [selectedRecord.id]: status }));
+  }
+
+  async function cancelAnalysisJob(jobId: string) {
+    if (!selectedRecord) return;
+    const response = await fetch(`/api/ai-analysis/jobs/${jobId}/cancel`, { method: "POST" });
+    const payload = await response.json().catch(() => null);
+    if (payload?.job) {
+      const status = await fetchAIAnalysisStatus(selectedRecord.id).catch(() => null);
+      if (status) setAiAnalysisStatusByAssessment((current) => ({ ...current, [selectedRecord.id]: status }));
+    }
+  }
+
+  async function retryAnalysisJob(jobId: string) {
+    if (!selectedRecord) return;
+    const response = await fetch(`/api/ai-analysis/jobs/${jobId}/retry`, { method: "POST" });
+    const payload = await response.json().catch(() => null);
+    if (payload?.job) {
+      const status = await fetchAIAnalysisStatus(selectedRecord.id).catch(() => null);
+      if (status) setAiAnalysisStatusByAssessment((current) => ({ ...current, [selectedRecord.id]: status }));
+    }
   }
 
   async function consultLifecycleEox(recordId: string, options?: { silent?: boolean; failOnError?: boolean }) {
@@ -1153,11 +1416,13 @@ export default function HomePage() {
     try {
       const result = await fetchLifecycleEoxRecords(productIds, ciscoApiToken);
       const recordsMap = result.records;
+      const lookupResults = result.lookupResults;
       const sourceLabel = result.source === "public-cisco" ? "fuente publica Cisco" : "Cisco Support EoX API";
       const message = `${Object.keys(recordsMap).length} registros EoX encontrados para ${productIds.length} PIDs consultados via ${sourceLabel}.${result.warning ? ` ${result.warning}` : ""}`;
       const nextRecord = {
         ...record,
         lifecycleEoxRecords: recordsMap,
+        lifecycleEoxLookupResults: lookupResults,
         lifecycleConsultedProductIds: productIds,
         lifecycleEoxMessage: message,
         updatedAt: new Date().toISOString()
@@ -1165,6 +1430,7 @@ export default function HomePage() {
       updateRecord(recordId, (current) => ({
         ...current,
         lifecycleEoxRecords: recordsMap,
+        lifecycleEoxLookupResults: lookupResults,
         lifecycleConsultedProductIds: productIds,
         lifecycleEoxMessage: message,
         updatedAt: new Date().toISOString()
@@ -1219,9 +1485,10 @@ export default function HomePage() {
     }
   }
 
-  function resetEvaluation(area: EvaluationArea | "complete") {
+  async function resetEvaluation(area: EvaluationArea | "complete") {
     if (!selectedRecord) return;
     if (!confirmAction(area === "complete" ? "Esto limpiara todos los analisis generados. Deseas continuar?" : `Esto limpiara el analisis de ${evaluationAreaLabel(area)}. Deseas continuar?`)) return;
+    const recordId = selectedRecord.id;
 
     updateSelectedRecord((record) => {
       const areas = area === "complete" ? evaluationAreas.map((item) => item.id) : [area];
@@ -1263,6 +1530,7 @@ export default function HomePage() {
           status: nextFindings.length > 0 ? "review" : record.evidenceFiles.length > 0 ? "evidence" : "draft"
         },
         lifecycleEoxRecords: clearLifecycle ? {} : record.lifecycleEoxRecords,
+        lifecycleEoxLookupResults: clearLifecycle ? {} : record.lifecycleEoxLookupResults,
         lifecycleConsultedProductIds: clearLifecycle ? [] : record.lifecycleConsultedProductIds,
         lifecycleEoxMessage: clearLifecycle ? "" : record.lifecycleEoxMessage,
         supportCoverageRecords: clearLifecycle ? {} : record.supportCoverageRecords,
@@ -1273,6 +1541,16 @@ export default function HomePage() {
         updatedAt: new Date().toISOString()
       };
     });
+
+    const scopeId = area === "complete" ? null : evaluationAreaToAIScope(area);
+    const status = await resetPersistentAIAnalysisStatus(recordId, scopeId).catch(() => null);
+    setAiAnalysisStatusByAssessment((current) => {
+      if (status) return { ...current, [recordId]: status };
+      const next = { ...current };
+      delete next[recordId];
+      return next;
+    });
+    if (area === "complete") importedAIJobIdsRef.current.clear();
   }
 
   function resetLifecycleEox(recordId: string) {
@@ -1280,6 +1558,7 @@ export default function HomePage() {
     updateRecord(recordId, (record) => ({
       ...record,
       lifecycleEoxRecords: {},
+      lifecycleEoxLookupResults: {},
       lifecycleConsultedProductIds: [],
       lifecycleEoxMessage: "",
       supportCoverageRecords: {},
@@ -1325,7 +1604,14 @@ export default function HomePage() {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload?.error || "No se pudo completar la evaluacion AI.");
 
-      updateEvaluationProgress(record.id, area, 80, `Respuesta AI recibida (${payload.model ?? "modelo configurado"})`);
+      updateEvaluationProgress(
+        record.id,
+        area,
+        80,
+        payload?.batchCount && payload.batchCount > 1
+          ? `Respuesta AI recibida (${payload.model ?? "modelo configurado"} · ${payload.batchCount} batches)`
+          : `Respuesta AI recibida (${payload.model ?? "modelo configurado"})`
+      );
       completeEvaluationRun(record.id, area, payload.findings ?? [], payload.suggestedFindings ?? [], correlationCandidates, aiContext);
     } catch (error) {
       blockEvaluationRun(record.id, area, error instanceof Error ? error.message : "Error desconocido ejecutando AI.");
@@ -1569,6 +1855,7 @@ export default function HomePage() {
       evidenceFiles: [],
       parsed: emptyParsed,
       lifecycleEoxRecords: {},
+      lifecycleEoxLookupResults: {},
       lifecycleConsultedProductIds: [],
       lifecycleEoxMessage: "",
       supportCoverageRecords: {},
@@ -1846,7 +2133,7 @@ export default function HomePage() {
           users={users}
           currentUser={currentUser}
           portfolio={portfolio}
-          executiveSummaries={new Map(filteredRecords.map((record) => [record.id, getExecutiveRiskDashboard(record)]))}
+          executiveSummaries={dashboardExecutiveSummaries}
           query={query}
           form={form}
           onQueryChange={setQuery}
@@ -1872,6 +2159,7 @@ export default function HomePage() {
           roadmap={roadmap}
           executiveSummary={selectedExecutiveSummary}
           documentTemplates={documentTemplates}
+          aiAnalysisStatus={selectedAIAnalysisStatus}
           onBack={() => setWorkspaceView("dashboard")}
           onTabChange={setActiveTab}
           onEdit={() => openEditForm(selectedRecord)}
@@ -1881,12 +2169,19 @@ export default function HomePage() {
           onImportAssets={importInventoryAssets}
           onRemoveAsset={removeInventoryAsset}
           onToggleAssetIncluded={toggleInventoryAssetIncluded}
+          onUpdateAssetTopologyLayer={updateInventoryAssetTopologyLayer}
+          onClearAssets={clearInventoryAssets}
           onRemoveDuplicateAssets={removeDuplicateInventoryAssets}
           onEvidenceUpload={handleEvidenceUpload}
           onPerformanceEvidenceUpload={handlePerformanceEvidenceUpload}
           onRemoveEvidenceFile={removeEvidenceFile}
+          onClearEvidenceFiles={clearEvidenceFiles}
+          onRemovePerformanceEvidenceFile={removePerformanceEvidenceFile}
+          onClearPerformanceEvidenceFiles={clearPerformanceEvidenceFiles}
           onToggleEvidenceRowSkip={toggleEvidenceRowSkip}
           onRunEvaluation={runEvaluation}
+          onCancelAnalysisJob={cancelAnalysisJob}
+          onRetryAnalysisJob={retryAnalysisJob}
           onResetEvaluation={resetEvaluation}
           onProcessPerformance={processPerformanceForSelectedRecord}
           onRunPerformanceAi={markPerformanceAiReviewed}
@@ -2320,6 +2615,7 @@ function DashboardWorkspace({
             <div className="space-y-2">
               {records.map((record) => {
                 const progress = assessmentProgress(record);
+                const effectiveParsed = effectiveParsedNetworkData(record);
                 return (
                   <article key={record.id} className="rounded-md border border-border bg-white p-3 transition hover:border-primary/45">
                     <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border pb-2">
@@ -2373,8 +2669,8 @@ function DashboardWorkspace({
                         <p className="text-xs font-semibold uppercase text-muted-foreground">Datos</p>
                         <div className="mt-1.5 grid flex-1 grid-cols-4 gap-1.5 xl:grid-cols-2">
                           <DashboardDataPoint label="Evidencias" value={record.evidenceFiles.length} />
-                          <DashboardDataPoint label="Equipos" value={record.parsed.devices.length} />
-                          <DashboardDataPoint label="Links" value={record.parsed.relations.length} />
+                          <DashboardDataPoint label="Equipos" value={effectiveParsed.devices.length} />
+                          <DashboardDataPoint label="Links" value={effectiveParsed.relations.length} />
                           <DashboardDataPoint label="Hallazgos" value={record.parsed.findings.length} />
                         </div>
                       </div>
@@ -2505,6 +2801,7 @@ function AssessmentWorkspace({
   roadmap,
   executiveSummary,
   documentTemplates,
+  aiAnalysisStatus,
   onBack,
   onTabChange,
   onEdit,
@@ -2514,12 +2811,19 @@ function AssessmentWorkspace({
   onImportAssets,
   onRemoveAsset,
   onToggleAssetIncluded,
+  onUpdateAssetTopologyLayer,
+  onClearAssets,
   onRemoveDuplicateAssets,
   onEvidenceUpload,
   onPerformanceEvidenceUpload,
   onRemoveEvidenceFile,
+  onClearEvidenceFiles,
+  onRemovePerformanceEvidenceFile,
+  onClearPerformanceEvidenceFiles,
   onToggleEvidenceRowSkip,
   onRunEvaluation,
+  onCancelAnalysisJob,
+  onRetryAnalysisJob,
   onResetEvaluation,
   onProcessPerformance,
   onRunPerformanceAi,
@@ -2544,6 +2848,7 @@ function AssessmentWorkspace({
   roadmap: ReturnType<typeof buildRoadmap>;
   executiveSummary: ExecutiveRiskDashboard | null;
   documentTemplates: DocumentTemplateVersion[];
+  aiAnalysisStatus?: AIAssessmentAnalysisStatus;
   onBack: () => void;
   onTabChange: (tab: Tab) => void;
   onEdit: () => void;
@@ -2553,12 +2858,19 @@ function AssessmentWorkspace({
   onImportAssets: (assets: Array<Omit<InventoryAsset, "id">>) => void;
   onRemoveAsset: (assetId: string) => void;
   onToggleAssetIncluded: (assetId: string) => void;
+  onUpdateAssetTopologyLayer: (assetId: string, topologyLayer: TopologyLayerId | null) => void;
+  onClearAssets: () => void;
   onRemoveDuplicateAssets: () => void;
   onEvidenceUpload: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onPerformanceEvidenceUpload: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onRemoveEvidenceFile: (fileId: string) => void;
+  onClearEvidenceFiles: () => void;
+  onRemovePerformanceEvidenceFile: (fileId: string) => void;
+  onClearPerformanceEvidenceFiles: () => void;
   onToggleEvidenceRowSkip: (assetId: string) => void;
-  onRunEvaluation: (area: EvaluationArea | "complete") => void;
+  onRunEvaluation: (area: EvaluationArea | "complete", options?: RunEvaluationOptions) => void;
+  onCancelAnalysisJob: (jobId: string) => void;
+  onRetryAnalysisJob: (jobId: string) => void;
   onResetEvaluation: (area: EvaluationArea | "complete") => void;
   onProcessPerformance: () => void;
   onRunPerformanceAi: () => void;
@@ -2572,6 +2884,7 @@ function AssessmentWorkspace({
   onRemoveAssessmentShare: (recordId: string, userId: string) => void;
 }) {
   const [assessmentPanelOpen, setAssessmentPanelOpen] = useState(false);
+  const effectiveParsed = useMemo(() => effectiveParsedNetworkData(record), [record]);
 
   return (
     <div className="mx-auto max-w-7xl space-y-4 px-4 py-5 sm:px-5">
@@ -2665,7 +2978,7 @@ function AssessmentWorkspace({
         <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-3">
           <MetricPanel label="Progreso" value={`${assessmentProgress(record)}%`} />
           <MetricPanel label="Evidencias" value={record.evidenceFiles.length} />
-          <MetricPanel label="Equipos" value={record.parsed.devices.length} />
+          <MetricPanel label="Equipos" value={effectiveParsed.devices.length} />
           <MetricPanel label="Validados" value={validatedFindings.length} />
         </div>
 
@@ -2687,6 +3000,8 @@ function AssessmentWorkspace({
             onImportAssets={canEdit ? onImportAssets : () => undefined}
             onRemoveAsset={canEdit ? onRemoveAsset : () => undefined}
             onToggleAssetIncluded={canEdit ? onToggleAssetIncluded : () => undefined}
+            onUpdateAssetTopologyLayer={canEdit ? onUpdateAssetTopologyLayer : () => undefined}
+            onClearAssets={canEdit ? onClearAssets : () => undefined}
             onRemoveDuplicateAssets={canEdit ? onRemoveDuplicateAssets : () => undefined}
           />
         )}
@@ -2702,6 +3017,9 @@ function AssessmentWorkspace({
             onEvidenceUpload={canEdit ? onEvidenceUpload : () => undefined}
             onPerformanceEvidenceUpload={canEdit ? onPerformanceEvidenceUpload : () => undefined}
             onRemoveEvidenceFile={canEdit ? onRemoveEvidenceFile : () => undefined}
+            onClearEvidenceFiles={canEdit ? onClearEvidenceFiles : () => undefined}
+            onRemovePerformanceEvidenceFile={canEdit ? onRemovePerformanceEvidenceFile : () => undefined}
+            onClearPerformanceEvidenceFiles={canEdit ? onClearPerformanceEvidenceFiles : () => undefined}
             onToggleEvidenceRowSkip={canEdit ? onToggleEvidenceRowSkip : () => undefined}
           />
         )}
@@ -2724,7 +3042,10 @@ function AssessmentWorkspace({
         {activeTab === "Evaluacion AI" && (
           <AiEvaluationTab
             record={record}
+            aiAnalysisStatus={aiAnalysisStatus}
             onRunEvaluation={canEdit ? onRunEvaluation : () => undefined}
+            onCancelAnalysisJob={canEdit ? onCancelAnalysisJob : () => undefined}
+            onRetryAnalysisJob={canEdit ? onRetryAnalysisJob : () => undefined}
             onResetEvaluation={canEdit ? onResetEvaluation : () => undefined}
             onUpdateFinding={canEdit ? onUpdateFinding : () => undefined}
             onProcessPerformance={canEdit ? onProcessPerformance : () => undefined}
@@ -2869,8 +3190,9 @@ function PerformanceTab({
   const [filters, setFilters] = useState<PerformanceDashboardFilters>({ severity: "all", metricType: "all", sampleType: "all", timeWindow: "all", showVisibilityGaps: true });
   const [selectedMetric, setSelectedMetric] = useState<PerformanceChartPoint | null>(null);
   const performance = record.performance;
+  const effectiveParsed = useMemo(() => effectiveParsedNetworkData(record), [record]);
   const expectedDevices = record.targetInventory.filter((asset) => asset.included).map((asset) => asset.hostname);
-  const criticalInterfaces = record.parsed.interfaces
+  const criticalInterfaces = effectiveParsed.interfaces
     .filter((intf) => /uplink|trunk|wan|core|firewall|internet|server/i.test(`${intf.description ?? ""} ${intf.name}`))
     .map((intf) => ({ deviceId: intf.hostname, interfaceId: intf.name }));
   const executiveData = buildExecutivePerformanceViewData({
@@ -3034,35 +3356,106 @@ function PerformanceHeader({
   );
 }
 
+type PerformanceKpiTooltipState = {
+  kpi: PerformanceKpiRingData;
+  left: number;
+  top: number;
+};
+
 function PerformanceKpiStickyStrip({ kpis }: { kpis: PerformanceKpiRingData[]; analysisMode: PerformanceAnalysisMode }) {
+  const [activeTooltip, setActiveTooltip] = useState<PerformanceKpiTooltipState | null>(null);
+  const stripRef = useRef<HTMLDivElement | null>(null);
+
+  function showTooltip(kpi: PerformanceKpiRingData, element: HTMLElement) {
+    const rect = element.getBoundingClientRect();
+    const stripRect = stripRef.current?.getBoundingClientRect();
+    const tooltipWidth = 260;
+    const relativeLeft = stripRect ? rect.left - stripRect.left : rect.left;
+    const relativeTop = stripRect ? rect.bottom - stripRect.top : rect.bottom;
+    const maxLeft = Math.max(12, (stripRect?.width ?? window.innerWidth) - tooltipWidth - 12);
+    const left = Math.min(Math.max(relativeLeft + rect.width / 2 - tooltipWidth / 2, 12), maxLeft);
+    const top = relativeTop + 8;
+    setActiveTooltip({ kpi, left, top });
+  }
+
   return (
-    <div className="sticky top-0 z-20 rounded-md border border-border bg-background/95 p-2 shadow-sm backdrop-blur">
+    <div ref={stripRef} className="relative sticky top-0 z-20 rounded-md border border-border bg-background/95 p-2 shadow-sm backdrop-blur">
       <div className="grid grid-cols-[repeat(6,minmax(118px,1fr))] gap-2 overflow-x-auto">
         {kpis.map((kpi) => (
-          <PerformanceKpiCompactCard key={kpi.key} kpi={kpi} />
+          <PerformanceKpiCompactCard
+            key={kpi.key}
+            kpi={kpi}
+            onShowTooltip={showTooltip}
+            onHideTooltip={() => setActiveTooltip(null)}
+          />
         ))}
       </div>
+      {activeTooltip && <PerformanceKpiTooltip tooltip={activeTooltip} />}
     </div>
   );
 }
 
-function PerformanceKpiCompactCard({ kpi }: { kpi: PerformanceKpiRingData }) {
+function PerformanceKpiCompactCard({
+  kpi,
+  onShowTooltip,
+  onHideTooltip
+}: {
+  kpi: PerformanceKpiRingData;
+  onShowTooltip: (kpi: PerformanceKpiRingData, element: HTMLElement) => void;
+  onHideTooltip: () => void;
+}) {
   const color = performanceSeverityCssColor(kpi.severity);
+  const tooltip = performanceKpiTooltipText(kpi);
   return (
     <div
-      className="grid min-h-14 min-w-0 grid-cols-[30px_minmax(0,1fr)] items-center gap-2 rounded-md border border-border bg-card px-2.5 py-2 text-left shadow-sm"
-      title={kpi.helper}
+      className="grid min-h-14 min-w-0 cursor-help grid-cols-[30px_minmax(0,1fr)] items-center gap-2 rounded-md border border-border bg-card px-2.5 py-2 text-left shadow-sm transition-colors hover:border-primary/50"
+      aria-label={tooltip}
+      tabIndex={0}
+      onPointerEnter={(event) => onShowTooltip(kpi, event.currentTarget)}
+      onPointerLeave={onHideTooltip}
+      onMouseEnter={(event) => onShowTooltip(kpi, event.currentTarget)}
+      onMouseLeave={onHideTooltip}
+      onFocus={(event) => onShowTooltip(kpi, event.currentTarget)}
+      onBlur={onHideTooltip}
     >
       <div className="flex h-8 w-8 items-center justify-center rounded-md border border-border bg-muted/30" style={{ color }}>
         <PerformanceKpiIcon kpiKey={kpi.key} />
       </div>
       <div className="min-w-0">
-        <p className="truncate text-[10px] font-semibold uppercase text-muted-foreground">{kpiCompactLabel(kpi)}</p>
+        <div className="flex min-w-0 items-center gap-1">
+          <p className="truncate text-[10px] font-semibold uppercase text-muted-foreground">{kpiCompactLabel(kpi)}</p>
+          <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border border-border text-[9px] font-bold leading-none text-muted-foreground" aria-hidden="true">
+            ?
+          </span>
+        </div>
         <div className="mt-0.5 flex min-w-0 items-baseline gap-1.5">
           <p className="truncate text-base font-semibold leading-none text-foreground">{kpiCompactValue(kpi)}</p>
           <span className="truncate text-[10px] font-semibold uppercase text-muted-foreground">{kpiCompactContext(kpi)}</span>
         </div>
       </div>
+    </div>
+  );
+}
+
+function PerformanceKpiTooltip({ tooltip }: { tooltip: PerformanceKpiTooltipState }) {
+  const help = performanceKpiHelpContent[tooltip.kpi.key] ?? {
+    title: tooltip.kpi.label,
+    description: tooltip.kpi.helper,
+    interpretation: "Revise este KPI junto con la evidencia relacionada."
+  };
+  return (
+    <div
+      className="pointer-events-none absolute z-50 w-[260px] rounded-md border border-border bg-[hsl(var(--surface-raised))] px-3 py-2 text-left text-foreground shadow-xl ring-1 ring-black/10 dark:ring-white/10"
+      style={{ left: tooltip.left, top: tooltip.top }}
+      role="tooltip"
+    >
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-xs font-semibold text-foreground">{help.title}</p>
+        <span className="shrink-0 rounded border border-border bg-muted/40 px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">
+          {kpiCompactValue(tooltip.kpi)} {kpiCompactContext(tooltip.kpi)}
+        </span>
+      </div>
+      <p className="mt-1 text-[11px] leading-snug text-muted-foreground">{help.description}</p>
     </div>
   );
 }
@@ -3099,6 +3492,53 @@ function kpiCompactContext(kpi: PerformanceKpiRingData) {
   if (kpi.key === "alert-interfaces") return "interfaces";
   if (kpi.key === "validated") return "hallazgos";
   return kpi.max === 100 ? "score" : `max ${kpi.max}`;
+}
+
+const performanceKpiHelpContent: Record<string, { title: string; description: string; interpretation: string }> = {
+  risk: {
+    title: "Risk Score",
+    description: "Riesgo agregado por saturacion, errores, drops, recursos e inestabilidad.",
+    interpretation: "Mientras mas alto sea el valor, mayor es la probabilidad de degradacion o impacto operativo."
+  },
+  confidence: {
+    title: "Confidence",
+    description: "Confianza del analisis segun cobertura, trazabilidad y profundidad de la evidencia.",
+    interpretation: "Un score bajo indica que se necesita mas evidencia antes de tomar conclusiones firmes."
+  },
+  "device-coverage": {
+    title: "Device Coverage",
+    description: "Equipos del alcance con al menos una metrica de performance reconocida.",
+    interpretation: "Ayuda a saber si el assessment representa la red completa o solo una parte del inventario."
+  },
+  "historical-depth": {
+    title: "Historical Depth",
+    description: "Evidencia historica disponible para analizar tendencias y recurrencia.",
+    interpretation: "0% indica que la data es principalmente puntual o snapshot, por lo que no confirma tendencias."
+  },
+  "alert-interfaces": {
+    title: "Alert IFs",
+    description: "Interfaces con metricas en warning, high o critical.",
+    interpretation: "Sirve para ubicar rapidamente donde hay senales de congestion o degradacion."
+  },
+  validated: {
+    title: "Validated Findings",
+    description: "Hallazgos de performance confirmados por el arquitecto.",
+    interpretation: "Diferencia observaciones preliminares de hallazgos listos para reporte o plan de accion."
+  }
+};
+
+function performanceKpiTooltipText(kpi: PerformanceKpiRingData) {
+  const help = performanceKpiHelpContent[kpi.key] ?? {
+    title: kpi.label,
+    description: kpi.helper,
+    interpretation: "Revise este KPI junto con la evidencia y los hallazgos relacionados."
+  };
+  const currentValue = `${kpiCompactValue(kpi)} ${kpiCompactContext(kpi)}`.trim();
+  return [
+    help.title,
+    help.description,
+    `Valor actual: ${currentValue}.`
+  ].join("\n");
 }
 
 function PerformanceEmptyStateNotices({ dashboard, performance }: { dashboard: ReturnType<typeof buildPerformanceDashboardData>; performance: PerformanceState }) {
@@ -4406,9 +4846,9 @@ function PerformanceMetricDrawer({
         <MetricDetail label="Valor" value={`${metric.value}${metric.unit}`} />
         <MetricDetail label="Umbral warning/critical" value={`${metric.thresholdWarning}/${metric.thresholdCritical}`} />
         <MetricDetail label="Severidad" value={metric.severity} />
-        <MetricDetail label="Archivo fuente" value={metric.source} />
-        <MetricDetail label="Evidence file ID" value={metric.evidenceFileId} />
-        <MetricDetail label="Comando origen" value={primaryMetric.evidenceCommand ?? "No identificado"} />
+        <MetricDetail label="Archivo fuente" value={metric.source} wide />
+        <MetricDetail label="Evidence file ID" value={metric.evidenceFileId} wide />
+        <MetricDetail label="Comando origen" value={primaryMetric.evidenceCommand ?? "No identificado"} wide />
         <MetricDetail label="Tipo de fuente" value={metric.evidenceSourceType ?? "No identificado"} />
         <MetricDetail label="Ventana" value={`${primaryMetric.sampleType} · ${primaryMetric.timeWindow}`} />
         <MetricDetail label="Confianza" value={`${metric.confidence}%`} />
@@ -4417,13 +4857,13 @@ function PerformanceMetricDrawer({
         <p className="text-xs font-semibold uppercase text-muted-foreground">Trazabilidad de evidencia</p>
         <div className="mt-2 max-h-72 space-y-2 overflow-auto">
           {metric.metrics.map((item) => (
-            <div key={item.id} className="rounded-md border border-border bg-card px-3 py-2 text-xs">
-              <p className="font-semibold">{item.metricType.replace(/_/g, " ")} · {item.value}{item.unit}</p>
-              <p className="mt-1 text-muted-foreground">metricId: {item.id}</p>
-              <p className="text-muted-foreground">fileId: {item.evidenceFileId}</p>
-              <p className="text-muted-foreground">archivo: {item.source}</p>
-              <p className="text-muted-foreground">comando: {item.evidenceCommand ?? "No identificado"}</p>
-              <p className="text-muted-foreground">muestra: {item.sampleType} · {item.timeWindow}</p>
+            <div key={item.id} className="min-w-0 rounded-md border border-border bg-card px-3 py-2 text-xs">
+              <p className="break-words font-semibold">{item.metricType.replace(/_/g, " ")} · {item.value}{item.unit}</p>
+              <p className="mt-1 break-all text-muted-foreground">metricId: {item.id}</p>
+              <p className="break-all text-muted-foreground">fileId: {item.evidenceFileId}</p>
+              <p className="break-words text-muted-foreground">archivo: {item.source}</p>
+              <p className="break-words text-muted-foreground">comando: {item.evidenceCommand ?? "No identificado"}</p>
+              <p className="break-words text-muted-foreground">muestra: {item.sampleType} · {item.timeWindow}</p>
             </div>
           ))}
         </div>
@@ -4449,11 +4889,11 @@ function PerformanceMetricDrawer({
   );
 }
 
-function MetricDetail({ label, value }: { label: string; value: React.ReactNode }) {
+function MetricDetail({ label, value, wide = false }: { label: string; value: React.ReactNode; wide?: boolean }) {
   return (
-    <div className="rounded-md border border-border bg-card px-3 py-2">
+    <div className={cn("min-w-0 rounded-md border border-border bg-card px-3 py-2", wide && "sm:col-span-2")}>
       <p className="text-xs text-muted-foreground">{label}</p>
-      <p className="mt-1 text-sm font-semibold">{value}</p>
+      <p className={cn("mt-1 text-sm font-semibold leading-snug", wide ? "break-words" : "break-words")}>{value}</p>
     </div>
   );
 }
@@ -4676,15 +5116,22 @@ function TopologyTab({ record }: { record: AssessmentRecord }) {
   const [viewport, setViewport] = useState({ zoom: 1, translateX: 24, translateY: 24 });
   const [hasInitialFit, setHasInitialFit] = useState(false);
   const [userAdjustedView, setUserAdjustedView] = useState(false);
+  const graphScrollRef = useRef<HTMLDivElement | null>(null);
+  const effectiveParsed = useMemo(() => effectiveParsedNetworkData(record), [record]);
   const graph = useMemo(() => buildTopologyGraph(record, layerOverrides, visibleLayerIds, collapsedLayerIds), [record, layerOverrides, visibleLayerIds, collapsedLayerIds]);
   const selectedNode = selectedNodeId ? graph.nodes.find((node) => node.id === selectedNodeId) ?? null : null;
   const focusedNodeIds = selectedNode ? directTopologyNodeIds(graph, selectedNode.id) : new Set<string>();
   const focusedEdgeIds = selectedNode ? directTopologyEdgeIds(graph, selectedNode.id) : new Set<string>();
-  const hasRelations = record.parsed.relations.length > 0;
+  const hasRelations = effectiveParsed.relations.length > 0;
   const graphViewportWidth = detailPanelOpen ? 940 : 1280;
   const graphViewportHeight = 680;
-  const graphCanvasWidth = Math.max(graphViewportWidth, graph.width * viewport.zoom + Math.abs(viewport.translateX) + 120);
-  const graphCanvasHeight = Math.max(graphViewportHeight, graph.height * viewport.zoom + Math.abs(viewport.translateY) + 120);
+  const graphBounds = useMemo(() => topologyVisibleBounds(graph), [graph]);
+  const transformedMinX = graphBounds.minX * viewport.zoom + viewport.translateX;
+  const transformedMaxX = graphBounds.maxX * viewport.zoom + viewport.translateX;
+  const transformedMinY = graphBounds.minY * viewport.zoom + viewport.translateY;
+  const transformedMaxY = graphBounds.maxY * viewport.zoom + viewport.translateY;
+  const graphCanvasWidth = Math.max(graphViewportWidth, transformedMaxX + Math.max(96, -transformedMinX + 96));
+  const graphCanvasHeight = Math.max(graphViewportHeight, transformedMaxY + Math.max(96, -transformedMinY + 96));
   const visibleNodeIds = new Set(graph.nodes.map((node) => node.id));
   const visibleEdges = graph.edges.filter((edge) => visibleNodeIds.has(edge.sourceId) && visibleNodeIds.has(edge.targetId));
 
@@ -4695,13 +5142,17 @@ function TopologyTab({ record }: { record: AssessmentRecord }) {
   function showGraphView() {
     setView("graph");
     if (!hasInitialFit && !userAdjustedView) {
-      setViewport(calculateTopologyFitView(graph, graphViewportWidth, graphViewportHeight, detailPanelOpen));
+      setViewport(calculateTopologyFitView(graph, graphScrollRef.current?.clientWidth ?? graphViewportWidth, graphScrollRef.current?.clientHeight ?? graphViewportHeight));
       setHasInitialFit(true);
     }
   }
 
   function fitGraph() {
-    setViewport(calculateTopologyFitView(graph, graphViewportWidth, graphViewportHeight, detailPanelOpen));
+    setViewport(calculateTopologyFitView(graph, graphScrollRef.current?.clientWidth ?? graphViewportWidth, graphScrollRef.current?.clientHeight ?? graphViewportHeight));
+    if (graphScrollRef.current) {
+      graphScrollRef.current.scrollLeft = 0;
+      graphScrollRef.current.scrollTop = 0;
+    }
     setUserAdjustedView(true);
   }
 
@@ -4710,27 +5161,6 @@ function TopologyTab({ record }: { record: AssessmentRecord }) {
       ...current,
       zoom: clampZoom(Number((current.zoom + delta).toFixed(2)), graph.nodes.length)
     }));
-    setUserAdjustedView(true);
-  }
-
-  function zoomGraphAtPoint(event: React.WheelEvent<HTMLDivElement>) {
-    event.preventDefault();
-    const rect = event.currentTarget.getBoundingClientRect();
-    const pointerX = event.clientX - rect.left + event.currentTarget.scrollLeft;
-    const pointerY = event.clientY - rect.top + event.currentTarget.scrollTop;
-    const delta = event.deltaY > 0 ? -0.08 : 0.08;
-
-    setViewport((current) => {
-      const nextZoom = clampZoom(Number((current.zoom + delta).toFixed(2)), graph.nodes.length);
-      if (nextZoom === current.zoom) return current;
-      const graphX = (pointerX - current.translateX) / current.zoom;
-      const graphY = (pointerY - current.translateY) / current.zoom;
-      return {
-        zoom: nextZoom,
-        translateX: Number((pointerX - graphX * nextZoom).toFixed(2)),
-        translateY: Number((pointerY - graphY * nextZoom).toFixed(2))
-      };
-    });
     setUserAdjustedView(true);
   }
 
@@ -4836,11 +5266,14 @@ function TopologyTab({ record }: { record: AssessmentRecord }) {
                   onToggleCollapsed={toggleLayerCollapse}
                 />
               </div>
-              <div className="h-[680px] overflow-auto" onWheel={zoomGraphAtPoint}>
+              <div ref={graphScrollRef} className="h-[680px] overflow-auto">
                 <div style={{ width: graphCanvasWidth, height: graphCanvasHeight }}>
                   <svg className="block" width={graphCanvasWidth} height={graphCanvasHeight}>
                     <g transform={`translate(${viewport.translateX}, ${viewport.translateY}) scale(${viewport.zoom})`}>
                       <defs>
+                        <marker id="topology-arrow-start" markerWidth="8" markerHeight="8" refX="1" refY="4" orient="auto" markerUnits="strokeWidth">
+                          <path d="M 8 0 L 0 4 L 8 8 z" fill="#64748b" />
+                        </marker>
                         <marker id="topology-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
                           <path d="M 0 0 L 8 4 L 0 8 z" fill="#64748b" />
                         </marker>
@@ -4895,24 +5328,79 @@ function TopologyTab({ record }: { record: AssessmentRecord }) {
 }
 
 function TopologyRelationsView({ record }: { record: AssessmentRecord }) {
+  const effectiveParsed = effectiveParsedNetworkData(record);
+  const groups = topologyRelationGroups(effectiveParsed.relations);
+
   return (
-    <div className="grid gap-3 md:grid-cols-2">
-      {record.parsed.relations.map((relation) => (
-        <div key={relation.id} className="rounded-md border border-border p-3">
-          <div className="flex items-center justify-between gap-2">
-            <Badge tone={relation.protocol === "cdp" ? "info" : "success"}>{relation.protocol.toUpperCase()}</Badge>
-            <span className="text-xs text-muted-foreground">{Math.round(relation.confidence * 100)}%</span>
+    <div className="space-y-3">
+      {groups.map((group) => (
+        <section key={group.hostname} className="topology-relation-group overflow-hidden rounded-md border border-border">
+          <div className="topology-relation-group-header flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2">
+            <div className="min-w-0">
+              <h3 className="truncate text-sm font-semibold">{group.hostname}</h3>
+              <p className="text-xs text-muted-foreground">{group.relations.length} relaciones descubiertas</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {group.cdpCount > 0 && <Badge tone="info">CDP {group.cdpCount}</Badge>}
+              {group.lldpCount > 0 && <Badge tone="success">LLDP {group.lldpCount}</Badge>}
+            </div>
           </div>
-          <div className="mt-3 grid grid-cols-[1fr_auto_1fr] items-center gap-3 text-sm">
-            <Endpoint host={relation.localHostname} port={relation.localInterface} />
-            <span className="text-muted-foreground">→</span>
-            <Endpoint host={relation.remoteHostname} port={relation.remoteInterface} />
+          <div className="grid gap-2 p-2.5 md:grid-cols-2 xl:grid-cols-3">
+            {group.relations.map((relation) => (
+              <CompactTopologyRelationCard key={relation.id} relation={relation} />
+            ))}
           </div>
-          {relation.managementIp && <p className="mt-3 text-xs text-muted-foreground">IP gestion: {relation.managementIp}</p>}
-        </div>
+        </section>
       ))}
     </div>
   );
+}
+
+function CompactTopologyRelationCard({ relation }: { relation: NeighborRelation }) {
+  return (
+    <article className="min-w-0 rounded-md border border-border bg-muted/20 px-2.5 py-2">
+      <div className="flex items-center justify-between gap-2">
+        <Badge tone={relation.protocol === "cdp" ? "info" : "success"}>{relation.protocol.toUpperCase()}</Badge>
+        <span className="shrink-0 text-[11px] font-medium text-muted-foreground">{Math.round(relation.confidence * 100)}%</span>
+      </div>
+      <div className="mt-2 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1.25fr)] items-center gap-2 text-xs">
+        <p className="truncate rounded border border-border bg-background/60 px-2 py-1 font-medium" title={relation.localInterface}>
+          {relation.localInterface}
+        </p>
+        <span className="text-muted-foreground">→</span>
+        <div className="min-w-0 rounded border border-border bg-background/60 px-2 py-1">
+          <p className="truncate font-semibold" title={relation.remoteHostname}>{relation.remoteHostname}</p>
+          <p className="truncate text-[11px] text-muted-foreground" title={relation.remoteInterface}>{relation.remoteInterface}</p>
+        </div>
+      </div>
+      {relation.managementIp && (
+        <p className="mt-1.5 truncate text-[11px] text-muted-foreground" title={`IP gestion: ${relation.managementIp}`}>
+          IP gestion: {relation.managementIp}
+        </p>
+      )}
+    </article>
+  );
+}
+
+function topologyRelationGroups(relations: NeighborRelation[]) {
+  const groups = new Map<string, NeighborRelation[]>();
+  for (const relation of relations) {
+    const hostname = relation.localHostname || "Sin dispositivo local";
+    groups.set(hostname, [...(groups.get(hostname) ?? []), relation]);
+  }
+
+  return Array.from(groups.entries())
+    .map(([hostname, groupRelations]) => ({
+      hostname,
+      cdpCount: groupRelations.filter((relation) => relation.protocol === "cdp").length,
+      lldpCount: groupRelations.filter((relation) => relation.protocol === "lldp").length,
+      relations: groupRelations.sort((left, right) => (
+        left.remoteHostname.localeCompare(right.remoteHostname) ||
+        left.localInterface.localeCompare(right.localInterface) ||
+        left.remoteInterface.localeCompare(right.remoteInterface)
+      ))
+    }))
+    .sort((left, right) => left.hostname.localeCompare(right.hostname));
 }
 
 function TopologyLayerLegend({
@@ -4962,21 +5450,28 @@ function TopologyLayerLegend({
 }
 
 function TopologyLayerZone({ layer, graphWidth, onToggle }: { layer: TopologyLayerBand; graphWidth: number; onToggle: () => void }) {
+  const layerStyle = {
+    "--topology-layer-bg-dark": layer.bg,
+    "--topology-layer-bg-light": layer.lightBg,
+    "--topology-layer-border-dark": layer.border,
+    "--topology-layer-border-light": layer.lightBorder
+  } as React.CSSProperties;
+
   return (
-    <g transform={`translate(0, ${layer.y})`}>
-      <rect x="0" y="0" width={graphWidth} height={layer.height} rx="14" fill={layer.bg} stroke={layer.border} strokeWidth="1.5" />
+    <g className="topology-layer-zone" style={layerStyle} transform={`translate(0, ${layer.y})`}>
+      <rect x="0" y="0" width={graphWidth} height={layer.height} rx="14" fill="var(--topology-layer-bg)" stroke="var(--topology-layer-border)" strokeWidth="1.5" />
       <rect x="0" y="0" width="6" height={layer.height} rx="3" fill={layer.color} />
       <g className="cursor-pointer" onClick={onToggle}>
-        <rect x="16" y="14" width={graphWidth - 32} height="28" rx="8" fill="#0f1720" opacity="0.86" />
+        <rect x="16" y="14" width={graphWidth - 32} height="28" rx="8" fill="var(--topology-layer-header-bg)" />
         <circle cx="31" cy="28" r="5" fill={layer.color} />
-        <text x="44" y="32" fill="#e5eef8" className="text-[12px] font-semibold">
+        <text x="44" y="32" fill="var(--topology-layer-title)" className="text-[12px] font-semibold">
           {layer.label}
         </text>
-        <text x={graphWidth - 42} y="32" textAnchor="end" fill="#94a3b8" className="text-[11px] font-medium">
+        <text x={graphWidth - 42} y="32" textAnchor="end" fill="var(--topology-layer-muted)" className="text-[11px] font-medium">
           {layer.collapsed ? `expandir · ${layer.nodeCount}` : `${layer.nodeCount} nodos`}
         </text>
       </g>
-      <text x="22" y="58" fill="#8ea3b8" className="text-[11px]">
+      <text x="22" y="58" fill="var(--topology-layer-muted)" className="text-[11px]">
         {truncateSvgText(layer.description, Math.max(42, Math.floor(graphWidth / 12)))}
       </text>
     </g>
@@ -4984,6 +5479,27 @@ function TopologyLayerZone({ layer, graphWidth, onToggle }: { layer: TopologyLay
 }
 
 function TopologyEdgePath({ edge, source, target, isFocused }: { edge: TopologyEdge; source: TopologyNode; target: TopologyNode; isFocused: boolean }) {
+  const sourceCenterY = source.y + topologyNodeHeight / 2;
+  const targetCenterY = target.y + topologyNodeHeight / 2;
+  const useSideAnchors = Math.abs(sourceCenterY - targetCenterY) <= 8;
+  const pathGeometry = useSideAnchors
+    ? topologySideAnchoredPath(source, target)
+    : topologyVerticalAnchoredPath(source, target);
+  const { path, labelX, labelY } = pathGeometry;
+
+  return (
+    <g className={cn(!isFocused && "opacity-15")}>
+      <path d={path} fill="none" stroke={edge.protocol === "cdp" ? "#0284c7" : "#059669"} strokeWidth={isFocused ? 2.5 : 1.5} markerStart="url(#topology-arrow-start)" markerEnd="url(#topology-arrow)" />
+      {isFocused && (
+        <text x={labelX} y={labelY - 6} textAnchor="middle" className="fill-slate-500 text-[10px] font-medium">
+          {edge.protocol.toUpperCase()}
+        </text>
+      )}
+    </g>
+  );
+}
+
+function topologyVerticalAnchoredPath(source: TopologyNode, target: TopologyNode) {
   const upper = source.y <= target.y ? source : target;
   const lower = source.y <= target.y ? target : source;
   const sourceX = upper.x + topologyNodeWidth / 2;
@@ -4991,18 +5507,29 @@ function TopologyEdgePath({ edge, source, target, isFocused }: { edge: TopologyE
   const targetX = lower.x + topologyNodeWidth / 2;
   const targetY = lower.y;
   const controlOffset = Math.max(80, Math.abs(targetY - sourceY) * 0.45);
-  const path = `M ${sourceX} ${sourceY} C ${sourceX} ${sourceY + controlOffset}, ${targetX} ${targetY - controlOffset}, ${targetX} ${targetY}`;
 
-  return (
-    <g className={cn(!isFocused && "opacity-15")}>
-      <path d={path} fill="none" stroke={edge.protocol === "cdp" ? "#0284c7" : "#059669"} strokeWidth={isFocused ? 2.5 : 1.5} markerEnd="url(#topology-arrow)" />
-      {isFocused && (
-        <text x={(sourceX + targetX) / 2} y={(sourceY + targetY) / 2 - 6} textAnchor="middle" className="fill-slate-500 text-[10px] font-medium">
-          {edge.protocol.toUpperCase()}
-        </text>
-      )}
-    </g>
-  );
+  return {
+    path: `M ${sourceX} ${sourceY} C ${sourceX} ${sourceY + controlOffset}, ${targetX} ${targetY - controlOffset}, ${targetX} ${targetY}`,
+    labelX: (sourceX + targetX) / 2,
+    labelY: (sourceY + targetY) / 2
+  };
+}
+
+function topologySideAnchoredPath(source: TopologyNode, target: TopologyNode) {
+  const left = source.x <= target.x ? source : target;
+  const right = source.x <= target.x ? target : source;
+  const sourceX = left.x + topologyNodeWidth;
+  const sourceY = left.y + topologyNodeHeight / 2;
+  const targetX = right.x;
+  const targetY = right.y + topologyNodeHeight / 2;
+  const horizontalDistance = Math.abs(targetX - sourceX);
+  const controlOffset = Math.min(Math.max(28, horizontalDistance * 0.35), Math.max(18, horizontalDistance / 2));
+
+  return {
+    path: `M ${sourceX} ${sourceY} C ${sourceX + controlOffset} ${sourceY}, ${targetX - controlOffset} ${targetY}, ${targetX} ${targetY}`,
+    labelX: (sourceX + targetX) / 2,
+    labelY: (sourceY + targetY) / 2
+  };
 }
 
 function TopologyGraphNode({
@@ -5409,6 +5936,8 @@ function InventoryTab({
   onImportAssets,
   onRemoveAsset,
   onToggleAssetIncluded,
+  onUpdateAssetTopologyLayer,
+  onClearAssets,
   onRemoveDuplicateAssets
 }: {
   record: AssessmentRecord;
@@ -5416,6 +5945,8 @@ function InventoryTab({
   onImportAssets: (assets: Array<Omit<InventoryAsset, "id">>) => void;
   onRemoveAsset: (assetId: string) => void;
   onToggleAssetIncluded: (assetId: string) => void;
+  onUpdateAssetTopologyLayer: (assetId: string, topologyLayer: TopologyLayerId | null) => void;
+  onClearAssets: () => void;
   onRemoveDuplicateAssets: () => void;
 }) {
   const duplicateSerials = duplicateSerialSet(record.targetInventory);
@@ -5431,6 +5962,7 @@ function InventoryTab({
     platform: "ios-xe",
     role: "access",
     site: "",
+    topologyLayer: undefined,
     priority: "medium",
     included: true
   });
@@ -5445,7 +5977,7 @@ function InventoryTab({
       model: asset.model.trim(),
       site: asset.site.trim()
     });
-    setAsset({ hostname: "", managementIp: "", serial: "", model: "", deviceType: "switch", platform: "ios-xe", role: "access", site: "", priority: "medium", included: true });
+    setAsset({ hostname: "", managementIp: "", serial: "", model: "", deviceType: "switch", platform: "ios-xe", role: "access", site: "", topologyLayer: undefined, priority: "medium", included: true });
   }
 
   async function handleInventoryWorkbookUpload(event: React.ChangeEvent<HTMLInputElement>) {
@@ -5471,6 +6003,7 @@ function InventoryTab({
           platform: row.platform || "ios-xe",
           role: row.role || "pending",
           site: row.site || "Pendiente",
+          topologyLayer: normalizeTopologyLayer(row.topologyLayer),
           priority: normalizePriority(row.priority),
           included: true
         };
@@ -5500,7 +6033,21 @@ function InventoryTab({
               Cargar Excel
               <input className="sr-only" type="file" accept=".xlsx" onChange={handleInventoryWorkbookUpload} />
             </label>
-            <Button variant="secondary" onClick={exportInventoryTemplate}>
+            <Button
+              variant="secondary"
+              onClick={() =>
+                exportInventoryTemplate({
+                  clientName: record.client.name,
+                  assessmentName: record.assessment.name,
+                  industry: record.client.industry,
+                  owner: record.client.owner,
+                  domains: record.assessment.domains,
+                  status: record.assessment.status,
+                  assessmentCreatedAt: record.assessment.createdAt,
+                  updatedAt: record.updatedAt
+                })
+              }
+            >
               <FileDown size={16} />
               Template Excel
             </Button>
@@ -5549,6 +6096,18 @@ function InventoryTab({
           <Field label="Sitio">
             <Input value={asset.site} onChange={(event) => setAsset({ ...asset, site: event.target.value })} />
           </Field>
+          <Field label="Segmento topologico">
+            <select
+              className="h-10 w-full rounded-md border border-border bg-white px-3 text-sm"
+              value={asset.topologyLayer ?? "auto"}
+              onChange={(event) => setAsset({ ...asset, topologyLayer: event.target.value === "auto" ? undefined : event.target.value as TopologyLayerId })}
+            >
+              <option value="auto">Auto</option>
+              {topologyLayerOrder.map((layerId) => (
+                <option key={layerId} value={layerId}>{topologyLayerConfig[layerId].label}</option>
+              ))}
+            </select>
+          </Field>
           <Field label="Prioridad">
             <select className="h-10 w-full rounded-md border border-border bg-white px-3 text-sm" value={asset.priority} onChange={(event) => setAsset({ ...asset, priority: event.target.value as InventoryAsset["priority"] })}>
               <option value="critical">Critica</option>
@@ -5571,6 +6130,8 @@ function InventoryTab({
         duplicateSerials={duplicateSerials}
         onRemoveAsset={onRemoveAsset}
         onToggleAssetIncluded={onToggleAssetIncluded}
+        onUpdateAssetTopologyLayer={onUpdateAssetTopologyLayer}
+        onClearAssets={onClearAssets}
         onRemoveDuplicateAssets={onRemoveDuplicateAssets}
       />
     </div>
@@ -5582,12 +6143,16 @@ function InventoryTable({
   duplicateSerials,
   onRemoveAsset,
   onToggleAssetIncluded,
+  onUpdateAssetTopologyLayer,
+  onClearAssets,
   onRemoveDuplicateAssets
 }: {
   assets: InventoryAsset[];
   duplicateSerials: Set<string>;
   onRemoveAsset: (assetId: string) => void;
   onToggleAssetIncluded: (assetId: string) => void;
+  onUpdateAssetTopologyLayer: (assetId: string, topologyLayer: TopologyLayerId | null) => void;
+  onClearAssets: () => void;
   onRemoveDuplicateAssets: () => void;
 }) {
   const [sort, setSort] = useState<{ key: InventorySortKey; direction: SortDirection }>({ key: "hostname", direction: "asc" });
@@ -5618,14 +6183,20 @@ function InventoryTable({
           <h2 className="text-sm font-semibold">Equipos a evaluar</h2>
           <p className="text-xs text-muted-foreground">Selecciona inclusion, revisa duplicados y elimina equipos que no correspondan.</p>
         </div>
-        <Button variant="danger" onClick={onRemoveDuplicateAssets} disabled={duplicateCount === 0}>
-          <Trash2 size={16} />
-          Eliminar todos los duplicados
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="secondary" onClick={onRemoveDuplicateAssets} disabled={duplicateCount === 0}>
+            <Trash2 size={16} />
+            Eliminar duplicados
+          </Button>
+          <Button variant="danger" onClick={onClearAssets} disabled={assets.length === 0}>
+            <Trash2 size={16} />
+            Borrar inventario
+          </Button>
+        </div>
       </PanelHeader>
       <PanelBody>
         <div className="overflow-x-auto rounded-md border border-border">
-          <table className="w-full min-w-[980px] border-collapse text-left text-sm">
+          <table className="w-full min-w-[1120px] border-collapse text-left text-sm">
             <thead className="bg-muted/70 text-xs uppercase text-muted-foreground">
               <tr>
                 <SortableInventoryHeader label="Incluido" sortKey="included" activeSort={sort} onSort={toggleSort} />
@@ -5635,6 +6206,7 @@ function InventoryTable({
                 <SortableInventoryHeader label="Modelo" sortKey="model" activeSort={sort} onSort={toggleSort} />
                 <SortableInventoryHeader label="Tipo" sortKey="deviceType" activeSort={sort} onSort={toggleSort} />
                 <SortableInventoryHeader label="Rol / Sitio" sortKey="role" activeSort={sort} onSort={toggleSort} />
+                <SortableInventoryHeader label="Segmento topologico" sortKey="topologyLayer" activeSort={sort} onSort={toggleSort} />
                 <SortableInventoryHeader label="Prioridad" sortKey="priority" activeSort={sort} onSort={toggleSort} />
                 <th className="border-b border-border px-3 py-2 font-semibold">Acciones</th>
               </tr>
@@ -5664,6 +6236,19 @@ function InventoryTable({
                     <td className="px-3 py-2 align-top">
                       <span className="block">{asset.role}</span>
                       <span className="text-xs text-muted-foreground">{asset.site}</span>
+                    </td>
+                    <td className="px-3 py-2 align-top">
+                      <select
+                        className="h-9 min-w-40 rounded-md border border-border bg-white px-2 text-xs"
+                        value={asset.topologyLayer ?? "auto"}
+                        onChange={(event) => onUpdateAssetTopologyLayer(asset.id, event.target.value === "auto" ? null : event.target.value as TopologyLayerId)}
+                        title="Ajustar segmento topologico"
+                      >
+                        <option value="auto">Auto</option>
+                        {topologyLayerOrder.map((layerId) => (
+                          <option key={layerId} value={layerId}>{topologyLayerConfig[layerId].shortLabel}</option>
+                        ))}
+                      </select>
                     </td>
                     <td className="px-3 py-2 align-top">{asset.priority}</td>
                     <td className="px-3 py-2 align-top">
@@ -5828,6 +6413,9 @@ function EvidenceTab({
   onEvidenceUpload,
   onPerformanceEvidenceUpload,
   onRemoveEvidenceFile,
+  onClearEvidenceFiles,
+  onRemovePerformanceEvidenceFile,
+  onClearPerformanceEvidenceFiles,
   onToggleEvidenceRowSkip
 }: {
   record: AssessmentRecord;
@@ -5835,6 +6423,9 @@ function EvidenceTab({
   onEvidenceUpload: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onPerformanceEvidenceUpload: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onRemoveEvidenceFile: (fileId: string) => void;
+  onClearEvidenceFiles: () => void;
+  onRemovePerformanceEvidenceFile: (fileId: string) => void;
+  onClearPerformanceEvidenceFiles: () => void;
   onToggleEvidenceRowSkip: (assetId: string) => void;
 }) {
   const [view, setView] = useState<"status" | "performance">("status");
@@ -5892,7 +6483,11 @@ function EvidenceTab({
       </Panel>
 
       {effectiveView === "performance" ? (
-        <PerformanceEvidencePanel record={record} />
+        <PerformanceEvidencePanel
+          record={record}
+          onRemovePerformanceEvidenceFile={onRemovePerformanceEvidenceFile}
+          onClearPerformanceEvidenceFiles={onClearPerformanceEvidenceFiles}
+        />
       ) : (
         <EvidenceStatusSubtabs
           activeSubtab={evidenceSubtab}
@@ -5902,6 +6497,7 @@ function EvidenceTab({
           evidenceFiles={record.evidenceFiles}
           onSubtabChange={setEvidenceSubtab}
           onRemoveEvidenceFile={onRemoveEvidenceFile}
+          onClearEvidenceFiles={onClearEvidenceFiles}
           onToggleEvidenceRowSkip={onToggleEvidenceRowSkip}
         />
       )}
@@ -5917,6 +6513,7 @@ function EvidenceStatusSubtabs({
   evidenceFiles,
   onSubtabChange,
   onRemoveEvidenceFile,
+  onClearEvidenceFiles,
   onToggleEvidenceRowSkip
 }: {
   activeSubtab: "compliance" | "files";
@@ -5926,6 +6523,7 @@ function EvidenceStatusSubtabs({
   evidenceFiles: EvidenceFile[];
   onSubtabChange: (subtab: "compliance" | "files") => void;
   onRemoveEvidenceFile: (fileId: string) => void;
+  onClearEvidenceFiles: () => void;
   onToggleEvidenceRowSkip: (assetId: string) => void;
 }) {
   return (
@@ -5958,7 +6556,11 @@ function EvidenceStatusSubtabs({
         {activeSubtab === "compliance" ? (
           <EvidenceCompliancePanel coverageRows={coverageRows} onToggleEvidenceRowSkip={onToggleEvidenceRowSkip} />
         ) : (
-          <EvidenceFilesPanel evidenceFiles={evidenceFiles} onRemoveEvidenceFile={onRemoveEvidenceFile} />
+          <EvidenceFilesPanel
+            evidenceFiles={evidenceFiles}
+            onRemoveEvidenceFile={onRemoveEvidenceFile}
+            onClearEvidenceFiles={onClearEvidenceFiles}
+          />
         )}
       </PanelBody>
     </Panel>
@@ -6025,14 +6627,22 @@ function EvidenceCompliancePanel({
 
 function EvidenceFilesPanel({
   evidenceFiles,
-  onRemoveEvidenceFile
+  onRemoveEvidenceFile,
+  onClearEvidenceFiles
 }: {
   evidenceFiles: EvidenceFile[];
   onRemoveEvidenceFile: (fileId: string) => void;
+  onClearEvidenceFiles: () => void;
 }) {
   return (
     <div className="space-y-3">
-      <h2 className="text-sm font-semibold">Archivos recibidos</h2>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm font-semibold">Archivos recibidos</h2>
+        <Button variant="danger" size="sm" onClick={onClearEvidenceFiles} disabled={evidenceFiles.length === 0}>
+          <Trash2 size={14} />
+          Borrar todo
+        </Button>
+      </div>
       {evidenceFiles.length === 0 ? (
         <EmptyState icon={<FileArchive size={24} />} title="Sin data cargada" />
       ) : (
@@ -6080,7 +6690,15 @@ function PerformanceEvidenceSummaryPanel({ record }: { record: AssessmentRecord 
   );
 }
 
-function PerformanceEvidencePanel({ record }: { record: AssessmentRecord }) {
+function PerformanceEvidencePanel({
+  record,
+  onRemovePerformanceEvidenceFile,
+  onClearPerformanceEvidenceFiles
+}: {
+  record: AssessmentRecord;
+  onRemovePerformanceEvidenceFile: (fileId: string) => void;
+  onClearPerformanceEvidenceFiles: () => void;
+}) {
   const [performanceEvidenceSubtab, setPerformanceEvidenceSubtab] = useState<"compliance" | "files">("compliance");
 
   if (!record.scope.performanceAnalysis.enabled) {
@@ -6121,7 +6739,11 @@ function PerformanceEvidencePanel({ record }: { record: AssessmentRecord }) {
       </PanelHeader>
       <PanelBody>
         {performanceEvidenceSubtab === "compliance" ? (
-          <PerformanceEvidenceFilesPanel record={record} />
+          <PerformanceEvidenceFilesPanel
+            record={record}
+            onRemovePerformanceEvidenceFile={onRemovePerformanceEvidenceFile}
+            onClearPerformanceEvidenceFiles={onClearPerformanceEvidenceFiles}
+          />
         ) : (
           <PerformanceMetricsPanel record={record} />
         )}
@@ -6130,12 +6752,26 @@ function PerformanceEvidencePanel({ record }: { record: AssessmentRecord }) {
   );
 }
 
-function PerformanceEvidenceFilesPanel({ record }: { record: AssessmentRecord }) {
+function PerformanceEvidenceFilesPanel({
+  record,
+  onRemovePerformanceEvidenceFile,
+  onClearPerformanceEvidenceFiles
+}: {
+  record: AssessmentRecord;
+  onRemovePerformanceEvidenceFile: (fileId: string) => void;
+  onClearPerformanceEvidenceFiles: () => void;
+}) {
   return (
     <div className="space-y-3">
-      <div>
-        <h2 className="text-sm font-semibold">Cumplimiento de evidencia performance</h2>
-        <p className="text-xs text-muted-foreground">Archivos CLI, NMS, telemetria, syslog, NetFlow o reportes usados para metricas de rendimiento.</p>
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-semibold">Cumplimiento de evidencia performance</h2>
+          <p className="text-xs text-muted-foreground">Archivos CLI, NMS, telemetria, syslog, NetFlow o reportes usados para metricas de rendimiento.</p>
+        </div>
+        <Button variant="danger" size="sm" onClick={onClearPerformanceEvidenceFiles} disabled={record.performance.evidenceFiles.length === 0}>
+          <Trash2 size={14} />
+          Borrar todo
+        </Button>
       </div>
       {record.performance.evidenceFiles.length === 0 ? (
         <EmptyState icon={<FileArchive size={24} />} title="Sin evidencia de performance cargada" />
@@ -6150,6 +6786,7 @@ function PerformanceEvidenceFilesPanel({ record }: { record: AssessmentRecord })
                 <th className="px-3 py-2 font-semibold">Ventana</th>
                 <th className="px-3 py-2 font-semibold">Metricas</th>
                 <th className="px-3 py-2 font-semibold">Confianza</th>
+                <th className="px-3 py-2 font-semibold">Acciones</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border bg-white">
@@ -6164,6 +6801,11 @@ function PerformanceEvidenceFilesPanel({ record }: { record: AssessmentRecord })
                   <td className="px-3 py-3 align-top">{file.timeWindow}</td>
                   <td className="px-3 py-3 align-top">{file.parsedMetricCount}</td>
                   <td className="px-3 py-3 align-top"><Badge tone={file.confidenceScore >= 70 ? "success" : "warning"}>{file.confidenceScore}%</Badge></td>
+                  <td className="px-3 py-3 align-top">
+                    <Button size="icon" variant="secondary" title="Borrar archivo performance" onClick={() => onRemovePerformanceEvidenceFile(file.id)}>
+                      <Trash2 size={15} />
+                    </Button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -6302,6 +6944,7 @@ function EvidenceRequirementCell({ cell }: { cell: EvidenceCoverageCell }) {
 
 function buildEvidenceCoverageRows(record: AssessmentRecord): EvidenceCoverageRow[] {
   const inventoryAssets = record.targetInventory.filter((asset) => asset.included);
+  const effectiveParsed = effectiveParsedNetworkData(record);
   const assets =
     inventoryAssets.length > 0
       ? inventoryAssets.map((asset) => ({
@@ -6312,7 +6955,7 @@ function buildEvidenceCoverageRows(record: AssessmentRecord): EvidenceCoverageRo
           model: asset.model,
           role: asset.role
         }))
-      : record.parsed.devices.map((device) => ({
+      : effectiveParsed.devices.map((device) => ({
           assetId: `parsed:${device.id}`,
           hostname: device.hostname,
           managementIp: "No identificado",
@@ -6350,7 +6993,7 @@ function findEvidenceFilesForAsset(
 ) {
   const hostname = normalizeEvidenceToken(asset.hostname);
   const serial = normalizeEvidenceToken(asset.serial);
-  const parsedDevice = record.parsed.devices.find((device) => normalizeEvidenceToken(device.hostname) === hostname);
+  const parsedDevice = effectiveParsedNetworkData(record).devices.find((device) => normalizeEvidenceToken(device.hostname) === hostname);
   const parsedSourceFiles = new Set(parsedDevice?.sourceFiles ?? []);
 
   return record.evidenceFiles.filter((file) => {
@@ -6425,7 +7068,9 @@ function buildTopologyGraph(
   visibleLayerIds: Set<TopologyLayerId> = new Set(topologyLayerOrder),
   collapsedLayerIds: Set<TopologyLayerId> = new Set()
 ): TopologyGraph {
+  const effectiveParsed = effectiveParsedNetworkData(record);
   const nodeMap = new Map<string, Omit<TopologyNode, "x" | "y" | "layerId" | "layerLabel" | "layerReason" | "layerEvidence" | "layerOverride">>();
+  const inventoryLayerOverrides = new Map<string, TopologyLayerId>();
 
   function upsertNode(hostname: string, patch: Partial<Omit<TopologyNode, "id" | "hostname" | "x" | "y" | "layerId" | "layerLabel" | "layerReason" | "layerEvidence" | "layerOverride">>) {
     const id = topologyNodeId(hostname);
@@ -6448,6 +7093,7 @@ function buildTopologyGraph(
 
   for (const asset of record.targetInventory) {
     if (!asset.included) continue;
+    if (asset.topologyLayer) inventoryLayerOverrides.set(topologyNodeId(asset.hostname), asset.topologyLayer);
     upsertNode(asset.hostname, {
       model: asset.model,
       managementIp: asset.managementIp,
@@ -6458,7 +7104,7 @@ function buildTopologyGraph(
     });
   }
 
-  for (const device of record.parsed.devices) {
+  for (const device of effectiveParsed.devices) {
     upsertNode(device.hostname, {
       model: device.model,
       serial: device.serial,
@@ -6469,7 +7115,7 @@ function buildTopologyGraph(
   }
 
   const edgeMap = new Map<string, TopologyEdge>();
-  for (const relation of record.parsed.relations) {
+  for (const relation of effectiveParsed.relations) {
     upsertNode(relation.localHostname, {});
     upsertNode(relation.remoteHostname, {
       model: relation.platform ?? "",
@@ -6492,7 +7138,7 @@ function buildTopologyGraph(
   }
 
   const allNodes = Array.from(nodeMap.values()).map((node) => {
-    const override = layerOverrides[node.id];
+    const override = inventoryLayerOverrides.get(node.id) ?? layerOverrides[node.id];
     const classification = classifyTopologyLayer(node, override);
     return {
       ...node,
@@ -6541,7 +7187,9 @@ function buildTopologyGraph(
       description: config.description,
       color: config.color,
       bg: config.bg,
+      lightBg: config.lightBg,
       border: config.border,
+      lightBorder: config.lightBorder,
       y: cursorY,
       height,
       nodeCount: nodeCounts.get(layerId) ?? 0,
@@ -6592,7 +7240,7 @@ function topologyNodeId(hostname: string) {
 }
 
 function classifyTopologyLayer(
-  device: Pick<TopologyNode, "hostname" | "model" | "role" | "deviceType" | "softwareVersion">,
+  device: Pick<TopologyNode, "hostname" | "model" | "role" | "site" | "deviceType" | "softwareVersion">,
   override?: TopologyLayerId
 ): { layerId: TopologyLayerId; reason: string; evidence: string[] } {
   if (override) {
@@ -6606,15 +7254,27 @@ function classifyTopologyLayer(
   const hostname = device.hostname.toLowerCase();
   const model = device.model.toLowerCase();
   const role = device.role.toLowerCase();
+  const site = device.site.toLowerCase();
   const deviceType = device.deviceType.toLowerCase();
   const software = device.softwareVersion.toLowerCase();
-  const value = `${hostname} ${model} ${role} ${deviceType} ${software}`;
+  const value = `${hostname} ${model} ${role} ${site} ${deviceType} ${software}`;
   const evidence: string[] = [];
   const addEvidence = (label: string, matched: boolean) => {
     if (matched) evidence.push(label);
     return matched;
   };
   const explicitCore = addEvidence("rol/hostname core o backbone", /\b(core|backbone)\b/.test(`${hostname} ${role}`));
+  const branchSignal =
+    addEvidence("branch / sucursal", /\b(branch|sucursal|remote[- ]?site|remote office|oficina remota|site remoto)\b/.test(value)) ||
+    addEvidence("rol branch", /\b(branch-router|branch-access|branch-edge)\b/.test(value));
+  if (branchSignal) {
+    return {
+      layerId: "branches",
+      reason: "Clasificado como branch/sucursal por hostname, sitio o rol de sede remota.",
+      evidence
+    };
+  }
+
   const datacenterSignal =
     addEvidence("Nexus / NX-OS", /\b(nexus|nx-os|n[579]k|cisco nexus)\b/.test(value)) ||
     addEvidence("spine/leaf", /\b(spine|leaf)\b/.test(value)) ||
@@ -6784,39 +7444,40 @@ function topologyLayerIndex(layerId: TopologyLayerId) {
   return topologyLayerOrder.indexOf(layerId);
 }
 
-function topologyNodeBaseTier(node: Pick<TopologyNode, "hostname" | "model" | "role" | "deviceType" | "softwareVersion">) {
+function topologyNodeBaseTier(node: Pick<TopologyNode, "hostname" | "model" | "role" | "site" | "deviceType" | "softwareVersion">) {
   const value = topologyNodeSearchText(node);
-  if (/\b(router|isr|asr|wan|internet|edge|border|firewall|fw|asa|ftd|vpn)\b/.test(value)) return 0;
-  if (/\b(spine|apic|fabric interconnect|\bfi\b)\b/.test(value)) return 0;
-  if (/\b(core|backbone|c6500|c6509|c6800|c9500|c9600)\b/.test(value)) return 1;
-  if (/\b(distribution|distribucion|dist|aggregation|agg|leaf|nexus|n[579]k)\b/.test(value)) return 2;
-  if (/\b(access|acceso|campus|wireless|wlc|ap\b|c9200|c9300|c2960)\b/.test(value)) return 3;
-  return 2;
-}
-
-function topologyNodeVerticalPriority(node: Pick<TopologyNode, "hostname" | "model" | "role" | "deviceType" | "softwareVersion">) {
-  const value = topologyNodeSearchText(node);
-  if (/\b(router|isr|asr|wan|internet|edge|border|firewall|fw|asa|ftd|vpn)\b/.test(value)) return 0;
+  if (/\b(branch|sucursal|remote[- ]?site|remote office|oficina remota|site remoto)\b/.test(value)) return 0;
+  if (/\b(router|isr|asr|wan|internet|edge|border|firewall|fw|asa|ftd|vpn)\b/.test(value)) return 1;
   if (/\b(spine|apic|fabric interconnect|\bfi\b)\b/.test(value)) return 1;
   if (/\b(core|backbone|c6500|c6509|c6800|c9500|c9600)\b/.test(value)) return 2;
   if (/\b(distribution|distribucion|dist|aggregation|agg|leaf|nexus|n[579]k)\b/.test(value)) return 3;
   if (/\b(access|acceso|campus|wireless|wlc|ap\b|c9200|c9300|c2960)\b/.test(value)) return 4;
-  return 5;
+  return 2;
 }
 
-function topologyNodeSearchText(node: Pick<TopologyNode, "hostname" | "model" | "role" | "deviceType" | "softwareVersion">) {
-  return `${node.hostname} ${node.model} ${node.role} ${node.deviceType} ${node.softwareVersion}`.toLowerCase();
+function topologyNodeVerticalPriority(node: Pick<TopologyNode, "hostname" | "model" | "role" | "site" | "deviceType" | "softwareVersion">) {
+  const value = topologyNodeSearchText(node);
+  if (/\b(branch|sucursal|remote[- ]?site|remote office|oficina remota|site remoto)\b/.test(value)) return 0;
+  if (/\b(router|isr|asr|wan|internet|edge|border|firewall|fw|asa|ftd|vpn)\b/.test(value)) return 1;
+  if (/\b(spine|apic|fabric interconnect|\bfi\b)\b/.test(value)) return 2;
+  if (/\b(core|backbone|c6500|c6509|c6800|c9500|c9600)\b/.test(value)) return 3;
+  if (/\b(distribution|distribucion|dist|aggregation|agg|leaf|nexus|n[579]k)\b/.test(value)) return 4;
+  if (/\b(access|acceso|campus|wireless|wlc|ap\b|c9200|c9300|c2960)\b/.test(value)) return 5;
+  return 6;
 }
 
-function calculateTopologyFitView(graph: TopologyGraph, viewportWidth: number, viewportHeight: number, detailPanelOpen: boolean) {
+function topologyNodeSearchText(node: Pick<TopologyNode, "hostname" | "model" | "role" | "site" | "deviceType" | "softwareVersion">) {
+  return `${node.hostname} ${node.model} ${node.role} ${node.site} ${node.deviceType} ${node.softwareVersion}`.toLowerCase();
+}
+
+function calculateTopologyFitView(graph: TopologyGraph, viewportWidth: number, viewportHeight: number) {
   const bounds = topologyVisibleBounds(graph);
-  const panelInset = detailPanelOpen ? 180 : 0;
-  const padding = graph.nodes.length <= 3 ? 110 : 72;
-  const availableWidth = Math.max(520, viewportWidth - panelInset);
+  const padding = graph.nodes.length <= 3 ? 110 : 96;
+  const availableWidth = Math.max(420, viewportWidth - 28);
   const availableHeight = Math.max(360, viewportHeight - 28);
   const fitZoom = Math.min(availableWidth / (bounds.width + padding * 2), availableHeight / (bounds.height + padding * 2));
   const zoom = clampZoom(fitZoom, graph.nodes.length);
-  const translateX = Math.max(24, (availableWidth - bounds.width * zoom) / 2 - bounds.minX * zoom + panelInset * 0.15);
+  const translateX = Math.max(48, (availableWidth - bounds.width * zoom) / 2 - bounds.minX * zoom + 14);
   const translateY = Math.max(18, (availableHeight - bounds.height * zoom) / 2 - bounds.minY * zoom);
 
   return {
@@ -6881,7 +7542,10 @@ function truncateSvgText(value: string, maxLength: number) {
 
 function AiEvaluationTab({
   record,
+  aiAnalysisStatus,
   onRunEvaluation,
+  onCancelAnalysisJob,
+  onRetryAnalysisJob,
   onResetEvaluation,
   onUpdateFinding,
   onProcessPerformance,
@@ -6889,7 +7553,10 @@ function AiEvaluationTab({
   onResetPerformance
 }: {
   record: AssessmentRecord;
-  onRunEvaluation: (area: EvaluationArea | "complete") => void;
+  aiAnalysisStatus?: AIAssessmentAnalysisStatus;
+  onRunEvaluation: (area: EvaluationArea | "complete", options?: RunEvaluationOptions) => void;
+  onCancelAnalysisJob: (jobId: string) => void;
+  onRetryAnalysisJob: (jobId: string) => void;
   onResetEvaluation: (area: EvaluationArea | "complete") => void;
   onUpdateFinding: (id: string, patch: Partial<Finding>) => void;
   onProcessPerformance: () => void;
@@ -6897,8 +7564,9 @@ function AiEvaluationTab({
   onResetPerformance: () => void;
 }) {
   const hasAnyAnalysis = record.parsed.findings.length > 0 || record.evaluationRuns.some((run) => run.status !== "pending" || run.progress > 0);
-  const hasRunningAnalysis = record.evaluationRuns.some((run) => run.status === "running");
+  const hasRunningAnalysis = record.evaluationRuns.some((run) => run.status === "running") || hasRunningAIJob(aiAnalysisStatus);
   const performanceEnabled = record.scope.performanceAnalysis.enabled;
+  const latestJob = aiAnalysisStatus?.jobs[0];
 
   return (
     <div className="space-y-4">
@@ -6922,9 +7590,21 @@ function AiEvaluationTab({
             </Button>
           </div>
         </PanelHeader>
-        <PanelBody className="grid gap-3 md:grid-cols-2">
+        <PanelBody className="space-y-3">
+          {latestJob && (
+            <AIAnalysisJobStatusPanel
+              job={latestJob}
+              onCancelAnalysisJob={onCancelAnalysisJob}
+              onRetryAnalysisJob={onRetryAnalysisJob}
+            />
+          )}
+          <div className="grid gap-3 md:grid-cols-2">
           {evaluationAreas.map((area) => {
             const run = record.evaluationRuns.find((item) => item.area === area.id) ?? defaultRun(area.id);
+            const scopeId = evaluationAreaToAIScope(area.id);
+            const scopeStatus = aiAnalysisStatus?.scopes.find((scope) => scope.id === scopeId);
+            const scopeJob = latestJob?.mode === "scope" && latestJob.scopeId === scopeId ? latestJob : undefined;
+            const isScopeRunning = scopeJob ? isActiveAIJobStatus(scopeJob.status) : false;
             const areaFindings = record.parsed.findings.filter((finding) => finding.category === areaToCategory(area.id));
             const canResetArea = run.status !== "pending" || run.progress > 0 || areaFindings.length > 0;
             return (
@@ -6932,20 +7612,26 @@ function AiEvaluationTab({
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <p className="text-sm font-semibold">{area.label}</p>
-                    <p className="mt-1 text-xs text-muted-foreground">{area.description}</p>
-                  </div>
-                  <Badge tone={run.status === "complete" ? "success" : run.status === "running" ? "warning" : run.status === "blocked" ? "danger" : "neutral"}>
-                    {run.status}
+                      <p className="mt-1 text-xs text-muted-foreground">{area.description}</p>
+                    </div>
+                  <Badge tone={scopeStatusTone(scopeStatus?.status ?? run.status)}>
+                    {scopeStatus?.status ?? run.status}
                   </Badge>
                 </div>
                 <div className="mt-3 h-2 rounded-full bg-muted">
-                  <div className="h-2 rounded-full bg-primary" style={{ width: `${run.progress}%` }} />
+                  <div className="h-2 rounded-full bg-primary" style={{ width: `${scopeJob?.progress ?? run.progress}%` }} />
                 </div>
-                <p className="mt-2 text-xs text-muted-foreground">{run.progress}% · {run.message}</p>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  {scopeJob ? `${scopeJob.progress}% · ${scopeJob.currentPhase ?? "Procesando fases"}` : `${run.progress}% · ${scopeStatus?.updatedAt ? `Ultima evaluacion ${formatDate(scopeStatus.updatedAt)}` : run.message}`}
+                </p>
                 <div className="mt-3 flex flex-wrap gap-2">
-                  <Button variant="secondary" size="sm" onClick={() => onRunEvaluation(area.id)} disabled={run.status === "running"}>
+                  <Button variant="secondary" size="sm" onClick={() => onRunEvaluation(area.id)} disabled={isScopeRunning || hasRunningAnalysis}>
                     <PlayCircle size={14} />
                     Evaluar
+                  </Button>
+                  <Button variant="secondary" size="sm" onClick={() => onRunEvaluation(area.id, { forceReevaluate: true })} disabled={isScopeRunning || hasRunningAnalysis}>
+                    <RotateCcw size={14} />
+                    Forzar
                   </Button>
                   <Button variant="ghost" size="sm" onClick={() => onResetEvaluation(area.id)} disabled={!canResetArea || run.status === "running"}>
                     <RotateCcw size={14} />
@@ -6963,9 +7649,84 @@ function AiEvaluationTab({
               onResetPerformance={onResetPerformance}
             />
           )}
+          </div>
         </PanelBody>
       </Panel>
       <AIReviewPanel record={record} onUpdateFinding={onUpdateFinding} />
+    </div>
+  );
+}
+
+function AIAnalysisJobStatusPanel({
+  job,
+  onCancelAnalysisJob,
+  onRetryAnalysisJob
+}: {
+  job: AIAnalysisJobSnapshot;
+  onCancelAnalysisJob: (jobId: string) => void;
+  onRetryAnalysisJob: (jobId: string) => void;
+}) {
+  const grouped = job.steps.reduce<Record<string, AIAnalysisJobSnapshot["steps"]>>((acc, step) => {
+    acc[step.scopeId] = [...(acc[step.scopeId] ?? []), step];
+    return acc;
+  }, {});
+  const failed = job.steps.filter((step) => step.status === "failed").length;
+  const skipped = job.steps.filter((step) => step.status === "skipped").length;
+  const completed = job.steps.filter((step) => step.status === "completed").length;
+
+  return (
+    <div className="rounded-md border border-primary/30 bg-primary/5 p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-sm font-semibold">Motor persistente de analisis AI</p>
+            <Badge tone={scopeStatusTone(job.status)}>{job.status}</Badge>
+            <Badge tone="neutral">{job.mode === "full" ? "Evaluacion completa" : job.scopeId}</Badge>
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {job.progress}% · {job.currentPhase ?? "Sin fase activa"} · Actualizado {formatDate(job.updatedAt)}
+          </p>
+          {job.errorMessage && <p className="mt-1 text-xs text-rose-300">{job.errorMessage}</p>}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {isActiveAIJobStatus(job.status) && (
+            <Button variant="secondary" size="sm" onClick={() => onCancelAnalysisJob(job.id)}>
+              <X size={14} />
+              Cancelar
+            </Button>
+          )}
+          {(job.status === "failed" || job.status === "cancelled" || job.status === "partially_completed") && (
+            <Button variant="secondary" size="sm" onClick={() => onRetryAnalysisJob(job.id)}>
+              <RotateCcw size={14} />
+              Reintentar
+            </Button>
+          )}
+        </div>
+      </div>
+      <div className="mt-3 h-2 rounded-full bg-muted">
+        <div className="h-2 rounded-full bg-primary" style={{ width: `${job.progress}%` }} />
+      </div>
+      <div className="mt-3 grid gap-2 text-xs md:grid-cols-4">
+        <MetricPanel label="Fases completadas" value={String(completed)} />
+        <MetricPanel label="Fases omitidas" value={String(skipped)} />
+        <MetricPanel label="Fases fallidas" value={String(failed)} />
+        <MetricPanel label="Total fases" value={String(job.steps.length)} />
+      </div>
+      <div className="mt-3 grid gap-2 md:grid-cols-2">
+        {Object.entries(grouped).slice(0, 8).map(([scopeId, steps]) => {
+          const active = steps.find((step) => step.status === "running");
+          const scopeProgress = Math.round((steps.filter((step) => step.status === "completed" || step.status === "skipped").length / Math.max(steps.length, 1)) * 100);
+          return (
+            <div key={scopeId} className="rounded border border-border bg-background/50 p-2">
+              <div className="flex items-center justify-between gap-2">
+                <p className="font-medium">{scopeLabel(scopeId as AIAnalysisScopeId)}</p>
+                <Badge tone={scopeStatusTone(active?.status ?? steps.at(-1)?.status ?? "pending")}>{scopeProgress}%</Badge>
+              </div>
+              <p className="mt-1 text-muted-foreground">{active?.phaseName ?? steps.find((step) => step.status === "failed")?.errorMessage ?? "Fases en checkpoint persistente"}</p>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -7103,15 +7864,28 @@ function FindingsTab({
   documentTemplates: DocumentTemplateVersion[];
   onUpdateFinding: (id: string, patch: Partial<Finding>) => void;
 }) {
-  const matrix = buildRiskAssessmentMatrix(acceptedOrValidatedFindings(record.parsed.findings));
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<EvaluationArea, boolean>>(() => (
+    Object.fromEntries(evaluationAreas.map((area) => [area.id, false])) as Record<EvaluationArea, boolean>
+  ));
+  const matrix = buildRiskAssessmentMatrix(record.parsed.findings);
   const grouped = evaluationAreas.map((area) => ({
     ...area,
     findings: record.parsed.findings.filter((finding) => finding.category === areaToCategory(area.id))
   }));
+  const allCollapsed = grouped.every((group) => collapsedGroups[group.id]);
+  const allExpanded = grouped.every((group) => !collapsedGroups[group.id]);
   const activeTemplate = documentTemplates.find((template) => template.documentType === "findings_report" && template.status === "active");
 
   async function generateFindingsDocument() {
     await downloadFinalReportDocument(record, activeTemplate, `${safeFileName(record.assessment.name)}-hallazgos-resumen-ejecutivo.docx`);
+  }
+
+  function setAllGroupsCollapsed(collapsed: boolean) {
+    setCollapsedGroups(Object.fromEntries(evaluationAreas.map((area) => [area.id, collapsed])) as Record<EvaluationArea, boolean>);
+  }
+
+  function toggleGroupCollapsed(groupId: EvaluationArea) {
+    setCollapsedGroups((current) => ({ ...current, [groupId]: !current[groupId] }));
   }
 
   return (
@@ -7126,6 +7900,14 @@ function FindingsTab({
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
+            <Button variant="secondary" onClick={() => setAllGroupsCollapsed(true)} disabled={allCollapsed || record.parsed.findings.length === 0}>
+              <ChevronRight size={16} />
+              Colapsar todo
+            </Button>
+            <Button variant="secondary" onClick={() => setAllGroupsCollapsed(false)} disabled={allExpanded || record.parsed.findings.length === 0}>
+              <ChevronDown size={16} />
+              Expandir todo
+            </Button>
             <Button variant="secondary" onClick={generateFindingsDocument} disabled={record.parsed.findings.length === 0}>
               <FileDown size={16} />
               Word
@@ -7141,7 +7923,7 @@ function FindingsTab({
           </div>
         </PanelHeader>
       </Panel>
-      <RiskAssessmentMatrix matrix={matrix} />
+      <RiskAssessmentMatrix matrix={matrix} onUpdateFinding={onUpdateFinding} />
       {record.parsed.findings.length === 0 ? (
         <Panel>
           <PanelBody>
@@ -7154,21 +7936,32 @@ function FindingsTab({
             <PanelHeader className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <AlertTriangle size={16} className="text-amber-600" />
-                <h2 className="text-sm font-semibold">{group.label}</h2>
-              </div>
-              <Badge tone={group.findings.length > 0 ? "warning" : "neutral"}>{group.findings.length} hallazgos</Badge>
-            </PanelHeader>
-            <PanelBody>
-              {group.findings.length === 0 ? (
-                <p className="text-sm text-muted-foreground">Sin hallazgos en este ambito.</p>
-              ) : (
-                <div className="space-y-3">
-                  {group.findings.map((finding) => (
-                    <FindingRow key={finding.id} finding={finding} onChange={(patch) => onUpdateFinding(finding.id, patch)} />
-                  ))}
+                <div>
+                  <h2 className="text-sm font-semibold">{group.label}</h2>
+                  <FindingSeveritySummary findings={group.findings} compact />
                 </div>
-              )}
-            </PanelBody>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge tone={group.findings.length > 0 ? "warning" : "neutral"}>{group.findings.length} hallazgos</Badge>
+                <Button variant="secondary" size="sm" onClick={() => toggleGroupCollapsed(group.id)}>
+                  {collapsedGroups[group.id] ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                  {collapsedGroups[group.id] ? "Expandir" : "Colapsar"}
+                </Button>
+              </div>
+            </PanelHeader>
+            {!collapsedGroups[group.id] && (
+              <PanelBody>
+                {group.findings.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">Sin hallazgos en este ambito.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {group.findings.map((finding) => (
+                      <FindingRow key={finding.id} finding={finding} onChange={(patch) => onUpdateFinding(finding.id, patch)} />
+                    ))}
+                  </div>
+                )}
+              </PanelBody>
+            )}
           </Panel>
         ))
       )}
@@ -7176,7 +7969,45 @@ function FindingsTab({
   );
 }
 
-function RiskAssessmentMatrix({ matrix }: { matrix: ReturnType<typeof buildRiskAssessmentMatrix> }) {
+function FindingSeveritySummary({ findings, compact = false }: { findings: Finding[]; compact?: boolean }) {
+  const counts = riskSummaryOrder.map((risk) => ({
+    risk,
+    count: findings.filter((finding) => finding.risk === risk).length
+  }));
+  const visibleCounts = counts.filter((item) => item.count > 0);
+
+  if (visibleCounts.length === 0) {
+    return compact
+      ? <p className="mt-1 text-xs text-muted-foreground">Sin hallazgos</p>
+      : <p className="text-sm text-muted-foreground">Sin hallazgos en este ambito.</p>;
+  }
+
+  return (
+    <div className={cn("flex flex-wrap gap-2", compact ? "mt-1" : "rounded-md border border-border bg-muted/30 p-3")}>
+      {!compact && <span className="mr-1 text-sm font-medium text-foreground">Resumen por criticidad:</span>}
+      {visibleCounts.map((item) => (
+        <Badge key={item.risk} tone={riskTone[item.risk]}>
+          {riskSummaryLabel[item.risk]}: {item.count}
+        </Badge>
+      ))}
+    </div>
+  );
+}
+
+function RiskAssessmentMatrix({
+  matrix,
+  onUpdateFinding
+}: {
+  matrix: ReturnType<typeof buildRiskAssessmentMatrix>;
+  onUpdateFinding: (id: string, patch: Partial<Finding>) => void;
+}) {
+  const [selectedCell, setSelectedCell] = useState<{ probabilityId: string; severityId: string } | null>(null);
+  const selectedProbability = selectedCell ? matrix.probabilities.find((probability) => probability.id === selectedCell.probabilityId) : undefined;
+  const selectedSeverity = selectedCell ? matrix.severities.find((severity) => severity.id === selectedCell.severityId) : undefined;
+  const selectedMatrixCell = selectedCell && selectedProbability && selectedSeverity
+    ? matrix.cells[selectedProbability.id][selectedSeverity.id]
+    : null;
+
   return (
     <Panel>
       <PanelHeader>
@@ -7186,71 +8017,161 @@ function RiskAssessmentMatrix({ matrix }: { matrix: ReturnType<typeof buildRiskA
         </div>
       </PanelHeader>
       <PanelBody>
-        <div className="overflow-x-auto">
-          <div className="min-w-[860px]">
-            <div className="mb-2 ml-36 flex items-center gap-3 text-sm font-semibold text-foreground">
-              <span>Severidad / impacto</span>
-              <div className="h-px flex-1 bg-primary" />
-              <ArrowUp className="rotate-90 text-primary" size={18} />
-            </div>
-            <div className="grid grid-cols-[130px_repeat(5,minmax(120px,1fr))] gap-1">
-              <div />
-              {matrix.severities.map((severity) => (
-                <div key={severity.id} className="rounded-md border border-border bg-muted/70 px-3 py-2 text-center text-xs font-semibold uppercase text-muted-foreground">
-                  {severity.label}
-                </div>
-              ))}
-              {matrix.probabilities.map((probability) => (
-                <React.Fragment key={probability.id}>
-                  <div className="flex items-center justify-end rounded-md border border-border bg-muted/70 px-3 py-2 text-right text-xs font-semibold uppercase text-muted-foreground">
-                    {probability.label}
+        <div className="relative">
+          <div className="min-w-0 overflow-x-auto">
+            <div className="w-full min-w-[980px]">
+              <div className="mb-2 ml-44 flex items-center gap-3 text-sm font-semibold text-foreground">
+                <span>Severidad / impacto</span>
+                <div className="h-px flex-1 bg-primary" />
+                <ArrowUp className="rotate-90 text-primary" size={18} />
+              </div>
+              <div className="grid grid-cols-[160px_repeat(5,minmax(0,1fr))] gap-1">
+                <div />
+                {matrix.severities.map((severity) => (
+                  <div key={severity.id} className="rounded-md border border-border bg-muted/70 px-3 py-2 text-center text-xs font-semibold uppercase text-muted-foreground">
+                    {severity.label}
                   </div>
-                  {matrix.severities.map((severity) => {
-                    const cell = matrix.cells[probability.id][severity.id];
-                    return (
-                      <div
-                        key={`${probability.id}-${severity.id}`}
-                        className={cn("min-h-24 rounded-md border px-3 py-2", riskMatrixToneClass(cell.level))}
-                        title={`${probability.label} x ${severity.label}: ${cell.label}`}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="text-xs font-semibold uppercase">{cell.label}</span>
-                          <span className="rounded border border-white/70 bg-white/70 px-2 py-0.5 text-sm font-bold shadow-sm dark:border-white/10 dark:bg-slate-950/35 dark:text-current">
-                            {cell.findings.length}
-                          </span>
-                        </div>
-                        {cell.findings.length > 0 && (
-                          <div className="mt-2 flex max-h-14 flex-wrap gap-1 overflow-hidden">
-                            {cell.findings.slice(0, 6).map((finding) => (
-                              <span
-                                key={finding.id}
-                                className="rounded border border-white/70 bg-white/70 px-1.5 py-0.5 text-[10px] font-semibold shadow-sm dark:border-white/10 dark:bg-slate-950/35 dark:text-current"
-                                title={finding.title}
-                              >
-                                {shortFindingId(finding)}
-                              </span>
-                            ))}
-                            {cell.findings.length > 6 && (
-                              <span className="rounded border border-white/70 bg-white/70 px-1.5 py-0.5 text-[10px] font-semibold shadow-sm dark:border-white/10 dark:bg-slate-950/35 dark:text-current">+{cell.findings.length - 6}</span>
-                            )}
+                ))}
+                {matrix.probabilities.map((probability) => (
+                  <React.Fragment key={probability.id}>
+                    <div className="flex items-center justify-end rounded-md border border-border bg-muted/70 px-3 py-2 text-right text-xs font-semibold uppercase text-muted-foreground">
+                      {probability.label}
+                    </div>
+                    {matrix.severities.map((severity) => {
+                      const cell = matrix.cells[probability.id][severity.id];
+                      const isSelected = selectedCell?.probabilityId === probability.id && selectedCell.severityId === severity.id;
+                      return (
+                        <button
+                          key={`${probability.id}-${severity.id}`}
+                          type="button"
+                          className={cn(
+                            "min-h-24 rounded-md border px-3 py-2 text-left transition hover:ring-2 hover:ring-primary/40 focus:outline-none focus:ring-2 focus:ring-primary/70",
+                            riskMatrixToneClass(cell.level),
+                            isSelected && "ring-2 ring-primary"
+                          )}
+                          title={`${probability.label} x ${severity.label}: ${cell.label}. Click para ver hallazgos.`}
+                          onClick={() => setSelectedCell({ probabilityId: probability.id, severityId: severity.id })}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-semibold uppercase">{cell.label}</span>
+                            <span className="rounded border border-white/70 bg-white/70 px-2 py-0.5 text-sm font-bold shadow-sm dark:border-white/10 dark:bg-slate-950/35 dark:text-current">
+                              {cell.findings.length}
+                            </span>
                           </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </React.Fragment>
-              ))}
-            </div>
-            <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-              <span className="font-medium text-foreground">Leyenda:</span>
-              {["low", "low-medium", "medium", "medium-high", "high"].map((level) => (
-                <span key={level} className={cn("rounded border px-2 py-1", riskMatrixToneClass(level))}>{riskMatrixLabel(level)}</span>
-              ))}
+                          {cell.findings.length > 0 && (
+                            <div className="mt-2 flex max-h-12 flex-wrap gap-0.5 overflow-hidden">
+                              {cell.findings.slice(0, 10).map((finding) => (
+                                <span
+                                  key={finding.id}
+                                  className="rounded border border-white/70 bg-white/70 px-1 py-0 text-[9px] font-semibold leading-4 shadow-sm dark:border-white/10 dark:bg-slate-950/35 dark:text-current"
+                                  title={finding.title}
+                                >
+                                  {shortFindingId(finding)}
+                                </span>
+                              ))}
+                              {cell.findings.length > 10 && (
+                                <span className="rounded border border-white/70 bg-white/70 px-1 py-0 text-[9px] font-semibold leading-4 shadow-sm dark:border-white/10 dark:bg-slate-950/35 dark:text-current">+{cell.findings.length - 10}</span>
+                              )}
+                            </div>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </React.Fragment>
+                ))}
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                <span className="font-medium text-foreground">Leyenda:</span>
+                {["low", "low-medium", "medium", "medium-high", "high"].map((level) => (
+                  <span key={level} className={cn("rounded border px-2 py-1", riskMatrixToneClass(level))}>{riskMatrixLabel(level)}</span>
+                ))}
+              </div>
             </div>
           </div>
+          {selectedMatrixCell && selectedProbability && selectedSeverity && (
+            <div className="absolute inset-y-0 right-0 z-10 w-[min(360px,calc(100%-1rem))]">
+              <RiskMatrixFindingPanel
+                probabilityLabel={selectedProbability.label}
+                severityLabel={selectedSeverity.label}
+                cellLabel={selectedMatrixCell.label}
+                findings={selectedMatrixCell.findings}
+                onClose={() => setSelectedCell(null)}
+                onUpdateFinding={onUpdateFinding}
+              />
+            </div>
+          )}
         </div>
       </PanelBody>
     </Panel>
+  );
+}
+
+function RiskMatrixFindingPanel({
+  probabilityLabel,
+  severityLabel,
+  cellLabel,
+  findings,
+  onClose,
+  onUpdateFinding
+}: {
+  probabilityLabel: string;
+  severityLabel: string;
+  cellLabel: string;
+  findings: Finding[];
+  onClose: () => void;
+  onUpdateFinding: (id: string, patch: Partial<Finding>) => void;
+}) {
+  return (
+    <aside className="flex h-full min-w-0 max-w-full flex-col overflow-hidden rounded-md border border-border bg-[hsl(var(--surface))] shadow-2xl ring-1 ring-black/10">
+      <div className="flex items-start justify-between gap-3 border-b border-border px-4 py-3">
+        <div className="min-w-0">
+          <p className="text-xs font-semibold uppercase text-muted-foreground">Hallazgos de la celda</p>
+          <h3 className="mt-1 break-words text-sm font-semibold">{probabilityLabel} x {severityLabel}</h3>
+          <p className="mt-1 break-words text-xs text-muted-foreground">{cellLabel} · {findings.length} hallazgo(s)</p>
+        </div>
+        <Button size="icon" variant="ghost" title="Cerrar panel" onClick={onClose}>
+          <X size={15} />
+        </Button>
+      </div>
+      <div className="min-h-0 flex-1 space-y-3 overflow-auto p-3">
+        {findings.length === 0 ? (
+          <EmptyState icon={<ShieldCheck size={24} />} title="Sin hallazgos en esta celda" />
+        ) : (
+          findings.map((finding) => (
+            <article key={finding.id} className="min-w-0 rounded-md border border-border bg-[hsl(var(--surface-raised))] p-3">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="text-[11px] font-semibold uppercase text-muted-foreground">{shortFindingId(finding)}</p>
+                  <h4 className="mt-1 line-clamp-2 break-words text-sm font-semibold">{finding.title}</h4>
+                </div>
+                <Badge tone={riskTone[finding.risk]}>{finding.risk.toUpperCase()}</Badge>
+              </div>
+              <p className="mt-2 line-clamp-3 break-words text-xs text-muted-foreground">{finding.recommendation}</p>
+              <div className="mt-3 flex flex-wrap gap-1.5 text-[11px]">
+                <Badge tone="info">{Math.round(finding.confidence * 100)}% confianza</Badge>
+                <Badge tone="neutral">{finding.status}</Badge>
+                {finding.affectedAssets.slice(0, 2).map((asset) => (
+                  <span key={asset} className="max-w-full break-all rounded border border-border px-2 py-1 text-muted-foreground">{asset}</span>
+                ))}
+                {finding.affectedAssets.length > 2 && (
+                  <span className="rounded border border-border px-2 py-1 text-muted-foreground">+{finding.affectedAssets.length - 2}</span>
+                )}
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button size="sm" variant="secondary" onClick={() => onUpdateFinding(finding.id, { status: "validated" })} disabled={finding.status === "validated"}>
+                  <Check size={13} />
+                  Validar
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => onUpdateFinding(finding.id, { status: "discarded" })} disabled={finding.status === "discarded"}>
+                  <X size={13} />
+                  Descartar
+                </Button>
+              </div>
+            </article>
+          ))
+        )}
+      </div>
+    </aside>
   );
 }
 
@@ -7266,26 +8187,31 @@ function LifecycleTab({
   onResetLifecycleEox: (recordId: string) => void;
 }) {
   const [view, setView] = useState<"hardware" | "software" | "support">("hardware");
+  const [eoxFilter, setEoxFilter] = useState<"all" | "with-eox" | "not-found" | "not-consulted">("all");
+  const [detailRow, setDetailRow] = useState<LifecycleHardwareRow | LifecycleSoftwareRow | null>(null);
   const [isCheckingEox, setIsCheckingEox] = useState(false);
   const [isCheckingSupport, setIsCheckingSupport] = useState(false);
   const productIds = useMemo(() => lifecycleProductIds(record), [record]);
   const hardwareRows = useMemo(
-    () => buildLifecycleHardwareRows(record, record.lifecycleEoxRecords, record.lifecycleConsultedProductIds),
+    () => buildLifecycleHardwareRows(record, record.lifecycleEoxRecords, record.lifecycleConsultedProductIds, record.lifecycleEoxLookupResults),
     [record]
   );
   const softwareRows = useMemo(
-    () => buildLifecycleSoftwareRows(record, record.lifecycleEoxRecords, record.lifecycleConsultedProductIds),
+    () => buildLifecycleSoftwareRows(record, record.lifecycleEoxRecords, record.lifecycleConsultedProductIds, record.lifecycleEoxLookupResults),
     [record]
   );
   const supportRows = useMemo(
     () => buildSupportCoverageRows(record, record.supportCoverageRecords, record.supportCoverageConsultedSerials),
     [record]
   );
+  const filteredHardwareRows = useMemo(() => filterLifecycleEoxRows(hardwareRows, eoxFilter), [hardwareRows, eoxFilter]);
+  const filteredSoftwareRows = useMemo(() => filterLifecycleEoxRows(softwareRows, eoxFilter), [softwareRows, eoxFilter]);
   const supportSerials = useMemo(() => supportCoverageSerials(record), [record]);
   const hasOnlyDeviceLevelInventory = hardwareRows.some((row) => row.source === "show version");
   const hasLifecycleResults =
     Object.keys(record.lifecycleEoxRecords).length > 0 ||
     record.lifecycleConsultedProductIds.length > 0 ||
+    Object.keys(record.lifecycleEoxLookupResults ?? {}).length > 0 ||
     Boolean(record.lifecycleEoxMessage) ||
     Object.keys(record.supportCoverageRecords).length > 0 ||
     record.supportCoverageConsultedSerials.length > 0 ||
@@ -7343,6 +8269,25 @@ function LifecycleTab({
         </div>
       </PanelHeader>
       <PanelBody>
+        {view !== "support" && (
+          <div className="mb-3 flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/20 px-3 py-2">
+            <span className="text-xs font-semibold uppercase text-muted-foreground">Filtro EoX</span>
+            {[
+              { id: "all", label: "Todos" },
+              { id: "with-eox", label: "Solo con EoX" },
+              { id: "not-found", label: "Sin resultado" },
+              { id: "not-consulted", label: "No consultados" }
+            ].map((filter) => (
+              <button
+                key={filter.id}
+                className={cn("h-8 rounded-md border border-border px-3 text-xs font-semibold", eoxFilter === filter.id ? "bg-primary text-primary-foreground" : "bg-white text-muted-foreground hover:bg-muted")}
+                onClick={() => setEoxFilter(filter.id as typeof eoxFilter)}
+              >
+                {filter.label}
+              </button>
+            ))}
+          </div>
+        )}
         {record.lifecycleEoxMessage && (
           <div className="mb-3 rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">{record.lifecycleEoxMessage}</div>
         )}
@@ -7355,26 +8300,27 @@ function LifecycleTab({
           </div>
         )}
         {view === "hardware" ? (
-          <LifecycleHardwareTable rows={hardwareRows} />
+          <LifecycleHardwareTable rows={filteredHardwareRows} onShowDetail={setDetailRow} />
         ) : view === "software" ? (
-          <LifecycleSoftwareTable rows={softwareRows} />
+          <LifecycleSoftwareTable rows={filteredSoftwareRows} onShowDetail={setDetailRow} />
         ) : (
           <SupportCoverageTable rows={supportRows} />
         )}
+        {detailRow && <LifecycleEoxDetailDialog row={detailRow} onClose={() => setDetailRow(null)} />}
       </PanelBody>
     </Panel>
   );
 }
 
-function LifecycleHardwareTable({ rows }: { rows: LifecycleHardwareRow[] }) {
+function LifecycleHardwareTable({ rows, onShowDetail }: { rows: LifecycleHardwareRow[]; onShowDetail: (row: LifecycleHardwareRow) => void }) {
   if (rows.length === 0) return <EmptyState icon={<Server size={24} />} title="Sin inventario hardware para evaluar" />;
 
   return (
     <div className="overflow-x-auto rounded-md border border-border">
-      <table className="w-full min-w-[1320px] text-left text-sm">
+      <table className="w-full min-w-[1500px] text-left text-sm">
         <thead className="bg-muted/60 text-xs uppercase text-muted-foreground">
           <tr>
-            <th className="px-3 py-2 font-semibold">Equipo</th>
+            <th className="w-72 min-w-72 px-3 py-2 font-semibold">Equipo</th>
             <th className="px-3 py-2 font-semibold">Componente</th>
             <th className="px-3 py-2 font-semibold">PID</th>
             <th className="px-3 py-2 font-semibold">Serial</th>
@@ -7385,14 +8331,15 @@ function LifecycleHardwareTable({ rows }: { rows: LifecycleHardwareRow[] }) {
             <th className="px-3 py-2 font-semibold">End of New Service Attachment Date</th>
             <th className="px-3 py-2 font-semibold">Last Date of Support</th>
             <th className="px-3 py-2 font-semibold">Boletin</th>
+            <th className="px-3 py-2 font-semibold">Detalle</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-border bg-white">
           {rows.map((row) => (
             <tr key={row.id}>
-              <td className="px-3 py-3 align-top">
-                <p className="font-semibold">{row.hostname}</p>
-                <p className="text-xs text-muted-foreground">{row.source}</p>
+              <td className="w-72 min-w-72 px-3 py-3 align-top">
+                <p className="break-words font-semibold leading-snug">{row.hostname}</p>
+                <p className="mt-1 break-words text-xs leading-snug text-muted-foreground">{row.source}</p>
               </td>
               <td className="px-3 py-3 align-top">
                 <p className="font-medium">{row.component}</p>
@@ -7418,6 +8365,12 @@ function LifecycleHardwareTable({ rows }: { rows: LifecycleHardwareRow[] }) {
                   <span className="text-muted-foreground">Pendiente</span>
                 )}
               </td>
+              <td className="px-3 py-3 align-top">
+                <Button size="sm" variant="secondary" onClick={() => onShowDetail(row)}>
+                  <Search size={13} />
+                  Ver
+                </Button>
+              </td>
             </tr>
           ))}
         </tbody>
@@ -7426,28 +8379,29 @@ function LifecycleHardwareTable({ rows }: { rows: LifecycleHardwareRow[] }) {
   );
 }
 
-function LifecycleSoftwareTable({ rows }: { rows: LifecycleSoftwareRow[] }) {
+function LifecycleSoftwareTable({ rows, onShowDetail }: { rows: LifecycleSoftwareRow[]; onShowDetail: (row: LifecycleSoftwareRow) => void }) {
   if (rows.length === 0) return <EmptyState icon={<Server size={24} />} title="Sin inventario software para evaluar" />;
 
   return (
     <div className="overflow-x-auto rounded-md border border-border">
-      <table className="w-full min-w-[1120px] text-left text-sm">
+      <table className="w-full min-w-[1280px] text-left text-sm">
         <thead className="bg-muted/60 text-xs uppercase text-muted-foreground">
           <tr>
-            <th className="px-3 py-2 font-semibold">Equipo</th>
+            <th className="w-72 min-w-72 px-3 py-2 font-semibold">Equipo</th>
             <th className="px-3 py-2 font-semibold">Modelo / PID</th>
             <th className="px-3 py-2 font-semibold">Version</th>
             <th className="w-56 px-3 py-2 font-semibold">Estado</th>
             <th className="px-3 py-2 font-semibold">Referencia Cisco</th>
             <th className="px-3 py-2 font-semibold">Accion</th>
+            <th className="px-3 py-2 font-semibold">Detalle</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-border bg-white">
           {rows.map((row) => (
             <tr key={row.id}>
-              <td className="px-3 py-3 align-top">
-                <p className="font-semibold">{row.hostname}</p>
-                <p className="text-xs text-muted-foreground">{row.source}</p>
+              <td className="w-72 min-w-72 px-3 py-3 align-top">
+                <p className="break-words font-semibold leading-snug">{row.hostname}</p>
+                <p className="mt-1 break-words text-xs leading-snug text-muted-foreground">{row.source}</p>
               </td>
               <td className="px-3 py-3 align-top">
                 <p className="font-medium">{row.model}</p>
@@ -7468,10 +8422,89 @@ function LifecycleSoftwareTable({ rows }: { rows: LifecycleSoftwareRow[] }) {
                 )}
               </td>
               <td className="px-3 py-3 align-top">{softwareLifecycleAction(row)}</td>
+              <td className="px-3 py-3 align-top">
+                <Button size="sm" variant="secondary" onClick={() => onShowDetail(row)}>
+                  <Search size={13} />
+                  Ver
+                </Button>
+              </td>
             </tr>
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function filterLifecycleEoxRows<T extends LifecycleHardwareRow | LifecycleSoftwareRow>(rows: T[], filter: "all" | "with-eox" | "not-found" | "not-consulted") {
+  if (filter === "with-eox") return rows.filter((row) => Boolean(row.eox));
+  if (filter === "not-found") return rows.filter((row) => row.consulted && !row.eox);
+  if (filter === "not-consulted") return rows.filter((row) => !row.consulted);
+  return rows;
+}
+
+function LifecycleEoxDetailDialog({ row, onClose }: { row: LifecycleHardwareRow | LifecycleSoftwareRow; onClose: () => void }) {
+  const lookup = row.lookup;
+  const sourceLabel = row.eox?.source === "support-api" || lookup?.source === "support-api" ? "Cisco Support EoX API" : row.eox?.source === "public-cisco" || lookup?.source === "public-cisco" ? "Cisco publico" : "No consultado";
+  const statusLabel = row.eox ? "Registro EoX encontrado" : row.consulted ? "Consultado sin resultado" : "Pendiente de consulta";
+  const dates = [
+    ["Anuncio", row.eox?.announcementDate],
+    ["End-of-Sale", row.eox?.endOfSaleDate],
+    ["Vulnerability/Security", row.eox?.endOfSecurityVulSupportDate],
+    ["New Service Attachment", row.eox?.endOfSvcAttachDate],
+    ["Last Date of Support", row.eox?.lastDateOfSupport]
+  ];
+  const attempts = lookup?.attempts ?? [
+    `PID normalizado: ${normalizeProductId(row.productId)}`,
+    row.consulted ? "PID incluido en la ultima consulta, pero no se guardo detalle de lookup." : "Este PID no ha sido consultado."
+  ];
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4">
+      <div className="max-h-[86vh] w-full max-w-2xl overflow-hidden rounded-md border border-border bg-[hsl(var(--surface))] shadow-2xl">
+        <div className="flex items-start justify-between gap-3 border-b border-border px-4 py-3">
+          <div className="min-w-0">
+            <p className="text-xs font-semibold uppercase text-muted-foreground">Detalle de consulta EoX</p>
+            <h3 className="mt-1 break-words text-base font-semibold">{row.hostname} · {row.productId}</h3>
+            <p className="mt-1 text-xs text-muted-foreground">{statusLabel} · {sourceLabel}</p>
+          </div>
+          <Button size="icon" variant="ghost" title="Cerrar detalle" onClick={onClose}>
+            <X size={16} />
+          </Button>
+        </div>
+        <div className="max-h-[calc(86vh-84px)] space-y-4 overflow-auto p-4 text-sm">
+          <div className="grid gap-2 sm:grid-cols-2">
+            <MetricDetail label="PID consultado" value={lookup?.productId ?? row.productId} />
+            <MetricDetail label="PID normalizado" value={lookup?.normalizedProductId ?? normalizeProductId(row.productId)} />
+            <MetricDetail label="Match Cisco" value={lookup?.matchedProductId || row.eox?.productId || "Sin match"} />
+            <MetricDetail label="Boletin" value={row.eox?.bulletinNumber || lookup?.bulletinNumber || "Sin boletin"} />
+          </div>
+          <div className="rounded-md border border-border bg-[hsl(var(--surface-raised))] p-3">
+            <p className="text-xs font-semibold uppercase text-muted-foreground">Fechas EoX</p>
+            <div className="mt-2 grid gap-2 sm:grid-cols-2">
+              {dates.map(([label, value]) => (
+                <div key={label} className="rounded border border-border px-2 py-1">
+                  <p className="text-[11px] uppercase text-muted-foreground">{label}</p>
+                  <p className="mt-0.5 font-semibold">{value || "Sin dato Cisco"}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+          {row.eox?.bulletinUrl || lookup?.bulletinUrl ? (
+            <a className="inline-flex text-primary underline-offset-2 hover:underline" href={row.eox?.bulletinUrl || lookup?.bulletinUrl} target="_blank" rel="noreferrer">
+              Abrir boletin Cisco
+            </a>
+          ) : null}
+          <div className="rounded-md border border-border bg-[hsl(var(--surface-raised))] p-3">
+            <p className="text-xs font-semibold uppercase text-muted-foreground">Log de analisis</p>
+            <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
+              {attempts.map((attempt, index) => (
+                <li key={`${attempt}-${index}`} className="break-words">- {attempt}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -7481,10 +8514,10 @@ function SupportCoverageTable({ rows }: { rows: SupportCoverageRow[] }) {
 
   return (
     <div className="overflow-x-auto rounded-md border border-border">
-      <table className="w-full min-w-[1280px] text-left text-sm">
+      <table className="w-full min-w-[1440px] text-left text-sm">
         <thead className="bg-muted/60 text-xs uppercase text-muted-foreground">
           <tr>
-            <th className="px-3 py-2 font-semibold">Equipo</th>
+            <th className="w-72 min-w-72 px-3 py-2 font-semibold">Equipo</th>
             <th className="px-3 py-2 font-semibold">Componente</th>
             <th className="px-3 py-2 font-semibold">Serial</th>
             <th className="px-3 py-2 font-semibold">PID</th>
@@ -7499,9 +8532,9 @@ function SupportCoverageTable({ rows }: { rows: SupportCoverageRow[] }) {
         <tbody className="divide-y divide-border bg-white">
           {rows.map((row) => (
             <tr key={`support-${row.id}`}>
-              <td className="px-3 py-3 align-top">
-                <p className="font-semibold">{row.hostname}</p>
-                <p className="text-xs text-muted-foreground">{row.source}</p>
+              <td className="w-72 min-w-72 px-3 py-3 align-top">
+                <p className="break-words font-semibold leading-snug">{row.hostname}</p>
+                <p className="mt-1 break-words text-xs leading-snug text-muted-foreground">{row.source}</p>
               </td>
               <td className="px-3 py-3 align-top">
                 <p className="font-medium">{row.component}</p>
@@ -7532,7 +8565,7 @@ function LifecycleStatusBadge({ row }: { row: LifecycleHardwareRow }) {
   let description = "Pendiente de consulta EoX";
   let Icon = Search;
 
-  if (!row.productId || row.productId === "No identificado") {
+  if (!isConsultableCiscoProductId(row.productId)) {
     tone = "warning";
     title = "Sin PID";
     description = "No hay identificador consultable";
@@ -7594,7 +8627,7 @@ function LifecycleSoftwareStatusBadge({ row }: { row: LifecycleSoftwareRow }) {
     title = "Sin version";
     description = "No se pudo extraer version";
     Icon = AlertTriangle;
-  } else if (!row.productId || row.productId === "No identificado") {
+  } else if (!isConsultableCiscoProductId(row.productId)) {
     tone = "warning";
     title = "Sin PID";
     description = "No hay PID para contexto Cisco";
@@ -9150,11 +10183,12 @@ function DashboardSummary({
   activeFindings: Finding[];
   onGoEvidence: () => void;
 }) {
+  const effectiveParsed = effectiveParsedNetworkData(record);
   const metrics = [
     ["Evidencias", record.evidenceFiles.length],
-    ["Dispositivos", record.parsed.devices.length],
-    ["Interfaces", record.parsed.interfaces.length],
-    ["Relaciones", record.parsed.relations.length],
+    ["Dispositivos", effectiveParsed.devices.length],
+    ["Interfaces", effectiveParsed.interfaces.length],
+    ["Relaciones", effectiveParsed.relations.length],
     ["Hallazgos activos", activeFindings.length]
   ];
 
@@ -9176,9 +10210,9 @@ function DashboardSummary({
               ["Crear assessment", true],
               ["Seleccionar dominios", record.assessment.domains.length > 0],
               ["Cargar evidencia", record.evidenceFiles.length > 0],
-              ["Parsear comandos Cisco", record.parsed.devices.length > 0 || record.parsed.interfaces.length > 0],
-              ["Generar inventario", record.parsed.devices.length > 0],
-              ["Descubrir relaciones", record.parsed.relations.length > 0],
+              ["Parsear comandos Cisco", effectiveParsed.devices.length > 0 || effectiveParsed.interfaces.length > 0],
+              ["Generar inventario", effectiveParsed.devices.length > 0],
+              ["Descubrir relaciones", effectiveParsed.relations.length > 0],
               ["Validar hallazgos", record.parsed.findings.some((finding) => finding.status === "validated")],
               ["Exportar matriz Excel", record.parsed.findings.length > 0]
             ].map(([item, done], index) => (
@@ -9382,15 +10416,6 @@ function EmptyState({ icon, title }: { icon: React.ReactNode; title: string }) {
     <div className="flex min-h-40 flex-col items-center justify-center rounded-md border border-dashed border-border bg-muted/30 p-6 text-center">
       <div className="mb-2 text-muted-foreground">{icon}</div>
       <p className="text-sm font-medium">{title}</p>
-    </div>
-  );
-}
-
-function Endpoint({ host, port }: { host: string; port: string }) {
-  return (
-    <div className="min-w-0 rounded-md bg-muted/50 p-2">
-      <p className="truncate font-semibold">{host}</p>
-      <p className="truncate text-xs text-muted-foreground">{port}</p>
     </div>
   );
 }
@@ -9718,9 +10743,11 @@ function normalizeRecord(record: AssessmentRecord) {
     targetInventory: (record.targetInventory ?? []).map((asset) => ({
       ...asset,
       deviceType: asset.deviceType ?? inferDeviceType(asset),
+      topologyLayer: normalizeTopologyLayer(asset.topologyLayer),
       included: asset.included ?? true
     })),
     lifecycleEoxRecords: record.lifecycleEoxRecords ?? {},
+    lifecycleEoxLookupResults: record.lifecycleEoxLookupResults ?? {},
     lifecycleConsultedProductIds: record.lifecycleConsultedProductIds ?? [],
     lifecycleEoxMessage: record.lifecycleEoxMessage ?? "",
     supportCoverageRecords: record.supportCoverageRecords ?? {},
@@ -9790,6 +10817,157 @@ function evaluationAreaLabel(area: EvaluationArea) {
   return evaluationAreas.find((item) => item.id === area)?.label ?? area;
 }
 
+function evaluationAreaToAIScope(area: EvaluationArea): AIAnalysisScopeId {
+  const map: Record<EvaluationArea, AIAnalysisScopeId> = {
+    topology: "topology",
+    configuration: "configuration",
+    security: "security",
+    lifecycle: "lifecycle",
+    operations: "operations",
+    logs: "evidence"
+  };
+  return map[area];
+}
+
+function scopeLabel(scopeId: AIAnalysisScopeId) {
+  const labels: Record<AIAnalysisScopeId, string> = {
+    inventory: "Inventario",
+    configuration: "Configuracion",
+    lifecycle: "Lifecycle",
+    topology: "Topologia",
+    routing: "Routing",
+    performance: "Performance",
+    security: "Seguridad",
+    high_availability: "Alta disponibilidad",
+    datacenter: "Datacenter",
+    campus: "Campus",
+    wan: "WAN",
+    perimeter: "Perimetro",
+    operations: "Operacion",
+    evidence: "Evidencia",
+    roadmap: "Roadmap",
+    executive_summary: "Resumen ejecutivo"
+  };
+  return labels[scopeId] ?? scopeId;
+}
+
+function isActiveAIJobStatus(status: string) {
+  return status === "queued" || status === "running";
+}
+
+function hasRunningAIJob(status?: AIAssessmentAnalysisStatus) {
+  return Boolean(status?.jobs.some((job) => isActiveAIJobStatus(job.status)));
+}
+
+function scopeStatusTone(status: string | undefined): React.ComponentProps<typeof Badge>["tone"] {
+  if (status === "completed" || status === "complete") return "success";
+  if (status === "running" || status === "queued" || status === "pending") return "warning";
+  if (status === "failed" || status === "blocked" || status === "cancelled") return "danger";
+  if (status === "skipped" || status === "partially_completed") return "info";
+  return "neutral";
+}
+
+async function fetchAIAnalysisStatus(assessmentId: string): Promise<AIAssessmentAnalysisStatus> {
+  const response = await fetch(`/api/ai-analysis/assessments/${assessmentId}/status`, { cache: "no-store" });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload?.error || "No se pudo consultar estado AI.");
+  return payload as AIAssessmentAnalysisStatus;
+}
+
+async function resetPersistentAIAnalysisStatus(assessmentId: string, scopeId?: AIAnalysisScopeId | null): Promise<AIAssessmentAnalysisStatus> {
+  const suffix = scopeId ? `?scopeId=${encodeURIComponent(scopeId)}` : "";
+  const response = await fetch(`/api/ai-analysis/assessments/${assessmentId}/status${suffix}`, { method: "DELETE" });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload?.error || "No se pudo limpiar estado AI.");
+  return payload as AIAssessmentAnalysisStatus;
+}
+
+function persistentAIResultsToFindings(results: AIAssessmentAnalysisResults["results"], assessmentId: string): Finding[] {
+  return results.flatMap((result) => {
+    const findings = Array.isArray(result.findings) ? result.findings as any[] : [];
+    return findings.map((finding) => persistentAIFindingToFinding(finding, result.scopeId, assessmentId));
+  });
+}
+
+function persistentAIFindingToFinding(finding: any, scopeId: AIAnalysisScopeId, assessmentId: string): Finding {
+  const evidenceItems = Array.isArray(finding?.evidence) ? finding.evidence : [];
+  const evidence = evidenceItems.map((item: any) => {
+    const source = [item?.source_name, item?.hostname, item?.command].filter(Boolean).join(" · ");
+    return `${source || "AI analysis"}: ${String(item?.excerpt ?? "").slice(0, 600)}`;
+  }).filter(Boolean);
+  const relatedDevices = Array.isArray(finding?.related_devices) ? finding.related_devices.map(String) : [];
+
+  return {
+    id: `aijob_${assessmentId}_${finding?.finding_id ?? uid("ai")}`,
+    title: cleanPersistentAIText(finding?.title) || "Hallazgo AI pendiente de titulo",
+    category: scopeToFindingCategory(scopeId),
+    risk: normalizePersistentAIRisk(finding?.severity),
+    confidence: normalizePersistentAIConfidence(finding?.confidence),
+    status: "ai_suggested",
+    affectedAssets: relatedDevices.length > 0 ? relatedDevices : ["Assessment"],
+    evidence: evidence.length > 0 ? evidence : ["Resultado AI persistente sin evidencia detallada."],
+    recommendation: cleanPersistentAIText(finding?.recommendation) || "Validar con arquitecto antes de emitir recomendacion final.",
+    remediationType: "pending-validation",
+    serviceOffer: `${scopeLabel(scopeId)} Analysis`,
+    architectNotes: "",
+    aiMetadata: {
+      findingType: "validation_required",
+      domain: scopeToAIFindingDomain(scopeId),
+      businessImpact: cleanPersistentAIText(finding?.business_impact),
+      technicalImpact: cleanPersistentAIText(finding?.technical_rationale),
+      validationQuestions: ["Validar evidencia, severidad y recomendacion antes de aceptar el hallazgo."],
+      limitations: []
+    }
+  };
+}
+
+function markPersistentAIRuns(runs: EvaluationRun[], job: AIAnalysisJobSnapshot, findingCount: number) {
+  const scopeIds = new Set(job.steps.map((step) => step.scopeId));
+  const areas = evaluationAreas.filter((area) => scopeIds.has(evaluationAreaToAIScope(area.id))).map((area) => area.id);
+  if (areas.length === 0) return runs;
+  return areas.reduce((nextRuns, area) => upsertRun(nextRuns, {
+    area,
+    status: job.status === "failed" ? "blocked" : "complete",
+    progress: 100,
+    message: findingCount > 0 ? `${findingCount} hallazgos agregados desde motor persistente` : "Evaluacion completada sin nuevos hallazgos",
+    updatedAt: new Date().toISOString(),
+    generatedFindingIds: []
+  }), runs);
+}
+
+function scopeToFindingCategory(scopeId: AIAnalysisScopeId): Finding["category"] {
+  if (scopeId === "lifecycle") return "lifecycle";
+  if (scopeId === "security" || scopeId === "perimeter") return "security";
+  if (scopeId === "topology" || scopeId === "high_availability") return "resiliency";
+  if (scopeId === "configuration") return "configuration";
+  if (scopeId === "inventory") return "inventory";
+  return "operations";
+}
+
+function scopeToAIFindingDomain(scopeId: AIAnalysisScopeId): NonNullable<Finding["aiMetadata"]>["domain"] {
+  if (scopeId === "datacenter") return "datacenter";
+  if (scopeId === "security" || scopeId === "perimeter") return "security";
+  if (scopeId === "performance") return "performance";
+  if (scopeId === "lifecycle") return "lifecycle";
+  return scopeId === "operations" ? "operations" : "enterprise_networking";
+}
+
+function normalizePersistentAIRisk(value: unknown): RiskLevel {
+  if (value === "critical" || value === "high" || value === "medium" || value === "low") return value;
+  return "info";
+}
+
+function normalizePersistentAIConfidence(value: unknown) {
+  if (value === "high") return 0.86;
+  if (value === "medium") return 0.68;
+  if (value === "low") return 0.42;
+  return 0.5;
+}
+
+function cleanPersistentAIText(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
 function defaultRun(area: EvaluationArea): EvaluationRun {
   return {
     area,
@@ -9805,10 +10983,11 @@ function upsertRun(runs: EvaluationRun[], nextRun: EvaluationRun) {
 }
 
 function hasEvidenceForArea(record: AssessmentRecord, area: EvaluationArea) {
-  if (area === "lifecycle") return record.targetInventory.length > 0 || record.parsed.devices.length > 0;
-  if (area === "topology") return record.parsed.relations.length > 0 || record.targetInventory.length > 1;
+  const effectiveParsed = effectiveParsedNetworkData(record);
+  if (area === "lifecycle") return record.targetInventory.length > 0 || effectiveParsed.devices.length > 0;
+  if (area === "topology") return effectiveParsed.relations.length > 0 || record.targetInventory.length > 1;
   if (area === "logs") return record.evidenceFiles.some((file) => /log|show tech|logging/i.test(`${file.name}\n${file.content}`));
-  return record.evidenceFiles.length > 0 || record.parsed.devices.length > 0;
+  return record.evidenceFiles.length > 0 || effectiveParsed.devices.length > 0;
 }
 
 function areaToCategory(area: EvaluationArea): Finding["category"] {
@@ -9964,6 +11143,8 @@ function buildSow(record: AssessmentRecord) {
 }
 
 function buildSowExportInput(record: AssessmentRecord, sowItems: Array<{ title: string; body: string }>) {
+  const effectiveParsed = effectiveParsedNetworkData(record);
+
   return {
     client: {
       name: record.client.name,
@@ -9992,6 +11173,7 @@ function buildSowExportInput(record: AssessmentRecord, sowItems: Array<{ title: 
       deviceType: deviceTypeLabel(asset.deviceType),
       role: asset.role,
       site: asset.site,
+      topologyLayer: asset.topologyLayer ? topologyLayerConfig[asset.topologyLayer].label : "Auto",
       priority: asset.priority,
       included: asset.included
     })),
@@ -10015,7 +11197,7 @@ function buildSowExportInput(record: AssessmentRecord, sowItems: Array<{ title: 
       sizeKb: Math.max(1, Math.round(file.content.length / 1024)),
       uploadedAt: formatDate(file.uploadedAt)
     })),
-    relations: record.parsed.relations.map((relation) => ({
+    relations: effectiveParsed.relations.map((relation) => ({
       localHostname: relation.localHostname,
       localInterface: relation.localInterface,
       remoteHostname: relation.remoteHostname,
@@ -10303,6 +11485,7 @@ function compareInventoryValues(left: InventoryAsset, right: InventoryAsset, key
 function inventorySortValue(asset: InventoryAsset, key: InventorySortKey) {
   if (key === "deviceType") return deviceTypeLabel(asset.deviceType);
   if (key === "role") return `${asset.role} ${asset.site}`;
+  if (key === "topologyLayer") return asset.topologyLayer ? topologyLayerConfig[asset.topologyLayer].label : "Auto";
   return String(asset[key] ?? "");
 }
 
@@ -10347,6 +11530,17 @@ function normalizePriority(value: string): InventoryAsset["priority"] {
   if (normalized === "high" || normalized === "alta") return "high";
   if (normalized === "low" || normalized === "baja") return "low";
   return "medium";
+}
+
+function normalizeTopologyLayer(value: unknown): TopologyLayerId | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.toLowerCase().trim().replace(/[\s_]+/g, "-");
+  if (normalized === "auto" || normalized === "automatico" || normalized === "automático") return undefined;
+  if (normalized === "branch" || normalized === "branches" || normalized === "sucursal" || normalized === "sucursales" || normalized === "remote-site" || normalized === "remote-office") return "branches";
+  if (normalized === "perimetro" || normalized === "perímetro" || normalized === "wan-edge" || normalized === "edge") return "perimeter";
+  if (normalized === "dc" || normalized === "data-center" || normalized === "data-center-fabric" || normalized === "fabric") return "datacenter";
+  if (normalized === "campus-access" || normalized === "access" || normalized === "acceso" || normalized === "distribution" || normalized === "distribucion") return "campus";
+  return topologyLayerOrder.includes(normalized as TopologyLayerId) ? normalized as TopologyLayerId : undefined;
 }
 
 function downloadTextFile(fileName: string, content: string) {
@@ -10408,7 +11602,7 @@ function getExecutiveRiskDashboard(record: AssessmentRecord): ExecutiveRiskDashb
   const activeFindings = acceptedOrValidatedFindings(record.parsed.findings);
   const validatedFindings = executiveSummaryFindings(record.parsed.findings);
   const confidence = calculateConfidenceIndex(record);
-  const dimensions = calculateRiskDimensions(record, validatedFindings);
+  const dimensions = calculateRiskDimensions(record, validatedFindings, confidence.overall);
   const isSufficient = confidence.overall >= executiveConfidenceThreshold && validatedFindings.length > 0;
   const irir = isSufficient ? Math.round(dimensions.reduce((sum, dimension) => sum + dimension.weightedScore, 0)) : null;
   const actionCounts = {
@@ -10473,7 +11667,7 @@ function getExecutiveRiskDashboard(record: AssessmentRecord): ExecutiveRiskDashb
   };
 }
 
-function calculateRiskDimensions(record: AssessmentRecord, findings: Finding[]): RiskDimensionScore[] {
+function calculateRiskDimensions(record: AssessmentRecord, findings: Finding[], confidenceOverall = calculateConfidenceIndex(record).overall): RiskDimensionScore[] {
   return riskDimensions.filter((dimension) => dimension.id !== "performance" || record.scope.performanceAnalysis.enabled).map((dimension) => {
     const dimensionFindings = findings.filter((finding) => findingBelongsToRiskDimension(finding, dimension.id, dimension.categories));
     const hasEvidence = dimensionHasEvidence(record, dimension.id);
@@ -10496,7 +11690,7 @@ function calculateRiskDimensions(record: AssessmentRecord, findings: Finding[]):
       normalizedScore,
       weightedScore: (normalizedScore * dimension.weight) / 100,
       level: rawScore === null ? "Insufficient evidence" : rawScoreLevel(rawScore),
-      confidenceLevel: confidenceLevel(calculateConfidenceIndex(record).overall),
+      confidenceLevel: confidenceLevel(confidenceOverall),
       findingCount: dimensionFindings.length,
       evidenceSummary:
         rawScore === null
@@ -10518,14 +11712,15 @@ function findingBelongsToRiskDimension(finding: Finding, dimensionId: string, ca
 
 function calculateConfidenceIndex(record: AssessmentRecord) {
   const coverageRows = buildEvidenceCoverageRows(record);
-  const expectedDevices = Math.max(record.targetInventory.filter((asset) => asset.included).length, record.parsed.devices.length);
+  const effectiveParsed = effectiveParsedNetworkData(record);
+  const expectedDevices = Math.max(record.targetInventory.filter((asset) => asset.included).length, effectiveParsed.devices.length);
   const completedCoverageRows = coverageRows.filter((row) => row.missingCount === 0).length;
   const evidenceReceived = Math.min(100, (record.evidenceFiles.length / Math.max(1, expectedDevices)) * 100);
-  const deviceCoverage = expectedDevices === 0 ? 0 : Math.min(100, (record.parsed.devices.length / expectedDevices) * 100);
+  const deviceCoverage = expectedDevices === 0 ? 0 : Math.min(100, (effectiveParsed.devices.length / expectedDevices) * 100);
   const configCompleteness = coverageRows.length === 0 ? 0 : (completedCoverageRows / coverageRows.length) * 100;
   const interviewCompletion = operationsFormScore(record);
   const lifecycleData = lifecycleProductIds(record).length > 0 ? record.lifecycleConsultedProductIds.length > 0 ? 100 : 60 : 0;
-  const topologyConfidence = expectedDevices <= 1 ? 100 : record.parsed.relations.length > 0 ? 85 : 20;
+  const topologyConfidence = expectedDevices <= 1 ? 100 : effectiveParsed.relations.length > 0 ? 85 : 20;
   const performanceConfidence = record.performance.assessment.confidenceScore;
   const overall = record.scope.performanceAnalysis.enabled
     ? Math.round(
@@ -10558,11 +11753,12 @@ function calculateConfidenceIndex(record: AssessmentRecord) {
 }
 
 function dimensionHasEvidence(record: AssessmentRecord, dimensionId: string) {
-  if (dimensionId === "resiliency") return record.parsed.relations.length > 0 || record.evidenceFiles.some((file) => /spanning-tree|redundancy|vpc|etherchannel/i.test(file.content));
+  const effectiveParsed = effectiveParsedNetworkData(record);
+  if (dimensionId === "resiliency") return effectiveParsed.relations.length > 0 || record.evidenceFiles.some((file) => /spanning-tree|redundancy|vpc|etherchannel/i.test(file.content));
   if (dimensionId === "security") return record.evidenceFiles.some((file) => /running-config|access-list|snmp|aaa|transport input|crypto/i.test(file.content));
-  if (dimensionId === "lifecycle") return record.parsed.devices.length > 0 || lifecycleProductIds(record).length > 0;
+  if (dimensionId === "lifecycle") return effectiveParsed.devices.length > 0 || lifecycleProductIds(record).length > 0;
   if (dimensionId === "configuration") return record.evidenceFiles.some((file) => /running-config|startup-config/i.test(file.content));
-  if (dimensionId === "operations") return record.parsed.interfaces.length > 0 || record.evidenceFiles.some((file) => /logging|ntp|clock|environment/i.test(file.content));
+  if (dimensionId === "operations") return effectiveParsed.interfaces.length > 0 || record.evidenceFiles.some((file) => /logging|ntp|clock|environment/i.test(file.content));
   if (dimensionId === "performance") {
     if (!record.scope.performanceAnalysis.enabled) return false;
     return record.performance.metrics.length > 0 || record.performance.evidenceFiles.length > 0;
@@ -10649,11 +11845,19 @@ async function fetchLifecycleEoxRecords(productIds: string[], ciscoToken: string
   if (!response.ok) throw new Error(payload?.error || "No se pudo consultar Cisco EoX.");
 
   const records = Object.fromEntries(
-    ((payload.records ?? []) as LifecycleEoxRecord[]).map((item) => [normalizeProductId(item.productId), item])
+    ((payload.records ?? []) as LifecycleEoxRecord[]).flatMap((item) => (
+      lifecycleProductIdVariants(item.productId || item.inputValue || "").map((variant) => [variant, item])
+    ))
   ) as Record<string, LifecycleEoxRecord>;
+  const lookupResults = Object.fromEntries(
+    ((payload.lookupResults ?? []) as LifecycleEoxLookupResult[]).flatMap((item) => (
+      lifecycleProductIdVariants(item.productId).map((variant) => [variant, item])
+    ))
+  ) as Record<string, LifecycleEoxLookupResult>;
 
   return {
     records,
+    lookupResults,
     source: payload.source as "support-api" | "public-cisco" | undefined,
     warning: payload.warning as string | undefined
   };
@@ -10695,12 +11899,15 @@ function supportCoverageSerials(record: AssessmentRecord) {
 function buildLifecycleHardwareRows(
   record: AssessmentRecord,
   eoxRecords: Record<string, LifecycleEoxRecord>,
-  consultedProductIds: string[]
+  consultedProductIds: string[],
+  lookupResults: Record<string, LifecycleEoxLookupResult> = {}
 ): LifecycleHardwareRow[] {
   const consulted = new Set(consultedProductIds.map(normalizeProductId));
   const rows: LifecycleHardwareRow[] = [];
+  const lifecycleDevices = lifecycleDevicesForRecord(record);
+  const parsedHostnames = new Set(lifecycleDevices.map((device) => device.hostname.toLowerCase()));
 
-  for (const device of record.parsed.devices) {
+  for (const device of lifecycleDevices) {
     const inventoryItems = device.inventoryItems ?? [];
     const chassisItem = preferredChassisInventoryItem(inventoryItems);
     const isModular = isModularCiscoPlatform(device.model, inventoryItems);
@@ -10716,8 +11923,9 @@ function buildLifecycleHardwareRows(
           productId: item.productId,
           serial: item.serial,
           source: `show inventory · ${item.sourceFile}`,
-          eox: eoxRecords[productKey],
-          consulted: consulted.has(productKey)
+          eox: lifecycleEoxRecordForProduct(productKey, eoxRecords),
+          lookup: lifecycleLookupForProduct(productKey, lookupResults),
+          consulted: lifecycleConsultedHas(productKey, consulted)
         });
       }
       continue;
@@ -10734,26 +11942,26 @@ function buildLifecycleHardwareRows(
       productId,
       serial,
       source: chassisItem ? `show inventory · fixed platform` : "show version",
-      eox: eoxRecords[productKey],
-      consulted: consulted.has(productKey)
+      eox: lifecycleEoxRecordForProduct(productKey, eoxRecords),
+      lookup: lifecycleLookupForProduct(productKey, lookupResults),
+      consulted: lifecycleConsultedHas(productKey, consulted)
     });
   }
 
-  if (rows.length === 0) {
-    for (const asset of record.targetInventory.filter((item) => item.included)) {
-      const productKey = normalizeProductId(asset.model);
-      rows.push({
-        id: `asset:${asset.id}`,
-        hostname: asset.hostname,
-        component: "Chasis",
-        itemType: deviceTypeLabel(asset.deviceType),
-        productId: asset.model,
-        serial: asset.serial,
-        source: "Inventario cargado",
-        eox: eoxRecords[productKey],
-        consulted: consulted.has(productKey)
-      });
-    }
+  for (const asset of record.targetInventory.filter((item) => item.included && !parsedHostnames.has(item.hostname.toLowerCase()))) {
+    const productKey = normalizeProductId(asset.model);
+    rows.push({
+      id: `asset:${asset.id}`,
+      hostname: asset.hostname,
+      component: "Chasis",
+      itemType: deviceTypeLabel(asset.deviceType),
+      productId: asset.model,
+      serial: asset.serial,
+      source: "Inventario cargado",
+      eox: lifecycleEoxRecordForProduct(productKey, eoxRecords),
+      lookup: lifecycleLookupForProduct(productKey, lookupResults),
+      consulted: lifecycleConsultedHas(productKey, consulted)
+    });
   }
 
   return rows.sort((left, right) => left.hostname.localeCompare(right.hostname) || left.itemType.localeCompare(right.itemType) || left.productId.localeCompare(right.productId));
@@ -10762,13 +11970,15 @@ function buildLifecycleHardwareRows(
 function buildLifecycleSoftwareRows(
   record: AssessmentRecord,
   eoxRecords: Record<string, LifecycleEoxRecord>,
-  consultedProductIds: string[]
+  consultedProductIds: string[],
+  lookupResults: Record<string, LifecycleEoxLookupResult> = {}
 ): LifecycleSoftwareRow[] {
   const consulted = new Set(consultedProductIds.map(normalizeProductId));
   const rows: LifecycleSoftwareRow[] = [];
-  const parsedHostnames = new Set(record.parsed.devices.map((device) => device.hostname.toLowerCase()));
+  const lifecycleDevices = lifecycleDevicesForRecord(record);
+  const parsedHostnames = new Set(lifecycleDevices.map((device) => device.hostname.toLowerCase()));
 
-  for (const device of record.parsed.devices) {
+  for (const device of lifecycleDevices) {
     const inventoryItems = device.inventoryItems ?? [];
     const chassisItem = preferredChassisInventoryItem(inventoryItems);
     const productId = chassisItem?.productId || device.model || "No identificado";
@@ -10780,8 +11990,9 @@ function buildLifecycleSoftwareRows(
       productId,
       softwareVersion: device.softwareVersion || "No identificado",
       source: device.sourceFiles?.[0] ?? "show version",
-      eox: eoxRecords[productKey],
-      consulted: consulted.has(productKey)
+      eox: lifecycleEoxRecordForProduct(productKey, eoxRecords),
+      lookup: lifecycleLookupForProduct(productKey, lookupResults),
+      consulted: lifecycleConsultedHas(productKey, consulted)
     });
   }
 
@@ -10795,12 +12006,73 @@ function buildLifecycleSoftwareRows(
       productId,
       softwareVersion: "No identificado",
       source: "Inventario cargado",
-      eox: eoxRecords[productKey],
-      consulted: consulted.has(productKey)
+      eox: lifecycleEoxRecordForProduct(productKey, eoxRecords),
+      lookup: lifecycleLookupForProduct(productKey, lookupResults),
+      consulted: lifecycleConsultedHas(productKey, consulted)
     });
   }
 
   return rows.sort((left, right) => left.hostname.localeCompare(right.hostname) || left.productId.localeCompare(right.productId));
+}
+
+function lifecycleLookupForProduct(productId: string, lookupResults: Record<string, LifecycleEoxLookupResult>) {
+  const variants = lifecycleProductIdVariants(productId);
+  for (const variant of variants) {
+    const lookup = lookupResults[variant];
+    if (lookup) return lookup;
+  }
+  return undefined;
+}
+
+function lifecycleEoxRecordForProduct(productId: string, eoxRecords: Record<string, LifecycleEoxRecord>) {
+  const variants = lifecycleProductIdVariants(productId);
+  for (const variant of variants) {
+    const record = eoxRecords[variant];
+    if (record) return record;
+  }
+  return undefined;
+}
+
+function lifecycleConsultedHas(productId: string, consulted: Set<string>) {
+  return lifecycleProductIdVariants(productId).some((variant) => consulted.has(variant));
+}
+
+const effectiveParsedCache = new WeakMap<AssessmentRecord, ParsedAssessment>();
+
+function effectiveParsedNetworkData(record: AssessmentRecord) {
+  const cached = effectiveParsedCache.get(record);
+  if (cached) return cached;
+
+  const currentParsed = record.parsed;
+  if (record.evidenceFiles.length === 0) {
+    effectiveParsedCache.set(record, currentParsed);
+    return currentParsed;
+  }
+
+  const reparsed = parseCiscoEvidence(record.evidenceFiles);
+  const currentInventoryCount = currentParsed.devices.reduce((count, device) => count + (device.inventoryItems?.length ?? 0), 0);
+  const reparsedInventoryCount = reparsed.devices.reduce((count, device) => count + (device.inventoryItems?.length ?? 0), 0);
+  const hasRicherNetworkData =
+    reparsed.devices.length > currentParsed.devices.length ||
+    reparsed.interfaces.length > currentParsed.interfaces.length ||
+    reparsed.relations.length > currentParsed.relations.length ||
+    reparsedInventoryCount > currentInventoryCount;
+
+  const effectiveParsed = hasRicherNetworkData
+    ? {
+        ...currentParsed,
+        devices: reparsed.devices,
+        interfaces: reparsed.interfaces,
+        relations: reparsed.relations
+      }
+    : currentParsed;
+
+  effectiveParsedCache.set(record, effectiveParsed);
+  return effectiveParsed;
+}
+
+function lifecycleDevicesForRecord(record: AssessmentRecord) {
+  return effectiveParsedNetworkData(record).devices;
 }
 
 function buildSupportCoverageRows(
@@ -10856,11 +12128,31 @@ function isModularCiscoPlatform(model: string, items: NonNullable<ParsedAssessme
 }
 
 function isKnownProductId(value: string) {
-  return Boolean(value && value !== "No identificado" && value !== "Pendiente");
+  return isConsultableCiscoProductId(value);
 }
 
 function normalizeProductId(value: string) {
   return value.trim().toUpperCase();
+}
+
+function isConsultableCiscoProductId(value: string) {
+  const normalized = normalizeProductId(value);
+  if (!normalized) return false;
+  if (["NO IDENTIFICADO", "PENDIENTE", "N/A", "NA", "UNKNOWN", "CISCO", "PID", "CHASSIS", "MODULE"].includes(normalized)) return false;
+  if (!/[0-9]/.test(normalized)) return false;
+  if (normalized.length < 5) return false;
+  return /^[A-Z0-9][A-Z0-9./_-]+=?$/.test(normalized);
+}
+
+function lifecycleProductIdVariants(value: string) {
+  const normalized = normalizeProductId(value);
+  if (!isConsultableCiscoProductId(normalized)) return [];
+  const variants = new Set([normalized]);
+  variants.add(normalized.replace(/=$/, ""));
+  variants.add(normalized.replace(/-(E|A|S)$/i, ""));
+  variants.add(normalized.replace(/\/K9=?$/i, "/K9"));
+  variants.add(normalized.replace(/\/K9=?$/i, ""));
+  return Array.from(variants).filter(isConsultableCiscoProductId);
 }
 
 function normalizeSupportSerial(value: string) {
@@ -10902,6 +12194,42 @@ function confirmAction(message: string) {
   return window.confirm(message);
 }
 
+function rebuildPerformanceState(record: AssessmentRecord, evidenceFiles: PerformanceEvidenceFile[]) {
+  if (evidenceFiles.length === 0) {
+    return {
+      ...record,
+      parsed: {
+        ...record.parsed,
+        findings: record.parsed.findings.filter((finding) => !isPerformanceFindingId(finding.id))
+      },
+      performance: createDefaultPerformanceState(record.id, record.scope.performanceAnalysis.mode),
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  const mode = record.scope.performanceAnalysis.mode;
+  const processed = processPerformanceEvidence(record.id, evidenceFiles, mode);
+  const assessment = buildPerformanceAssessment(record.id, mode, processed.files, processed.metrics);
+  const findings = generatePerformanceFindings(record.id, processed.metrics, processed.summary, mode);
+  const genericFindings = performanceFindingsToGenericFindings(findings);
+
+  return {
+    ...record,
+    parsed: {
+      ...record.parsed,
+      findings: [...record.parsed.findings.filter((finding) => !isPerformanceFindingId(finding.id)), ...genericFindings]
+    },
+    performance: {
+      evidenceFiles: processed.files,
+      metrics: processed.metrics,
+      findings,
+      assessment,
+      charts: buildPerformanceCharts(record.id, processed.metrics)
+    },
+    updatedAt: new Date().toISOString()
+  };
+}
+
 function lifecycleStatus(model: string) {
   if (!model || model === "No identificado") return "Pendiente";
   if (/2960|3750|3850|n5k/i.test(model)) return "Riesgo lifecycle";
@@ -10933,18 +12261,22 @@ function splitCsv(value: string) {
 
 function summarizePortfolio(records: AssessmentRecord[]) {
   return records.reduce(
-    (summary, record) => ({
-      total: summary.total + 1,
-      inReview: summary.inReview + (record.assessment.status === "review" ? 1 : 0),
-      findings: summary.findings + record.parsed.findings.length,
-      validated: summary.validated + record.parsed.findings.filter((finding) => finding.status === "validated").length,
-      devices: summary.devices + record.parsed.devices.length
-    }),
+    (summary, record) => {
+      const effectiveParsed = effectiveParsedNetworkData(record);
+      return {
+        total: summary.total + 1,
+        inReview: summary.inReview + (record.assessment.status === "review" ? 1 : 0),
+        findings: summary.findings + record.parsed.findings.length,
+        validated: summary.validated + record.parsed.findings.filter((finding) => finding.status === "validated").length,
+        devices: summary.devices + effectiveParsed.devices.length
+      };
+    },
     { total: 0, inReview: 0, findings: 0, validated: 0, devices: 0 }
   );
 }
 
 function assessmentProgress(record: AssessmentRecord) {
+  const effectiveParsed = effectiveParsedNetworkData(record);
   const checks = [
     true,
     record.assessment.domains.length > 0,
@@ -10952,8 +12284,8 @@ function assessmentProgress(record: AssessmentRecord) {
     record.targetInventory.length > 0,
     record.scope.deliverables.length > 0,
     record.evidenceFiles.length > 0,
-    record.parsed.devices.length > 0,
-    record.parsed.relations.length > 0,
+    effectiveParsed.devices.length > 0,
+    effectiveParsed.relations.length > 0,
     record.evaluationRuns.some((run) => run.status === "complete"),
     record.parsed.findings.length > 0,
     record.parsed.findings.some((finding) => finding.status === "validated")

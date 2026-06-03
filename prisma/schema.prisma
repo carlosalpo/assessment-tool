@@ -240,3 +240,100 @@ model AssessmentUserSnapshot {
   @@index([role])
   @@index([status])
 }
+
+model AiAnalysisJob {
+  id              String               @id @default(cuid())
+  assessmentId    String
+  mode            String
+  scopeId         String?
+  status          String
+  progress        Int                  @default(0)
+  currentPhase    String?
+  requestedBy     String?
+  forceReevaluate Boolean              @default(false)
+  cancelRequested Boolean              @default(false)
+  errorMessage    String?
+  createdAt       DateTime             @default(now())
+  startedAt       DateTime?
+  completedAt     DateTime?
+  updatedAt       DateTime             @updatedAt
+  steps           AiAnalysisJobStep[]
+  artifacts       AiAnalysisArtifact[]
+  usage           AiAnalysisUsage[]
+
+  @@index([assessmentId, status])
+  @@index([assessmentId, scopeId])
+  @@index([updatedAt])
+}
+
+model AiAnalysisJobStep {
+  id               String        @id @default(cuid())
+  jobId            String
+  job              AiAnalysisJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  scopeId          String
+  phaseName        String
+  status           String
+  progress         Int           @default(0)
+  startedAt        DateTime?
+  completedAt      DateTime?
+  errorMessage     String?
+  inputHash        String?
+  outputArtifactId String?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  @@index([jobId, scopeId])
+  @@index([status])
+}
+
+model AiScopeResult {
+  id                  String   @id @default(cuid())
+  assessmentId        String
+  scopeId             String
+  status              String
+  inputHash           String
+  promptVersion       String
+  engineVersion       String
+  resultJson          Json
+  executiveSummary    String?
+  findingsJson        Json
+  recommendationsJson Json
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@unique([assessmentId, scopeId])
+  @@index([assessmentId])
+  @@index([inputHash])
+}
+
+model AiAnalysisArtifact {
+  id                 String        @id @default(cuid())
+  assessmentId       String
+  jobId              String
+  job                AiAnalysisJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  scopeId            String
+  artifactType       String
+  sourceReference    String?
+  contentJson        Json
+  tokenCountEstimate Int           @default(0)
+  createdAt          DateTime      @default(now())
+
+  @@index([assessmentId, scopeId])
+  @@index([jobId])
+}
+
+model AiAnalysisUsage {
+  id            String        @id @default(cuid())
+  jobId         String
+  job           AiAnalysisJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  scopeId       String
+  phaseName     String
+  model         String
+  inputTokens   Int           @default(0)
+  outputTokens  Int           @default(0)
+  totalTokens   Int           @default(0)
+  estimatedCost Float?
+  createdAt     DateTime      @default(now())
+
+  @@index([jobId, scopeId])
+}

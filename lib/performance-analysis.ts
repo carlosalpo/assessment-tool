@@ -308,6 +308,7 @@ export function processPerformanceEvidence(assessmentId: string, files: Performa
   const metrics = files.flatMap((file) => parsePerformanceMetrics(assessmentId, file));
   const processedFiles = files.map((file) => ({
     ...file,
+    deviceName: performanceFileDeviceLabel(file, metrics),
     processingStatus: "processed" as const,
     parsedMetricCount: metrics.filter((metric) => metric.evidenceFileId === file.id).length,
     confidenceScore: file.timeWindow === "instant" ? 55 : 75
@@ -493,33 +494,37 @@ function normalizePerformanceRemediation(remediationType: PerformanceRemediation
 function parsePerformanceMetrics(assessmentId: string, file: PerformanceEvidenceFile): PerformanceMetric[] {
   const metrics: PerformanceMetric[] = [];
   const sampleType = file.timeWindow === "instant" ? "snapshot" : "historical";
-  const cpuMatch = file.content.match(/(?:CPU utilization|CPU states|CPU usage|show processes cpu)[^\n]*?(\d+(?:\.\d+)?)\s*%/i);
-  if (cpuMatch) metrics.push(metric(assessmentId, file, file.deviceName, undefined, "cpu", Number(cpuMatch[1]), "%", sampleType));
 
-  const memoryPercent = parseMemoryPercent(file.content);
-  if (memoryPercent > 0) metrics.push(metric(assessmentId, file, file.deviceName, undefined, "memory", memoryPercent, "%", sampleType));
+  for (const section of splitPerformanceDeviceSections(file)) {
+    const sectionFile = { ...file, content: section.content, deviceName: section.deviceName };
+    const cpuMatch = section.content.match(/(?:CPU utilization|CPU states|CPU usage|show processes cpu)[^\n]*?(\d+(?:\.\d+)?)\s*%/i);
+    if (cpuMatch) metrics.push(metric(assessmentId, sectionFile, section.deviceName, undefined, "cpu", Number(cpuMatch[1]), "%", sampleType));
 
-  metrics.push(...parseInterfaceBlocks(assessmentId, file, sampleType));
-  metrics.push(...parseInstabilityEvents(assessmentId, file, sampleType));
-  metrics.push(...parseQosDrops(assessmentId, file, sampleType));
+    const memoryPercent = parseMemoryPercent(section.content);
+    if (memoryPercent > 0) metrics.push(metric(assessmentId, sectionFile, section.deviceName, undefined, "memory", memoryPercent, "%", sampleType));
 
-  for (const line of file.content.split(/\r?\n/)) {
-    const interfaceName = line.match(/^(?:interface\s+)?((?:Gi|Te|Eth|Ethernet|Port-channel|Po|Hu|Twe|Fo|Fa)[\w/.-]+)/i)?.[1];
-    if (!interfaceName) continue;
-    const inputErrors = numberAfter(line, /input errors?|in errors?/i);
-    const outputErrors = numberAfter(line, /output errors?|out errors?/i);
-    const crc = numberAfter(line, /\bcrc\b/i);
-    const inputDrops = numberAfter(line, /input drops?|input discard/i);
-    const outputDrops = numberAfter(line, /output drops?|output discard/i);
-    const drops = numberAfter(line, /drops?|discard/i);
-    const utilization = percentAfter(line, /util|rate|load/i);
-    if (inputErrors > 0) metrics.push(metric(assessmentId, file, file.deviceName, interfaceName, "input_errors", inputErrors, "count", sampleType));
-    if (outputErrors > 0) metrics.push(metric(assessmentId, file, file.deviceName, interfaceName, "output_errors", outputErrors, "count", sampleType));
-    if (crc > 0) metrics.push(metric(assessmentId, file, file.deviceName, interfaceName, "crc_errors", crc, "count", sampleType));
-    if (inputDrops > 0) metrics.push(metric(assessmentId, file, file.deviceName, interfaceName, "input_drops", inputDrops, "count", sampleType));
-    if (outputDrops > 0) metrics.push(metric(assessmentId, file, file.deviceName, interfaceName, "output_drops", outputDrops, "count", sampleType));
-    if (drops > 0) metrics.push(metric(assessmentId, file, file.deviceName, interfaceName, "drops", drops, "count", sampleType));
-    if (utilization > 0) metrics.push(metric(assessmentId, file, file.deviceName, interfaceName, "utilization", utilization, "%", sampleType));
+    metrics.push(...parseInterfaceBlocks(assessmentId, sectionFile, sampleType));
+    metrics.push(...parseInstabilityEvents(assessmentId, sectionFile, sampleType));
+    metrics.push(...parseQosDrops(assessmentId, sectionFile, sampleType));
+
+    for (const line of section.content.split(/\r?\n/)) {
+      const interfaceName = line.match(/^(?:interface\s+)?((?:Gi|Te|Eth|Ethernet|Port-channel|Po|Hu|Twe|Fo|Fa)[\w/.-]+)/i)?.[1];
+      if (!interfaceName) continue;
+      const inputErrors = numberAfter(line, /input errors?|in errors?/i);
+      const outputErrors = numberAfter(line, /output errors?|out errors?/i);
+      const crc = numberAfter(line, /\bcrc\b/i);
+      const inputDrops = numberAfter(line, /input drops?|input discard/i);
+      const outputDrops = numberAfter(line, /output drops?|output discard/i);
+      const drops = numberAfter(line, /drops?|discard/i);
+      const utilization = percentAfter(line, /util|rate|load/i);
+      if (inputErrors > 0) metrics.push(metric(assessmentId, sectionFile, section.deviceName, interfaceName, "input_errors", inputErrors, "count", sampleType));
+      if (outputErrors > 0) metrics.push(metric(assessmentId, sectionFile, section.deviceName, interfaceName, "output_errors", outputErrors, "count", sampleType));
+      if (crc > 0) metrics.push(metric(assessmentId, sectionFile, section.deviceName, interfaceName, "crc_errors", crc, "count", sampleType));
+      if (inputDrops > 0) metrics.push(metric(assessmentId, sectionFile, section.deviceName, interfaceName, "input_drops", inputDrops, "count", sampleType));
+      if (outputDrops > 0) metrics.push(metric(assessmentId, sectionFile, section.deviceName, interfaceName, "output_drops", outputDrops, "count", sampleType));
+      if (drops > 0) metrics.push(metric(assessmentId, sectionFile, section.deviceName, interfaceName, "drops", drops, "count", sampleType));
+      if (utilization > 0) metrics.push(metric(assessmentId, sectionFile, section.deviceName, interfaceName, "utilization", utilization, "%", sampleType));
+    }
   }
 
   return dedupeMetrics(metrics);
@@ -613,8 +618,14 @@ function chartFromMetrics(chartKey: string, assessmentId: string, title: string,
   };
 }
 
+function performanceFileDeviceLabel(file: PerformanceEvidenceFile, metrics: PerformanceMetric[]) {
+  const devices = Array.from(new Set(metrics.filter((metricItem) => metricItem.evidenceFileId === file.id).map((metricItem) => metricItem.deviceId).filter(Boolean)));
+  if (devices.length > 1) return `${devices.length} dispositivos`;
+  return devices[0] || file.deviceName;
+}
+
 function detectDeviceName(fileName: string, content: string) {
-  return content.match(/^hostname\s+(\S+)/im)?.[1] || content.match(/^(\S+)[>#]\s*show/im)?.[1] || fileName.replace(/\.[^.]+$/, "");
+  return content.match(/^hostname\s+(\S+)/im)?.[1] || content.match(/^([A-Za-z0-9][\w.-]{0,63})[>#]\s*(?:show|sh\b|display|terminal|do\s+show)/im)?.[1] || fileName.replace(/\.[^.]+$/, "");
 }
 
 function detectVendor(content: string) {
@@ -622,6 +633,48 @@ function detectVendor(content: string) {
   if (/adaptive security|ftd|asa/i.test(content)) return "cisco_asa_ftd";
   if (/ios xe|catalyst|show processes cpu/i.test(content)) return "cisco_ios_xe";
   return "generic";
+}
+
+function splitPerformanceDeviceSections(file: PerformanceEvidenceFile) {
+  const sections: Array<{ deviceName: string; content: string }> = [];
+  const lines = file.content.split(/\r?\n/);
+  let currentDevice = file.deviceName || "unknown-device";
+  let currentLines: string[] = [];
+  let markerCount = 0;
+
+  for (const line of lines) {
+    const deviceMarker = detectDeviceMarker(line);
+    if (deviceMarker) {
+      if (currentLines.some((currentLine) => currentLine.trim())) {
+        sections.push({ deviceName: currentDevice, content: currentLines.join("\n") });
+      }
+      currentDevice = deviceMarker;
+      currentLines = [line];
+      markerCount += 1;
+    } else {
+      currentLines.push(line);
+    }
+  }
+
+  if (currentLines.some((line) => line.trim())) {
+    sections.push({ deviceName: currentDevice, content: currentLines.join("\n") });
+  }
+
+  if (markerCount === 0 || sections.length === 0) {
+    return [{ deviceName: file.deviceName || "unknown-device", content: file.content }];
+  }
+
+  return sections.map((section) => ({
+    ...section,
+    deviceName: section.deviceName || file.deviceName || "unknown-device"
+  }));
+}
+
+function detectDeviceMarker(line: string) {
+  const hostnameMatch = line.match(/^hostname\s+(\S+)/i);
+  if (hostnameMatch) return hostnameMatch[1];
+  const promptMatch = line.match(/^([A-Za-z0-9][\w.-]{0,63})[>#]\s*(?:show|sh\b|display|terminal|do\s+show)/i);
+  return promptMatch?.[1];
 }
 
 function numberAfter(line: string, label: RegExp) {
