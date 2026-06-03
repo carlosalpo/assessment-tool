@@ -67,14 +67,10 @@ import { importInventoryWorkbook } from "@/lib/import-inventory-workbook";
 import {
   acceptedOrValidatedFindings,
   aiSuggestedFindingToFinding,
-  buildAssessmentAIContext,
   emptyAIAnalysisState,
   executiveSummaryFindings,
-  generateCorrelationCandidates,
   type AIAnalysisState,
-  type AISuggestedFinding,
-  type AssessmentAIContext,
-  type CorrelationCandidate
+  type AISuggestedFinding
 } from "@/lib/ai-analysis";
 import {
   buildOperationalAIContext,
@@ -1568,56 +1564,6 @@ export default function HomePage() {
     }));
   }
 
-  async function runAiEvaluationForArea(record: AssessmentRecord, area: EvaluationArea) {
-    startEvaluationRun(record.id, area);
-    if (!hasEvidenceForArea(record, area)) return;
-
-    updateEvaluationProgress(record.id, area, 35, "Preparando contexto para ChatGPT API");
-
-    try {
-      const aiContext = buildAssessmentAIContext(record);
-      const correlationCandidates = generateCorrelationCandidates(aiContext);
-      updateRecord(record.id, (current) => ({
-        ...current,
-        aiAnalysis: {
-          ...normalizeAIAnalysisState(current.aiAnalysis),
-          context: aiContext,
-          correlationCandidates,
-          limitations: aiContext.analysisLimitations,
-          updatedAt: new Date().toISOString()
-        },
-        updatedAt: new Date().toISOString()
-      }));
-
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (openAiApiKey.trim()) headers["x-openai-api-key"] = openAiApiKey.trim();
-
-      const response = await fetch("/api/ai/evaluate", {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          area,
-          context: aiContext,
-          correlationCandidates
-        })
-      });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload?.error || "No se pudo completar la evaluacion AI.");
-
-      updateEvaluationProgress(
-        record.id,
-        area,
-        80,
-        payload?.batchCount && payload.batchCount > 1
-          ? `Respuesta AI recibida (${payload.model ?? "modelo configurado"} · ${payload.batchCount} batches)`
-          : `Respuesta AI recibida (${payload.model ?? "modelo configurado"})`
-      );
-      completeEvaluationRun(record.id, area, payload.findings ?? [], payload.suggestedFindings ?? [], correlationCandidates, aiContext);
-    } catch (error) {
-      blockEvaluationRun(record.id, area, error instanceof Error ? error.message : "Error desconocido ejecutando AI.");
-    }
-  }
-
   function startEvaluationRun(recordId: string, area: EvaluationArea) {
     updateRecord(recordId, (record) => ({
       ...record,
@@ -1630,61 +1576,6 @@ export default function HomePage() {
       }),
       updatedAt: new Date().toISOString()
     }));
-  }
-
-  function updateEvaluationProgress(recordId: string, area: EvaluationArea, progress: number, message: string) {
-    updateRecord(recordId, (record) => ({
-      ...record,
-      evaluationRuns: record.evaluationRuns.map((run) =>
-        run.area === area && run.status === "running" ? { ...run, progress, message, updatedAt: new Date().toISOString() } : run
-      ),
-      updatedAt: new Date().toISOString()
-    }));
-  }
-
-  function completeEvaluationRun(
-    recordId: string,
-    area: EvaluationArea,
-    generated: Finding[],
-    suggestedFindings: AISuggestedFinding[] = [],
-    correlationCandidates: CorrelationCandidate[] = [],
-    context?: AssessmentAIContext
-  ) {
-    updateRecord(recordId, (record) => {
-      const existingKeys = new Set(record.parsed.findings.map((finding) => `${finding.category}:${finding.title}:${finding.affectedAssets.join(",")}`));
-      const nextFindings = generated.filter((finding) => !existingKeys.has(`${finding.category}:${finding.title}:${finding.affectedAssets.join(",")}`));
-      const previousRun = record.evaluationRuns.find((run) => run.area === area);
-      const generatedFindingIds = Array.from(new Set([...(previousRun?.generatedFindingIds ?? []), ...nextFindings.map((finding) => finding.id)]));
-      const currentAIAnalysis = normalizeAIAnalysisState(record.aiAnalysis);
-      const suggestedById = new Map(currentAIAnalysis.suggestedFindings.map((finding) => [finding.id, finding]));
-      for (const finding of suggestedFindings) suggestedById.set(finding.id, finding);
-
-      return {
-        ...record,
-        parsed: {
-          ...record.parsed,
-          findings: [...record.parsed.findings, ...nextFindings]
-        },
-        evaluationRuns: upsertRun(record.evaluationRuns, {
-          area,
-          status: "complete",
-          progress: 100,
-          message: nextFindings.length > 0 ? `${nextFindings.length} hallazgos agregados` : "Evaluacion completada sin nuevos hallazgos",
-          updatedAt: new Date().toISOString(),
-          generatedFindingIds
-        }),
-        aiAnalysis: {
-          ...currentAIAnalysis,
-          context: context ?? currentAIAnalysis.context,
-          correlationCandidates: correlationCandidates.length > 0 ? correlationCandidates : currentAIAnalysis.correlationCandidates,
-          suggestedFindings: Array.from(suggestedById.values()),
-          limitations: context?.analysisLimitations ?? currentAIAnalysis.limitations,
-          updatedAt: new Date().toISOString()
-        },
-        assessment: { ...record.assessment, status: "review" },
-        updatedAt: new Date().toISOString()
-      };
-    });
   }
 
   function blockEvaluationRun(recordId: string, area: EvaluationArea, message: string) {
