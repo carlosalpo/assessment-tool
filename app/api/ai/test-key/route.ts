@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
+import { getOpenAIApiKey } from "@/lib/server-credentials";
 
 export async function POST(request: Request) {
-  const apiKey = request.headers.get("x-openai-api-key")?.trim() || process.env.OPENAI_API_KEY;
+  const apiKey = request.headers.get("x-openai-api-key")?.trim() || await getOpenAIApiKey();
   if (!apiKey) {
     return NextResponse.json(
-      { ok: false, message: "OPENAI_API_KEY no esta configurada. Agrega la llave en Ajustes o .env.local." },
+      { ok: false, message: "OpenAI API key no esta configurada. Guardala en Ajustes o define OPENAI_API_KEY en .env.local." },
       { status: 400 }
     );
   }

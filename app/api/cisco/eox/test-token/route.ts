@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
+import { getCiscoApiToken } from "@/lib/server-credentials";
 
 const CISCO_EOX_TEST_URL = "https://apix.cisco.com/supporttools/eox/rest/5/EOXByProductID/1/C9200L-48P-4X?responseencoding=json";
 
 export async function POST(request: Request) {
-  const token = normalizeBearerToken(request.headers.get("x-cisco-api-token") || process.env.CISCO_API_TOKEN);
+  const token = normalizeBearerToken(request.headers.get("x-cisco-api-token") || await getCiscoApiToken());
   if (!token) {
     return NextResponse.json(
-      { ok: false, message: "CISCO_API_TOKEN no esta configurado. Pega un access token Cisco EoX en Ajustes." },
+      { ok: false, message: "Cisco API token no esta configurado. Guardalo en Ajustes o define CISCO_API_TOKEN en .env.local." },
       { status: 400 }
     );
   }

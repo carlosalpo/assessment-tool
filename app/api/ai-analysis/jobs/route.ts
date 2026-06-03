@@ -5,6 +5,7 @@ import {
   type AIAnalysisMode,
   type AIAnalysisScopeId
 } from "@/lib/ai-analysis-jobs";
+import { getOpenAIApiKey } from "@/lib/server-credentials";
 
 export async function POST(request: Request) {
   const body = await request.json().catch(() => null);
@@ -17,6 +18,14 @@ export async function POST(request: Request) {
   }
 
   try {
+    const apiKey = request.headers.get("x-openai-api-key")?.trim() || await getOpenAIApiKey();
+    if (!apiKey) {
+      return NextResponse.json(
+        { error: "OpenAI API key no esta configurada para el motor persistente. Guardala en Ajustes o define OPENAI_API_KEY en .env.local." },
+        { status: 400 }
+      );
+    }
+
     const job = await createAIAnalysisJob({
       assessmentId,
       mode,
@@ -24,7 +33,7 @@ export async function POST(request: Request) {
       forceReevaluate: Boolean(body?.forceReevaluate),
       requestedBy: typeof body?.requestedBy === "string" ? body.requestedBy : undefined
     });
-    if (job.status === "queued") runAIAnalysisJob(job.id).catch(() => undefined);
+    if (job.status === "queued") runAIAnalysisJob(job.id, { apiKey }).catch(() => undefined);
     return NextResponse.json({ job });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "No se pudo crear el job AI." }, { status: 500 });

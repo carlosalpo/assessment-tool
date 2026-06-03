@@ -411,8 +411,19 @@ type AssessmentRecord = {
 };
 
 type CredentialCheckStatus = {
-  state: "idle" | "checking" | "valid" | "invalid";
+  state: "idle" | "checking" | "saving" | "valid" | "invalid";
   message: string;
+};
+type ApiCredentialMetadata = {
+  provider: string;
+  label: string;
+  configured: boolean;
+  source: "postgres" | "env" | "none";
+  maskedValue: string;
+  lastFour: string | null;
+  updatedAt: string | null;
+  updatedBy: string | null;
+  encryptionVersion: string | null;
 };
 type PersistenceState = {
   mode: "loading" | "postgres" | "local" | "error";
@@ -678,7 +689,9 @@ export default function HomePage() {
   const [settingsReturnView, setSettingsReturnView] = useState<Exclude<WorkspaceView, "settings">>("dashboard");
   const [uiMode, setUiMode] = useState<UiMode>("dark");
   const [openAiApiKey, setOpenAiApiKey] = useState("");
+  const [openAiCredential, setOpenAiCredential] = useState<ApiCredentialMetadata>(() => emptyOpenAiCredentialMetadata());
   const [ciscoApiToken, setCiscoApiToken] = useState("");
+  const [ciscoCredential, setCiscoCredential] = useState<ApiCredentialMetadata>(() => emptyCiscoCredentialMetadata());
   const [openAiCheck, setOpenAiCheck] = useState<CredentialCheckStatus>({ state: "idle", message: "" });
   const [ciscoTokenCheck, setCiscoTokenCheck] = useState<CredentialCheckStatus>({ state: "idle", message: "" });
   const [persistenceState, setPersistenceState] = useState<PersistenceState>({
@@ -704,10 +717,12 @@ export default function HomePage() {
       setDocumentTemplates(readInitialDocumentTemplates());
 
       try {
-        const [persistedRecords, persistedTemplates, persistedUsers] = await Promise.all([
+        const [persistedRecords, persistedTemplates, persistedUsers, persistedOpenAiCredential, persistedCiscoCredential] = await Promise.all([
           fetchPersistedAssessmentRecords(),
           fetchPersistedDocumentTemplates(),
-          fetchPersistedUsers()
+          fetchPersistedUsers(),
+          fetchOpenAiCredentialMetadata().catch(() => null),
+          fetchCiscoCredentialMetadata().catch(() => null)
         ]);
         if (cancelled) return;
         const usersToUse = persistedUsers.length > 0 ? persistedUsers : cachedUsers;
@@ -718,6 +733,14 @@ export default function HomePage() {
         setCurrentUserId(resolveCurrentUserId(usersToUse, cachedCurrentUserId));
         setRecords(recordsToUse);
         setDocumentTemplates(templatesToUse);
+        if (persistedOpenAiCredential) {
+          setOpenAiCredential(persistedOpenAiCredential);
+          if (persistedOpenAiCredential.configured) setOpenAiApiKey("");
+        }
+        if (persistedCiscoCredential) {
+          setCiscoCredential(persistedCiscoCredential);
+          if (persistedCiscoCredential.configured) setCiscoApiToken("");
+        }
         setPersistenceState({
           mode: "postgres",
           message:
@@ -800,13 +823,13 @@ export default function HomePage() {
 
   useEffect(() => {
     if (!isHydrated) return;
-    window.localStorage.setItem("assessment-tool.openai-api-key.v1", openAiApiKey);
-  }, [isHydrated, openAiApiKey]);
+    window.localStorage.removeItem("assessment-tool.openai-api-key.v1");
+  }, [isHydrated]);
 
   useEffect(() => {
     if (!isHydrated) return;
-    window.localStorage.setItem("assessment-tool.cisco-api-token.v1", ciscoApiToken);
-  }, [isHydrated, ciscoApiToken]);
+    window.localStorage.removeItem("assessment-tool.cisco-api-token.v1");
+  }, [isHydrated]);
 
   useEffect(() => {
     if (!isHydrated) return;
@@ -884,10 +907,9 @@ export default function HomePage() {
       const payload = await response.json().catch(() => null) as AIAssessmentAnalysisResults | null;
       if (!response.ok || !payload) return;
       const jobScopeIds = new Set(latestJob.steps.map((step) => step.scopeId));
-      const findings = persistentAIResultsToFindings(
-        payload.results.filter((result) => latestJob.mode === "full" || jobScopeIds.has(result.scopeId)),
-        recordId
-      );
+      const importedResults = payload.results.filter((result) => latestJob.mode === "full" || jobScopeIds.has(result.scopeId));
+      const findings = persistentAIResultsToFindings(importedResults, recordId);
+      const resultSummary = importedResults.map((result) => result.executiveSummary).filter(Boolean).join(" · ");
 
       setRecords((current) =>
         current.map((record) => {
@@ -900,7 +922,7 @@ export default function HomePage() {
               ...record.parsed,
               findings: [...record.parsed.findings, ...nextFindings]
             },
-            evaluationRuns: markPersistentAIRuns(record.evaluationRuns, latestJob, nextFindings.length),
+            evaluationRuns: markPersistentAIRuns(record.evaluationRuns, latestJob, nextFindings.length, resultSummary),
             assessment: { ...record.assessment, status: nextFindings.length > 0 ? "review" : record.assessment.status },
             updatedAt: new Date().toISOString()
           };
@@ -948,16 +970,17 @@ export default function HomePage() {
   }
 
   async function testOpenAiCredential() {
-    if (!openAiApiKey.trim()) {
-      setOpenAiCheck({ state: "invalid", message: "Agrega una API key antes de probar." });
+    if (!openAiApiKey.trim() && !openAiCredential.configured) {
+      setOpenAiCheck({ state: "invalid", message: "Agrega una API key o guarda una credencial persistente antes de probar." });
       return;
     }
 
     setOpenAiCheck({ state: "checking", message: "Validando con OpenAI..." });
     try {
+      const headers = openAiApiKey.trim() ? { "x-openai-api-key": openAiApiKey.trim() } : undefined;
       const response = await fetch("/api/ai/test-key", {
         method: "POST",
-        headers: { "x-openai-api-key": openAiApiKey.trim() }
+        headers
       });
       const payload = await response.json().catch(() => null);
       setOpenAiCheck({
@@ -969,17 +992,61 @@ export default function HomePage() {
     }
   }
 
+  async function saveOpenAiCredential() {
+    if (!openAiApiKey.trim()) {
+      setOpenAiCheck({ state: "invalid", message: "Pega una API key nueva antes de guardar." });
+      return;
+    }
+
+    setOpenAiCheck({ state: "saving", message: "Guardando API key cifrada en PostgreSQL..." });
+    try {
+      const response = await fetch("/api/credentials/openai", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          apiKey: openAiApiKey.trim(),
+          updatedBy: currentUser?.email ?? currentUser?.name ?? "local-user"
+        })
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || !payload?.credential) throw new Error(payload?.error || "No se pudo guardar la API key.");
+      setOpenAiCredential(payload.credential as ApiCredentialMetadata);
+      setOpenAiApiKey("");
+      window.localStorage.removeItem("assessment-tool.openai-api-key.v1");
+      setOpenAiCheck({ state: "valid", message: "API key guardada cifrada en almacenamiento persistente." });
+    } catch (error) {
+      setOpenAiCheck({ state: "invalid", message: error instanceof Error ? error.message : "No se pudo guardar la API key." });
+    }
+  }
+
+  async function deleteOpenAiCredential() {
+    if (!confirmAction("Esto eliminara la API key OpenAI persistida. Deseas continuar?")) return;
+    setOpenAiCheck({ state: "saving", message: "Eliminando credencial persistida..." });
+    try {
+      const response = await fetch("/api/credentials/openai", { method: "DELETE" });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || !payload?.credential) throw new Error(payload?.error || "No se pudo eliminar la credencial.");
+      setOpenAiCredential(payload.credential as ApiCredentialMetadata);
+      setOpenAiApiKey("");
+      window.localStorage.removeItem("assessment-tool.openai-api-key.v1");
+      setOpenAiCheck({ state: "valid", message: payload.credential.configured ? "Credencial persistida eliminada. Se usara OPENAI_API_KEY de entorno." : "Credencial OpenAI eliminada." });
+    } catch (error) {
+      setOpenAiCheck({ state: "invalid", message: error instanceof Error ? error.message : "No se pudo eliminar la credencial." });
+    }
+  }
+
   async function testCiscoCredential() {
-    if (!ciscoApiToken.trim()) {
-      setCiscoTokenCheck({ state: "invalid", message: "Agrega un access token antes de probar." });
+    if (!ciscoApiToken.trim() && !ciscoCredential.configured) {
+      setCiscoTokenCheck({ state: "invalid", message: "Agrega un access token o guarda una credencial persistente antes de probar." });
       return;
     }
 
     setCiscoTokenCheck({ state: "checking", message: "Validando token Cisco EoX..." });
     try {
+      const headers = ciscoApiToken.trim() ? { "x-cisco-api-token": ciscoApiToken.trim() } : undefined;
       const response = await fetch("/api/cisco/eox/test-token", {
         method: "POST",
-        headers: { "x-cisco-api-token": ciscoApiToken.trim() }
+        headers
       });
       const payload = await response.json().catch(() => null);
       setCiscoTokenCheck({
@@ -988,6 +1055,49 @@ export default function HomePage() {
       });
     } catch {
       setCiscoTokenCheck({ state: "invalid", message: "No se pudo contactar el endpoint local de validacion." });
+    }
+  }
+
+  async function saveCiscoCredential() {
+    if (!ciscoApiToken.trim()) {
+      setCiscoTokenCheck({ state: "invalid", message: "Pega un access token Cisco antes de guardar." });
+      return;
+    }
+
+    setCiscoTokenCheck({ state: "saving", message: "Guardando token Cisco cifrado en PostgreSQL..." });
+    try {
+      const response = await fetch("/api/credentials/cisco", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          apiToken: ciscoApiToken.trim(),
+          updatedBy: currentUser?.email ?? currentUser?.name ?? "local-user"
+        })
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || !payload?.credential) throw new Error(payload?.error || "No se pudo guardar el token Cisco.");
+      setCiscoCredential(payload.credential as ApiCredentialMetadata);
+      setCiscoApiToken("");
+      window.localStorage.removeItem("assessment-tool.cisco-api-token.v1");
+      setCiscoTokenCheck({ state: "valid", message: "Token Cisco guardado cifrado en almacenamiento persistente." });
+    } catch (error) {
+      setCiscoTokenCheck({ state: "invalid", message: error instanceof Error ? error.message : "No se pudo guardar el token Cisco." });
+    }
+  }
+
+  async function deleteCiscoCredential() {
+    if (!confirmAction("Esto eliminara el token Cisco persistido. Deseas continuar?")) return;
+    setCiscoTokenCheck({ state: "saving", message: "Eliminando credencial Cisco persistida..." });
+    try {
+      const response = await fetch("/api/credentials/cisco", { method: "DELETE" });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || !payload?.credential) throw new Error(payload?.error || "No se pudo eliminar la credencial Cisco.");
+      setCiscoCredential(payload.credential as ApiCredentialMetadata);
+      setCiscoApiToken("");
+      window.localStorage.removeItem("assessment-tool.cisco-api-token.v1");
+      setCiscoTokenCheck({ state: "valid", message: payload.credential.configured ? "Credencial persistida eliminada. Se usara CISCO_API_TOKEN de entorno." : "Credencial Cisco eliminada." });
+    } catch (error) {
+      setCiscoTokenCheck({ state: "invalid", message: error instanceof Error ? error.message : "No se pudo eliminar la credencial Cisco." });
     }
   }
 
@@ -1351,7 +1461,10 @@ export default function HomePage() {
     }
     const response = await fetch("/api/ai-analysis/jobs", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(openAiApiKey.trim() ? { "x-openai-api-key": openAiApiKey.trim() } : {})
+      },
       body: JSON.stringify({
         assessmentId: selectedRecord.id,
         mode,
@@ -1363,7 +1476,11 @@ export default function HomePage() {
     const payload = await response.json().catch(() => null);
     if (!response.ok) {
       const message = payload?.error || "No se pudo crear el job AI.";
-      if (area !== "complete") blockEvaluationRun(selectedRecord.id, area, message);
+      if (area === "complete") {
+        evaluationAreas.forEach((item) => blockEvaluationRun(selectedRecord.id, item.id, message));
+      } else {
+        blockEvaluationRun(selectedRecord.id, area, message);
+      }
       return;
     }
 
@@ -1383,7 +1500,10 @@ export default function HomePage() {
 
   async function retryAnalysisJob(jobId: string) {
     if (!selectedRecord) return;
-    const response = await fetch(`/api/ai-analysis/jobs/${jobId}/retry`, { method: "POST" });
+    const response = await fetch(`/api/ai-analysis/jobs/${jobId}/retry`, {
+      method: "POST",
+      headers: openAiApiKey.trim() ? { "x-openai-api-key": openAiApiKey.trim() } : {}
+    });
     const payload = await response.json().catch(() => null);
     if (payload?.job) {
       const status = await fetchAIAnalysisStatus(selectedRecord.id).catch(() => null);
@@ -1999,15 +2119,21 @@ export default function HomePage() {
           onUiModeChange={setUiMode}
           persistenceState={persistenceState}
           openAiApiKey={openAiApiKey}
+          openAiCredential={openAiCredential}
           onOpenAiApiKeyChange={setOpenAiApiKey}
           openAiCheck={openAiCheck}
           onOpenAiCheckChange={setOpenAiCheck}
           onTestOpenAiCredential={testOpenAiCredential}
+          onSaveOpenAiCredential={saveOpenAiCredential}
+          onDeleteOpenAiCredential={deleteOpenAiCredential}
           ciscoApiToken={ciscoApiToken}
+          ciscoCredential={ciscoCredential}
           onCiscoApiTokenChange={setCiscoApiToken}
           ciscoTokenCheck={ciscoTokenCheck}
           onCiscoTokenCheckChange={setCiscoTokenCheck}
           onTestCiscoCredential={testCiscoCredential}
+          onSaveCiscoCredential={saveCiscoCredential}
+          onDeleteCiscoCredential={deleteCiscoCredential}
           documentTemplates={documentTemplates}
           onDocumentTemplatesChange={setDocumentTemplates}
           users={users}
@@ -2240,15 +2366,21 @@ function SettingsWorkspace({
   onUiModeChange,
   persistenceState,
   openAiApiKey,
+  openAiCredential,
   onOpenAiApiKeyChange,
   openAiCheck,
   onOpenAiCheckChange,
   onTestOpenAiCredential,
+  onSaveOpenAiCredential,
+  onDeleteOpenAiCredential,
   ciscoApiToken,
+  ciscoCredential,
   onCiscoApiTokenChange,
   ciscoTokenCheck,
   onCiscoTokenCheckChange,
   onTestCiscoCredential,
+  onSaveCiscoCredential,
+  onDeleteCiscoCredential,
   documentTemplates,
   onDocumentTemplatesChange,
   users,
@@ -2263,15 +2395,21 @@ function SettingsWorkspace({
   onUiModeChange: (mode: UiMode) => void;
   persistenceState: PersistenceState;
   openAiApiKey: string;
+  openAiCredential: ApiCredentialMetadata;
   onOpenAiApiKeyChange: (value: string) => void;
   openAiCheck: CredentialCheckStatus;
   onOpenAiCheckChange: (status: CredentialCheckStatus) => void;
   onTestOpenAiCredential: () => void;
+  onSaveOpenAiCredential: () => void;
+  onDeleteOpenAiCredential: () => void;
   ciscoApiToken: string;
+  ciscoCredential: ApiCredentialMetadata;
   onCiscoApiTokenChange: (value: string) => void;
   ciscoTokenCheck: CredentialCheckStatus;
   onCiscoTokenCheckChange: (status: CredentialCheckStatus) => void;
   onTestCiscoCredential: () => void;
+  onSaveCiscoCredential: () => void;
+  onDeleteCiscoCredential: () => void;
   documentTemplates: DocumentTemplateVersion[];
   onDocumentTemplatesChange: React.Dispatch<React.SetStateAction<DocumentTemplateVersion[]>>;
   users: AppUser[];
@@ -2342,7 +2480,11 @@ function SettingsWorkspace({
               <div className="flex items-center justify-between gap-2">
                 <span className="text-xs font-medium text-muted-foreground">OpenAI API key</span>
                 <div className="flex items-center gap-2">
-                  <Button size="sm" variant="secondary" onClick={onTestOpenAiCredential} disabled={!isAdmin || openAiCheck.state === "checking"}>
+                  <Button size="sm" variant="primary" onClick={onSaveOpenAiCredential} disabled={!isAdmin || !openAiApiKey.trim() || openAiCheck.state === "saving"}>
+                    <Save size={13} />
+                    {openAiCheck.state === "saving" ? "Guardando" : "Guardar"}
+                  </Button>
+                  <Button size="sm" variant="secondary" onClick={onTestOpenAiCredential} disabled={!isAdmin || openAiCheck.state === "checking" || openAiCheck.state === "saving" || (!openAiApiKey.trim() && !openAiCredential.configured)}>
                     <Search size={13} />
                     {openAiCheck.state === "checking" ? "Probando" : "Probar"}
                   </Button>
@@ -2353,12 +2495,37 @@ function SettingsWorkspace({
                       onOpenAiApiKeyChange("");
                       onOpenAiCheckChange({ state: "idle", message: "" });
                     }}
-                    disabled={!isAdmin || (!openAiApiKey && openAiCheck.state === "idle")}
+                    disabled={!isAdmin || !openAiApiKey}
                   >
                     <X size={13} />
-                    Limpiar
+                    Limpiar campo
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={onDeleteOpenAiCredential}
+                    disabled={!isAdmin || openAiCredential.source !== "postgres" || openAiCheck.state === "saving"}
+                  >
+                    <Trash2 size={13} />
+                    Eliminar
                   </Button>
                 </div>
+              </div>
+              <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-medium text-foreground">
+                    {openAiCredential.configured ? openAiCredential.maskedValue : "No configurada"}
+                  </span>
+                  <Badge tone={openAiCredential.configured ? "success" : "neutral"}>
+                    {openAiCredential.source === "postgres" ? "Persistente cifrada" : openAiCredential.source === "env" ? "Entorno" : "Sin credencial"}
+                  </Badge>
+                </div>
+                {openAiCredential.updatedAt && (
+                  <p className="mt-1 text-muted-foreground">
+                    Actualizada {formatDate(openAiCredential.updatedAt)}
+                    {openAiCredential.updatedBy ? ` por ${openAiCredential.updatedBy}` : ""}
+                  </p>
+                )}
               </div>
               <Input
                 type="password"
@@ -2367,7 +2534,7 @@ function SettingsWorkspace({
                   onOpenAiApiKeyChange(event.target.value);
                   onOpenAiCheckChange({ state: "idle", message: "" });
                 }}
-                placeholder="sk-..."
+                placeholder={openAiCredential.configured ? "Pega una nueva llave para reemplazar la actual" : "sk-..."}
                 disabled={!isAdmin}
               />
               <CredentialCheckMessage status={openAiCheck} />
@@ -2377,7 +2544,11 @@ function SettingsWorkspace({
               <div className="flex items-center justify-between gap-2">
                 <span className="text-xs font-medium text-muted-foreground">Cisco EoX OAuth access token</span>
                 <div className="flex items-center gap-2">
-                  <Button size="sm" variant="secondary" onClick={onTestCiscoCredential} disabled={!isAdmin || ciscoTokenCheck.state === "checking"}>
+                  <Button size="sm" variant="primary" onClick={onSaveCiscoCredential} disabled={!isAdmin || !ciscoApiToken.trim() || ciscoTokenCheck.state === "saving"}>
+                    <Save size={13} />
+                    {ciscoTokenCheck.state === "saving" ? "Guardando" : "Guardar"}
+                  </Button>
+                  <Button size="sm" variant="secondary" onClick={onTestCiscoCredential} disabled={!isAdmin || ciscoTokenCheck.state === "checking" || ciscoTokenCheck.state === "saving" || (!ciscoApiToken.trim() && !ciscoCredential.configured)}>
                     <Search size={13} />
                     {ciscoTokenCheck.state === "checking" ? "Probando" : "Probar"}
                   </Button>
@@ -2388,12 +2559,37 @@ function SettingsWorkspace({
                       onCiscoApiTokenChange("");
                       onCiscoTokenCheckChange({ state: "idle", message: "" });
                     }}
-                    disabled={!isAdmin || (!ciscoApiToken && ciscoTokenCheck.state === "idle")}
+                    disabled={!isAdmin || !ciscoApiToken}
                   >
                     <X size={13} />
-                    Limpiar
+                    Limpiar campo
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={onDeleteCiscoCredential}
+                    disabled={!isAdmin || ciscoCredential.source !== "postgres" || ciscoTokenCheck.state === "saving"}
+                  >
+                    <Trash2 size={13} />
+                    Eliminar
                   </Button>
                 </div>
+              </div>
+              <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-medium text-foreground">
+                    {ciscoCredential.configured ? ciscoCredential.maskedValue : "No configurado"}
+                  </span>
+                  <Badge tone={ciscoCredential.configured ? "success" : "neutral"}>
+                    {ciscoCredential.source === "postgres" ? "Persistente cifrado" : ciscoCredential.source === "env" ? "Entorno" : "Sin credencial"}
+                  </Badge>
+                </div>
+                {ciscoCredential.updatedAt && (
+                  <p className="mt-1 text-muted-foreground">
+                    Actualizado {formatDate(ciscoCredential.updatedAt)}
+                    {ciscoCredential.updatedBy ? ` por ${ciscoCredential.updatedBy}` : ""}
+                  </p>
+                )}
               </div>
               <Input
                 type="password"
@@ -2402,7 +2598,7 @@ function SettingsWorkspace({
                   onCiscoApiTokenChange(event.target.value);
                   onCiscoTokenCheckChange({ state: "idle", message: "" });
                 }}
-                placeholder="Pega el access token, con o sin Bearer"
+                placeholder={ciscoCredential.configured ? "Pega un nuevo token para reemplazar el actual" : "Pega el access token, con o sin Bearer"}
                 disabled={!isAdmin}
               />
               <CredentialCheckMessage status={ciscoTokenCheck} />
@@ -7494,8 +7690,9 @@ function AiEvaluationTab({
             const run = record.evaluationRuns.find((item) => item.area === area.id) ?? defaultRun(area.id);
             const scopeId = evaluationAreaToAIScope(area.id);
             const scopeStatus = aiAnalysisStatus?.scopes.find((scope) => scope.id === scopeId);
-            const scopeJob = latestJob?.mode === "scope" && latestJob.scopeId === scopeId ? latestJob : undefined;
-            const isScopeRunning = scopeJob ? isActiveAIJobStatus(scopeJob.status) : false;
+            const latestScopeJob = latestJob?.mode === "scope" && latestJob.scopeId === scopeId ? latestJob : undefined;
+            const isScopeRunning = latestScopeJob ? isActiveAIJobStatus(latestScopeJob.status) : false;
+            const scopeJob = latestScopeJob && isScopeRunning ? latestScopeJob : undefined;
             const areaFindings = record.parsed.findings.filter((finding) => finding.category === areaToCategory(area.id));
             const canResetArea = run.status !== "pending" || run.progress > 0 || areaFindings.length > 0;
             return (
@@ -7513,7 +7710,7 @@ function AiEvaluationTab({
                   <div className="h-2 rounded-full bg-primary" style={{ width: `${scopeJob?.progress ?? run.progress}%` }} />
                 </div>
                 <p className="mt-2 text-xs text-muted-foreground">
-                  {scopeJob ? `${scopeJob.progress}% · ${scopeJob.currentPhase ?? "Procesando fases"}` : `${run.progress}% · ${scopeStatus?.updatedAt ? `Ultima evaluacion ${formatDate(scopeStatus.updatedAt)}` : run.message}`}
+                  {scopeJob ? `${scopeJob.progress}% · ${scopeJob.currentPhase ?? "Procesando fases"}` : `${run.progress}% · ${scopeStatus?.updatedAt ? `${run.message} · Ultima evaluacion ${formatDate(scopeStatus.updatedAt)}` : run.message}`}
                 </p>
                 <div className="mt-3 flex flex-wrap gap-2">
                   <Button variant="secondary" size="sm" onClick={() => onRunEvaluation(area.id)} disabled={isScopeRunning || hasRunningAnalysis}>
@@ -9337,6 +9534,7 @@ function CredentialCheckMessage({ status }: { status: CredentialCheckStatus }) {
 
   const styles = {
     checking: "border-sky-200 bg-sky-50 text-sky-800",
+    saving: "border-sky-200 bg-sky-50 text-sky-800",
     valid: "border-emerald-200 bg-emerald-50 text-emerald-800",
     invalid: "border-rose-200 bg-rose-50 text-rose-800"
   } satisfies Record<Exclude<CredentialCheckStatus["state"], "idle">, string>;
@@ -10561,6 +10759,48 @@ async function syncPersistedDocumentTemplates(templates: DocumentTemplateVersion
   return payload as { ok: boolean; saved: number };
 }
 
+async function fetchOpenAiCredentialMetadata() {
+  const response = await fetch("/api/credentials/openai", { cache: "no-store" });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(payload?.error || "No se pudo cargar la credencial OpenAI.");
+  return (payload?.credential ?? emptyOpenAiCredentialMetadata()) as ApiCredentialMetadata;
+}
+
+async function fetchCiscoCredentialMetadata() {
+  const response = await fetch("/api/credentials/cisco", { cache: "no-store" });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(payload?.error || "No se pudo cargar la credencial Cisco.");
+  return (payload?.credential ?? emptyCiscoCredentialMetadata()) as ApiCredentialMetadata;
+}
+
+function emptyOpenAiCredentialMetadata(): ApiCredentialMetadata {
+  return {
+    provider: "openai",
+    label: "OpenAI API key",
+    configured: false,
+    source: "none",
+    maskedValue: "",
+    lastFour: null,
+    updatedAt: null,
+    updatedBy: null,
+    encryptionVersion: null
+  };
+}
+
+function emptyCiscoCredentialMetadata(): ApiCredentialMetadata {
+  return {
+    provider: "cisco_eox",
+    label: "Cisco EoX OAuth access token",
+    configured: false,
+    source: "none",
+    maskedValue: "",
+    lastFour: null,
+    updatedAt: null,
+    updatedBy: null,
+    encryptionVersion: null
+  };
+}
+
 function readInitialUiMode(): UiMode {
   if (typeof window === "undefined") return "dark";
   const stored = window.localStorage.getItem("assessment-tool.ui-mode.v1");
@@ -10776,8 +11016,16 @@ async function resetPersistentAIAnalysisStatus(assessmentId: string, scopeId?: A
 function persistentAIResultsToFindings(results: AIAssessmentAnalysisResults["results"], assessmentId: string): Finding[] {
   return results.flatMap((result) => {
     const findings = Array.isArray(result.findings) ? result.findings as any[] : [];
-    return findings.map((finding) => persistentAIFindingToFinding(finding, result.scopeId, assessmentId));
+    return findings
+      .filter((finding) => !isPersistentAICredentialPlaceholder(finding))
+      .map((finding) => persistentAIFindingToFinding(finding, result.scopeId, assessmentId));
   });
+}
+
+function isPersistentAICredentialPlaceholder(finding: any) {
+  const title = String(finding?.title ?? "");
+  const evidence = Array.isArray(finding?.evidence) ? finding.evidence : [];
+  return title.includes("OPENAI_API_KEY") || evidence.some((item: any) => String(item?.excerpt ?? "").includes("no llamo OpenAI"));
 }
 
 function persistentAIFindingToFinding(finding: any, scopeId: AIAnalysisScopeId, assessmentId: string): Finding {
@@ -10812,7 +11060,7 @@ function persistentAIFindingToFinding(finding: any, scopeId: AIAnalysisScopeId, 
   };
 }
 
-function markPersistentAIRuns(runs: EvaluationRun[], job: AIAnalysisJobSnapshot, findingCount: number) {
+function markPersistentAIRuns(runs: EvaluationRun[], job: AIAnalysisJobSnapshot, findingCount: number, resultSummary?: string) {
   const scopeIds = new Set(job.steps.map((step) => step.scopeId));
   const areas = evaluationAreas.filter((area) => scopeIds.has(evaluationAreaToAIScope(area.id))).map((area) => area.id);
   if (areas.length === 0) return runs;
@@ -10820,7 +11068,7 @@ function markPersistentAIRuns(runs: EvaluationRun[], job: AIAnalysisJobSnapshot,
     area,
     status: job.status === "failed" ? "blocked" : "complete",
     progress: 100,
-    message: findingCount > 0 ? `${findingCount} hallazgos agregados desde motor persistente` : "Evaluacion completada sin nuevos hallazgos",
+    message: findingCount > 0 ? `${findingCount} hallazgos agregados desde motor persistente` : resultSummary || "Evaluacion completada sin hallazgos soportados por evidencia",
     updatedAt: new Date().toISOString(),
     generatedFindingIds: []
   }), runs);

@@ -241,6 +241,22 @@ model AssessmentUserSnapshot {
   @@index([status])
 }
 
+model ApiCredential {
+  id                String   @id @default(cuid())
+  provider          String   @unique
+  label             String
+  encryptedValue    String   @db.Text
+  encryptionVersion String
+  fingerprint       String
+  lastFour          String?
+  updatedBy         String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([provider])
+  @@index([updatedAt])
+}
+
 model AiAnalysisJob {
   id              String               @id @default(cuid())
   assessmentId    String

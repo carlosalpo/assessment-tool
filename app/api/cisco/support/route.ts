@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { getCiscoApiToken } from "@/lib/server-credentials";
 
 type CiscoCoverageSummaryRecord = {
   sr_no?: string;
@@ -38,9 +39,9 @@ export async function POST(request: Request) {
 }
 
 async function fetchCoverageSummaryBySerials(serials: string[], requestToken?: string) {
-  const token = normalizeBearerToken(requestToken || process.env.CISCO_API_TOKEN);
+  const token = normalizeBearerToken(requestToken || await getCiscoApiToken());
   if (!token) {
-    throw new Error("Configura Cisco API token en Ajustes o CISCO_API_TOKEN en .env.local para consultar soporte.");
+    throw new Error("Guarda Cisco API token en Ajustes o define CISCO_API_TOKEN en .env.local para consultar soporte.");
   }
 
   const records: ReturnType<typeof normalizeCoverageSummaryRecord>[] = [];

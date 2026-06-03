@@ -4,6 +4,7 @@ out
 dist
 .env
 .env.local
+.credential-encryption-key
 .DS_Store
 *.log
 coverage

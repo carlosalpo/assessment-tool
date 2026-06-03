@@ -1,6 +1,12 @@
 import { createHash } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import {
+  buildAIScopePacket,
+  buildAssessmentKnowledgeGraph,
+  createAIAnalysisAudit,
+  validateScopeAnalysisResult
+} from "@/lib/ai-scope-strategy";
 
 export type AIAnalysisJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "partially_completed";
 export type AIAnalysisStepStatus = "pending" | "running" | "completed" | "failed" | "skipped" | "cancelled";
@@ -71,9 +77,14 @@ export type CreateAIAnalysisJobInput = {
   requestedBy?: string;
 };
 
-const engineVersion = "ai-analysis-engine-v1";
+type RunAIAnalysisJobOptions = {
+  apiKey?: string;
+};
+
+const engineVersion = "ai-analysis-engine-v2";
 const promptVersion = "assessment-ai-prompts-v1";
 const maxChunkChars = 14000;
+const defaultOpenAIAnalysisModel = "gpt-5.2";
 
 export const aiAnalysisScopes: Array<{ id: AIAnalysisScopeId; label: string; description: string }> = [
   { id: "inventory", label: "Inventario", description: "Inventario, identidad, modelos, seriales y roles." },
@@ -95,20 +106,20 @@ export const aiAnalysisScopes: Array<{ id: AIAnalysisScopeId; label: string; des
 ];
 
 export const fullAssessmentScopeOrder: AIAnalysisScopeId[] = [
-  "inventory",
-  "configuration",
   "topology",
+  "configuration",
+  "security",
   "lifecycle",
+  "operations",
+  "evidence",
+  "inventory",
   "routing",
   "wan",
   "datacenter",
   "campus",
   "perimeter",
-  "security",
   "performance",
   "high_availability",
-  "operations",
-  "evidence",
   "roadmap",
   "executive_summary"
 ];
@@ -178,8 +189,8 @@ export async function getAIAnalysisJob(jobId: string) {
 }
 
 export async function cancelAIAnalysisJob(jobId: string) {
-  await prisma.aiAnalysisJob.update({
-    where: { id: jobId },
+  await prisma.aiAnalysisJob.updateMany({
+    where: { id: jobId, status: { in: ["queued", "running"] } },
     data: {
       cancelRequested: true,
       errorMessage: "Cancelacion solicitada por el usuario.",
@@ -189,7 +200,7 @@ export async function cancelAIAnalysisJob(jobId: string) {
   return getAIAnalysisJob(jobId);
 }
 
-export async function retryAIAnalysisJob(jobId: string) {
+export async function retryAIAnalysisJob(jobId: string, options?: RunAIAnalysisJobOptions) {
   const job = await prisma.aiAnalysisJob.findUnique({ where: { id: jobId }, include: { steps: true } });
   if (!job) throw new Error("Job no encontrado.");
   await prisma.$transaction([
@@ -216,7 +227,7 @@ export async function retryAIAnalysisJob(jobId: string) {
       }
     })
   ]);
-  runAIAnalysisJob(jobId).catch(() => undefined);
+  runAIAnalysisJob(jobId, options).catch(() => undefined);
   return getAIAnalysisJob(jobId);
 }
 
@@ -284,7 +295,8 @@ export async function resetAssessmentAIAnalysis(assessmentId: string, scopeId?: 
   return getAssessmentAIAnalysisStatus(assessmentId);
 }
 
-export async function runAIAnalysisJob(jobId: string) {
+export async function runAIAnalysisJob(jobId: string, options?: RunAIAnalysisJobOptions) {
+  const apiKey = options?.apiKey?.trim() || process.env.OPENAI_API_KEY?.trim() || "";
   const acquired = await prisma.aiAnalysisJob.updateMany({
     where: { id: jobId, status: "queued" },
     data: { status: "running", startedAt: new Date(), progress: 1, errorMessage: null }
@@ -316,7 +328,12 @@ export async function runAIAnalysisJob(jobId: string) {
     const existingResult = await prisma.aiScopeResult.findUnique({
       where: { assessmentId_scopeId: { assessmentId: job.assessmentId, scopeId } }
     });
-    if (!job.forceReevaluate && existingResult?.status === "completed" && existingResult.inputHash === inputHash) {
+    if (
+      !job.forceReevaluate &&
+      existingResult?.status === "completed" &&
+      existingResult.inputHash === inputHash &&
+      !isOpenAICredentialPlaceholderResult(existingResult.findingsJson)
+    ) {
       await skipScopeSteps(jobId, scopeId, inputHash, "skipped_existing_result");
       skippedScopes += 1;
       await updateJobProgress(jobId);
@@ -339,7 +356,7 @@ export async function runAIAnalysisJob(jobId: string) {
           data: { currentPhase: `${scopeId}:${phase}` }
         });
 
-        const content = await runPhase({ record, scopeId, phase, previousArtifacts: artifacts.map((artifact) => artifact.content) });
+        const content = await runPhase({ record, scopeId, phase, previousArtifacts: artifacts.map((artifact) => artifact.content), apiKey });
         const artifact = await prisma.aiAnalysisArtifact.create({
           data: {
             assessmentId: job.assessmentId,
@@ -360,7 +377,7 @@ export async function runAIAnalysisJob(jobId: string) {
             jobId,
             scopeId,
             phaseName: phase,
-            model: phase === "scope_analysis" ? process.env.OPENAI_MODEL || "backend-orchestration" : "backend-orchestration",
+            model: phase === "scope_analysis" ? openAIAnalysisModel() : "backend-orchestration",
             inputTokens: estimateTokens({ scopeId, phase, record }),
             outputTokens: estimateTokens(content),
             totalTokens: estimateTokens({ scopeId, phase, record }) + estimateTokens(content)
@@ -429,32 +446,65 @@ async function runPhase(input: {
   scopeId: AIAnalysisScopeId;
   phase: AIAnalysisPhaseName;
   previousArtifacts: any[];
+  apiKey: string;
 }) {
   const scope = aiAnalysisScopes.find((item) => item.id === input.scopeId);
   const baseContext = buildScopeContext(input.record, input.scopeId);
+  const priorScopeResults = await loadPriorScopeResults(input.record?.id, input.scopeId);
+  const scopePacket = buildAIScopePacket({
+    record: input.record,
+    scopeId: input.scopeId,
+    priorScopeResults,
+    maxInputTokens: Number(process.env.OPENAI_MAX_INPUT_TOKENS ?? 24000)
+  });
+  const model = openAIAnalysisModel();
 
   if (input.phase === "context_preparation") {
+    const graph = buildAssessmentKnowledgeGraph(input.record);
     return {
       phase: input.phase,
       scopeId: input.scopeId,
       scopeLabel: scope?.label ?? input.scopeId,
       sourceCounts: baseContext.sourceCounts,
-      tokenBudget: maxChunkChars,
+      strategy: scopePacket.strategy,
+      knowledgeGraph: {
+        assessmentId: graph.assessmentId,
+        sourceCounts: graph.sourceCounts,
+        nodeCounts: {
+          devices: graph.nodes.devices.length,
+          interfaces: graph.nodes.interfaces.length,
+          relationships: graph.nodes.relationships.length,
+          configFacts: graph.nodes.configFacts.length,
+          stateFacts: graph.nodes.stateFacts.length,
+          performanceMetrics: graph.nodes.performanceMetrics.length,
+          evidenceRefs: graph.nodes.evidenceRefs.length,
+          deterministicFindings: graph.nodes.deterministicFindings.length,
+          correlations: graph.nodes.correlations.length,
+          edges: graph.edges.length
+        }
+      },
+      deterministicCandidateCount: baseContext.deterministicFindings.length,
+      tokenBudget: scopePacket.budget.maxInputTokens,
+      packetBudget: scopePacket.budget,
       promptVersion,
       engineVersion
     };
   }
 
   if (input.phase === "evidence_extraction") {
-    const chunks = chunkScopeEvidence(baseContext.evidenceText, input.scopeId);
     return {
       phase: input.phase,
-      chunks,
-      extractedFacts: chunks.map((chunk, index) => ({
+      packetVersion: scopePacket.packetVersion,
+      evidenceRefs: scopePacket.evidencePack.map((ref) => ref.id),
+      evidencePack: scopePacket.evidencePack,
+      extractedFacts: scopePacket.evidencePack.map((ref, index) => ({
         id: `${input.scopeId}_fact_${index + 1}`,
-        source: chunk.sourceReference,
-        summary: chunk.text.slice(0, 700),
-        tokenEstimate: estimateTokens(chunk.text)
+        source: ref.id,
+        sourceFile: ref.sourceFile,
+        command: ref.command,
+        hostname: ref.deviceId,
+        summary: ref.excerpt.slice(0, 700),
+        tokenEstimate: estimateTokens(ref.excerpt)
       }))
     };
   }
@@ -469,12 +519,26 @@ async function runPhase(input: {
         segment: device.topologyLayer ?? device.site ?? "auto"
       })),
       contradictions: detectBasicContradictions(input.record),
-      relatedEvidenceCount: baseContext.sourceCounts.evidenceFiles
+      deterministicFindings: baseContext.deterministicFindings,
+      relatedEvidenceCount: baseContext.sourceCounts.evidenceFiles,
+      aiScopePacketSummary: {
+        scopeId: scopePacket.scopeId,
+        strategy: scopePacket.strategy.label,
+        devices: scopePacket.graphSlice.devices.length,
+        relationships: scopePacket.graphSlice.relationships.length,
+        configFacts: scopePacket.graphSlice.configFacts.length,
+        stateFacts: scopePacket.graphSlice.stateFacts.length,
+        performanceMetrics: scopePacket.graphSlice.performanceMetrics.length,
+        correlations: scopePacket.memory.openCorrelationCandidates.length,
+        evidenceRefs: scopePacket.evidencePack.length,
+        priorScopeSummaries: scopePacket.memory.priorScopeSummaries.length,
+        budget: scopePacket.budget
+      }
     };
   }
 
   if (input.phase === "scope_analysis") {
-    return callOpenAIForScopeAnalysis(input.scopeId, baseContext, input.previousArtifacts);
+    return callOpenAIForScopeAnalysis(input.scopeId, scopePacket, input.previousArtifacts, input.apiKey, model);
   }
 
   if (input.phase === "validation") {
@@ -483,11 +547,15 @@ async function runPhase(input: {
     return {
       phase: input.phase,
       validatedFindings: findings.filter((finding: any) => Array.isArray(finding.evidence) && finding.evidence.length > 0),
-      rejectedFindings: findings.filter((finding: any) => !Array.isArray(finding.evidence) || finding.evidence.length === 0).map((finding: any) => ({
-        title: finding.title ?? "Hallazgo sin titulo",
-        reason: "Sin evidencia trazable."
-      })),
-      rule: "Todo hallazgo debe tener evidencia."
+      rejectedFindings: [
+        ...(Array.isArray(analysis.rejectedFindings) ? analysis.rejectedFindings : []),
+        ...findings.filter((finding: any) => !Array.isArray(finding.evidence) || finding.evidence.length === 0).map((finding: any) => ({
+          finding_id: finding.finding_id ?? "unknown",
+          title: finding.title ?? "Hallazgo sin titulo",
+          reason: "Sin evidencia trazable."
+        }))
+      ],
+      rule: "Todo hallazgo debe tener evidencia trazable y referencias permitidas por la estrategia del ambito."
     };
   }
 
@@ -509,92 +577,226 @@ async function runPhase(input: {
   };
 }
 
-async function callOpenAIForScopeAnalysis(scopeId: AIAnalysisScopeId, context: any, previousArtifacts: any[]) {
-  const apiKey = process.env.OPENAI_API_KEY;
+async function callOpenAIForScopeAnalysis(scopeId: AIAnalysisScopeId, scopePacket: ReturnType<typeof buildAIScopePacket>, previousArtifacts: any[], apiKey: string, model: string) {
   if (!apiKey) {
-    return {
-      phase: "scope_analysis",
-      scopeId,
-      provider: "offline",
-      findings: [{
-        finding_id: `${scopeId}_insufficient_evidence_review`,
-        scope: scopeId,
-        title: "Revision AI pendiente por falta de OPENAI_API_KEY en backend",
-        severity: "informational",
-        confidence: "low",
-        evidence: [{
-          source_type: "document",
-          source_name: "backend",
-          hostname: null,
-          command: null,
-          excerpt: "El motor persistente ejecuto el pipeline, pero no llamo OpenAI porque la llave no esta configurada en backend."
-        }],
-        technical_rationale: "La orquestacion esta disponible; la fase de analisis AI requiere OPENAI_API_KEY del lado servidor.",
-        business_impact: "No se generan conclusiones AI finales hasta configurar credenciales backend.",
-        recommendation: "Configurar OPENAI_API_KEY en .env.local y reintentar o forzar reevaluacion del ambito.",
-        remediation_steps: ["Configurar OPENAI_API_KEY", "Reintentar el job", "Validar los hallazgos generados"],
-        related_devices: [],
-        related_sites: [],
-        dependencies: []
-      }]
-    };
+    throw new Error("OpenAI API key no esta configurada para el motor persistente.");
   }
 
-  const relevantChunks = chunkScopeEvidence(context.evidenceText, scopeId).slice(0, 4);
-  const response = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({
-      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-      input: [
-        {
-          role: "system",
-          content: [{
-            type: "input_text",
-            text: [
-              "Eres un arquitecto senior Cisco ejecutando una fase incremental de assessment.",
-              "No inventes equipos, rutas, conexiones ni vulnerabilidades.",
-              "Todo hallazgo debe tener evidencia explicita.",
-              "Si la evidencia es insuficiente, marca insufficient_evidence en vez de inferir.",
-              `Prompt version: ${promptVersion}. Engine version: ${engineVersion}.`
-            ].join("\n")
-          }]
-        },
-        {
-          role: "user",
-          content: [{
-            type: "input_text",
-            text: JSON.stringify({
-              task: `Analiza el ambito ${scopeId} usando solo estos chunks y artifacts previos.`,
-              context: {
-                client: context.client,
-                assessment: context.assessment,
-                sourceCounts: context.sourceCounts,
-                chunks: relevantChunks
-              },
-              previousArtifacts
-            })
-          }]
+  const deterministicFindings = scopePacket.memory.acceptedOrDeterministicFindings ?? [];
+  const deterministicScopeFindings = deterministicFindingsToScopeAnalysisFindings(deterministicFindings, scopePacket);
+  const audit = createAIAnalysisAudit({ packet: scopePacket, model, promptVersion, engineVersion });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.OPENAI_TIMEOUT_MS ?? 90000));
+  try {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model,
+        input: [
+          {
+            role: "system",
+            content: [{
+              type: "input_text",
+              text: [
+                "Eres un arquitecto senior Cisco ejecutando una fase incremental de assessment.",
+                "No inventes equipos, rutas, conexiones ni vulnerabilidades.",
+                "Usa solo el AIScopePacket provisto. No uses conocimiento externo para completar datos faltantes.",
+                "Todo hallazgo debe tener evidencia_refs existentes en AIScopePacket.evidencePack o debe clasificarse como visibility_gap/validation_required.",
+                "Respeta la estrategia, tipos de hallazgo y reglas de validacion especificas del ambito.",
+                "Si la evidencia es insuficiente, usa validation_required o visibility_gap en vez de inferir.",
+                `Prompt version: ${promptVersion}. Engine version: ${engineVersion}.`
+              ].join("\n")
+            }]
+          },
+          {
+            role: "user",
+            content: [{
+              type: "input_text",
+              text: JSON.stringify({
+                task: `Analiza el ambito ${scopeId} usando solo este AIScopePacket y la memoria incremental incluida.`,
+                requiredBehavior: [
+                  "Devuelve hallazgos si hay riesgos o inconsistencias explicitamente soportadas por evidencia.",
+                  "Usa memory.acceptedOrDeterministicFindings y memory.openCorrelationCandidates como candidatos con evidencia.",
+                  "Puedes conservar, ajustar severidad o descartar candidatos solo si la evidencia contradice el candidato.",
+                  "No devuelvas findings vacio cuando la memoria tenga candidatos validos soportados por evidencia.",
+                  "Incluye evidence_refs, related_fact_ids, related_metric_ids y related_correlation_ids usando solo IDs existentes en el packet."
+                ],
+                aiScopePacket: scopePacket,
+                previousArtifacts: compactPreviousArtifacts(previousArtifacts),
+                audit
+              })
+            }]
+          }
+        ],
+        text: {
+          format: {
+            type: "json_schema",
+            name: "scope_analysis_result",
+            strict: true,
+            schema: scopeAnalysisResultSchema()
+          }
         }
-      ],
-      text: {
-        format: {
-          type: "json_schema",
-          name: "scope_analysis_result",
-          strict: true,
-          schema: scopeAnalysisResultSchema()
-        }
-      }
-    })
-  });
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) {
-    throw new Error(payload?.error?.message ?? "Error llamando OpenAI Responses API.");
+      })
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      const message = payload?.error?.message ?? "Error llamando OpenAI Responses API.";
+      if (response.status === 401 || response.status === 403 || deterministicScopeFindings.length === 0) throw new Error(message);
+      return deterministicScopeAnalysisFallback(scopeId, deterministicScopeFindings, message);
+    }
+    const parsed = JSON.parse(extractResponseText(payload) || "{\"findings\":[],\"recommendations\":[]}");
+    const validation = validateScopeAnalysisResult(parsed, scopePacket);
+    const mergedFindings = mergeScopeFindings(validation.validFindings, deterministicScopeFindings);
+    return {
+      ...parsed,
+      phase: "scope_analysis",
+      scopeId,
+      audit,
+      packetSummary: summarizeScopePacket(scopePacket),
+      findings: mergedFindings,
+      rejectedFindings: validation.rejectedFindings,
+      recommendations: Array.from(new Set([...(Array.isArray(parsed.recommendations) ? parsed.recommendations : []), ...deterministicScopeFindings.map((finding: any) => finding.recommendation).filter(Boolean)]))
+    };
+  } catch (error) {
+    if (deterministicScopeFindings.length === 0) throw error;
+    const message = error instanceof Error ? error.message : "OpenAI no respondio durante scope_analysis.";
+    return deterministicScopeAnalysisFallback(scopeId, deterministicScopeFindings, message);
+  } finally {
+    clearTimeout(timeout);
   }
-  return JSON.parse(extractResponseText(payload) || "{\"findings\":[],\"recommendations\":[]}");
+}
+
+function deterministicScopeAnalysisFallback(scopeId: AIAnalysisScopeId, findings: any[], reason: string) {
+  return {
+    phase: "scope_analysis",
+    scopeId,
+    provider: "deterministic-fallback",
+    findings,
+    recommendations: Array.from(new Set(findings.map((finding: any) => finding.recommendation).filter(Boolean))),
+    limitations: [`OpenAI no completo la fase scope_analysis; se usaron candidatos determinísticos con evidencia. Detalle: ${reason}`]
+  };
+}
+
+function deterministicFindingsToScopeAnalysisFindings(findings: any[], packet: ReturnType<typeof buildAIScopePacket>) {
+  const evidenceById = new Map(packet.evidencePack.map((ref) => [ref.id, ref]));
+  return findings
+    .filter((finding) => finding?.id || finding?.finding_id)
+    .map((finding) => {
+      if (finding.finding_id && Array.isArray(finding.evidence)) return finding;
+      const evidenceRefs = Array.isArray(finding.evidenceRefs) ? finding.evidenceRefs.filter((ref: string) => evidenceById.has(ref)).slice(0, 8) : [];
+      return {
+        finding_id: String(finding.id ?? "deterministic_finding"),
+        scope: packet.scopeId,
+        title: String(finding.title ?? "Hallazgo deterministico"),
+        finding_type: evidenceRefs.length > 0 ? "probable_issue" : "validation_required",
+        severity: normalizeScopeSeverity(finding.severity),
+        confidence: normalizeScopeConfidence(finding.confidence),
+        evidence_refs: evidenceRefs,
+        related_fact_ids: [],
+        related_metric_ids: [],
+        related_correlation_ids: [],
+        evidence: evidenceRefs.map((refId: string) => {
+          const ref = evidenceById.get(refId);
+          return {
+            source_type: ref?.metricId ? "performance" : ref?.sourceFile ? "cli" : "document",
+            source_name: ref?.sourceFile ?? refId,
+            hostname: ref?.deviceId ?? null,
+            command: ref?.command ?? null,
+            excerpt: ref?.excerpt ?? refId
+          };
+        }),
+        technical_rationale: String(finding.title ?? "Hallazgo generado por reglas deterministicas con evidencia del assessment."),
+        business_impact: "Debe ser revisado por el arquitecto para confirmar impacto, alcance y prioridad.",
+        recommendation: "Validar evidencia relacionada y definir accion de remediacion o levantamiento adicional.",
+        remediation_steps: ["Revisar evidencia trazable", "Confirmar alcance con el arquitecto", "Documentar decision final"],
+        validation_questions: ["Confirmar si la evidencia representa el estado actual de produccion."],
+        related_devices: Array.isArray(finding.affectedAssets) ? finding.affectedAssets : [],
+        related_sites: [],
+        dependencies: ["Evidencia del assessment"]
+      };
+    });
+}
+
+function normalizeScopeSeverity(value: unknown) {
+  const severity = String(value ?? "medium");
+  return severity === "info" ? "informational" : ["critical", "high", "medium", "low", "informational"].includes(severity) ? severity : "medium";
+}
+
+function normalizeScopeConfidence(value: unknown) {
+  const confidence = typeof value === "number" ? value : Number(value);
+  if (Number.isFinite(confidence)) {
+    if (confidence >= 80) return "high";
+    if (confidence >= 55) return "medium";
+    return "low";
+  }
+  const text = String(value ?? "medium");
+  return ["high", "medium", "low"].includes(text) ? text : "medium";
+}
+
+async function loadPriorScopeResults(assessmentId: string | undefined, scopeId: AIAnalysisScopeId) {
+  if (!assessmentId) return [];
+  const strategyOrder = new Set(fullAssessmentScopeOrder.slice(0, Math.max(0, fullAssessmentScopeOrder.indexOf(scopeId))));
+  return prisma.aiScopeResult.findMany({
+    where: {
+      assessmentId,
+      status: "completed",
+      scopeId: { in: Array.from(strategyOrder) }
+    },
+    orderBy: { updatedAt: "asc" }
+  });
+}
+
+function openAIAnalysisModel() {
+  return process.env.OPENAI_ANALYSIS_MODEL || process.env.OPENAI_MODEL || defaultOpenAIAnalysisModel;
+}
+
+function compactPreviousArtifacts(previousArtifacts: any[]) {
+  return previousArtifacts.map((artifact) => ({
+    phase: artifact.phase,
+    scopeId: artifact.scopeId,
+    executiveSummary: artifact.executiveSummary,
+    sourceCounts: artifact.sourceCounts,
+    deterministicCandidateCount: artifact.deterministicCandidateCount,
+    packetBudget: artifact.packetBudget,
+    aiScopePacketSummary: artifact.aiScopePacketSummary,
+    rejectedFindings: Array.isArray(artifact.rejectedFindings) ? artifact.rejectedFindings.slice(0, 12) : undefined,
+    findings: Array.isArray(artifact.findings)
+      ? artifact.findings.slice(0, 12).map((finding: any) => ({
+          finding_id: finding.finding_id,
+          title: finding.title,
+          severity: finding.severity,
+          confidence: finding.confidence,
+          evidence_refs: finding.evidence_refs,
+          related_fact_ids: finding.related_fact_ids,
+          related_metric_ids: finding.related_metric_ids,
+          related_correlation_ids: finding.related_correlation_ids
+        }))
+      : undefined
+  }));
+}
+
+function summarizeScopePacket(packet: ReturnType<typeof buildAIScopePacket>) {
+  return {
+    packetVersion: packet.packetVersion,
+    scopeId: packet.scopeId,
+    strategy: packet.strategy.label,
+    analysisGoal: packet.strategy.analysisGoal,
+    priorScopeSummaries: packet.memory.priorScopeSummaries.length,
+    deterministicFindings: packet.memory.acceptedOrDeterministicFindings.length,
+    correlations: packet.memory.openCorrelationCandidates.length,
+    devices: packet.graphSlice.devices.length,
+    relationships: packet.graphSlice.relationships.length,
+    configFacts: packet.graphSlice.configFacts.length,
+    stateFacts: packet.graphSlice.stateFacts.length,
+    performanceMetrics: packet.graphSlice.performanceMetrics.length,
+    evidenceRefs: packet.evidencePack.length,
+    budget: packet.budget
+  };
 }
 
 function scopeAnalysisResultSchema() {
@@ -610,13 +812,38 @@ function scopeAnalysisResultSchema() {
         items: {
           type: "object",
           additionalProperties: false,
-          required: ["finding_id", "scope", "title", "severity", "confidence", "evidence", "technical_rationale", "business_impact", "recommendation", "remediation_steps", "related_devices", "related_sites", "dependencies"],
+          required: [
+            "finding_id",
+            "scope",
+            "title",
+            "finding_type",
+            "severity",
+            "confidence",
+            "evidence_refs",
+            "related_fact_ids",
+            "related_metric_ids",
+            "related_correlation_ids",
+            "evidence",
+            "technical_rationale",
+            "business_impact",
+            "recommendation",
+            "remediation_steps",
+            "validation_questions",
+            "related_devices",
+            "related_sites",
+            "dependencies"
+          ],
           properties: {
             finding_id: { type: "string" },
             scope: { type: "string" },
             title: { type: "string" },
+            finding_type: { type: "string", enum: ["confirmed_finding", "probable_issue", "correlation_suspicion", "visibility_gap", "validation_required"] },
             severity: { type: "string", enum: ["critical", "high", "medium", "low", "informational"] },
             confidence: { type: "string", enum: ["high", "medium", "low"] },
+            evidence_refs: { type: "array", items: { type: "string" } },
+            related_fact_ids: { type: "array", items: { type: "string" } },
+            related_metric_ids: { type: "array", items: { type: "string" } },
+            related_correlation_ids: { type: "array", items: { type: "string" } },
             evidence: {
               type: "array",
               items: {
@@ -636,6 +863,7 @@ function scopeAnalysisResultSchema() {
             business_impact: { type: "string" },
             recommendation: { type: "string" },
             remediation_steps: { type: "array", items: { type: "string" } },
+            validation_questions: { type: "array", items: { type: "string" } },
             related_devices: { type: "array", items: { type: "string" } },
             related_sites: { type: "array", items: { type: "string" } },
             dependencies: { type: "array", items: { type: "string" } }
@@ -654,11 +882,13 @@ function buildScopeContext(record: any, scopeId: AIAnalysisScopeId) {
   const parsed = record?.parsed ?? {};
   const performance = record?.performance ?? {};
   const relevantEvidence = evidenceFiles.filter((file: any) => evidenceFileMatchesScope(file, scopeId));
+  const deterministicFindings = buildDeterministicScopeFindings(record, scopeId);
   const evidenceText = stableStringify({
     client: record?.client,
     assessment: record?.assessment,
     scope: record?.scope,
     inventory: devices,
+    deterministicFindings,
     parsed: compactParsedForScope(parsed, scopeId),
     performance: scopeId === "performance" ? performance : undefined,
     operationalAssessment: scopeId === "operations" ? record?.operationalAssessment : undefined,
@@ -678,6 +908,7 @@ function buildScopeContext(record: any, scopeId: AIAnalysisScopeId) {
     scopeId,
     devices,
     evidenceFiles: relevantEvidence,
+    deterministicFindings,
     evidenceText,
     sourceCounts: {
       devices: devices.length,
@@ -700,6 +931,141 @@ function compactParsedForScope(parsed: any, scopeId: AIAnalysisScopeId) {
     relations: parsed.relations,
     findings: parsed.findings
   };
+}
+
+function buildDeterministicScopeFindings(record: any, scopeId: AIAnalysisScopeId) {
+  if (scopeId !== "topology") return [];
+  return buildDeterministicTopologyFindings(record).slice(0, 6);
+}
+
+function buildDeterministicTopologyFindings(record: any) {
+  const parsed = record?.parsed ?? {};
+  const relations = Array.isArray(parsed.relations) ? parsed.relations : [];
+  const targetInventory = Array.isArray(record?.targetInventory) ? record.targetInventory.filter((device: any) => device.included !== false) : [];
+  const findings: any[] = [];
+  type LowCoverageDevice = { device: any; count: number };
+
+  const selfRelations = relations.filter((relation: any) => {
+    const local = normalizeTopologyName(relation.localHostname);
+    const remote = normalizeTopologyName(relation.remoteHostname);
+    return local && remote && local === remote;
+  });
+  if (selfRelations.length > 0) {
+    const samples = selfRelations.slice(0, 4);
+    findings.push({
+      finding_id: "topology_self_neighbor_relations",
+      scope: "topology",
+      title: "Relaciones CDP/LLDP autoreferenciadas requieren validacion topologica",
+      severity: selfRelations.length > 2 ? "medium" : "low",
+      confidence: "medium",
+      evidence: samples.map((relation: any) => topologyRelationEvidence(relation, "La relacion muestra el mismo hostname como origen y destino.")),
+      technical_rationale: `${selfRelations.length} relaciones descubiertas tienen el mismo equipo como origen y destino. Esto puede indicar salida mezclada, parsing incorrecto, vecinos mal identificados o una inconsistencia de documentacion topologica que impide confiar plenamente en dependencias y redundancia.`,
+      business_impact: "Una topologia con relaciones ambiguas reduce la confianza del assessment para identificar puntos unicos de falla, dependencias criticas y rutas de remediacion.",
+      recommendation: "Validar los bloques CDP/LLDP por hostname, corregir evidencias mezcladas y confirmar pares fisicos/logicos antes de cerrar el mapa topologico.",
+      remediation_steps: ["Separar evidencia por dispositivo origen", "Reejecutar show cdp/lldp neighbors detail por equipo", "Validar pares origen/destino en el diagrama topologico"],
+      related_devices: Array.from(new Set(samples.flatMap((relation: any) => [relation.localHostname, relation.remoteHostname]).filter(Boolean))),
+      related_sites: [],
+      dependencies: ["CDP/LLDP por dispositivo", "Diagrama fisico/logico vigente"]
+    });
+  }
+
+  const relationCounts = relationCountByHostname(relations);
+  const criticalSingleHomed = targetInventory
+    .filter((device: any) => isHighPriorityTopologyDevice(device))
+    .map((device: any) => ({ device, count: relationCounts.get(normalizeTopologyName(device.hostname)) ?? 0 }))
+    .filter((item: LowCoverageDevice) => item.count <= 1)
+    .slice(0, 8);
+  if (criticalSingleHomed.length > 0) {
+    findings.push({
+      finding_id: "topology_critical_devices_low_neighbor_coverage",
+      scope: "topology",
+      title: "Equipos criticos con baja cobertura de vecinos topologicos",
+      severity: criticalSingleHomed.some((item: LowCoverageDevice) => item.count === 0) ? "high" : "medium",
+      confidence: relations.length > 0 ? "medium" : "low",
+      evidence: criticalSingleHomed.slice(0, 5).map(({ device, count }: LowCoverageDevice) => ({
+        source_type: "inventory",
+        source_name: "Inventario objetivo y relaciones CDP/LLDP",
+        hostname: device.hostname ?? null,
+        command: "show cdp neighbors detail / show lldp neighbors detail",
+        excerpt: `${device.hostname}: prioridad ${device.priority ?? "sin prioridad"}, rol ${device.role ?? "sin rol"}, relaciones detectadas ${count}.`
+      })),
+      technical_rationale: "Dispositivos marcados como criticos o de alta prioridad tienen cero o una relacion topologica detectada. Para equipos core, datacenter, WAN edge, firewalls o controladores, esto puede ocultar puntos unicos de falla o evidencia incompleta de redundancia.",
+      business_impact: "La baja cobertura de vecinos en equipos criticos limita la capacidad de demostrar resiliencia y puede ocultar dependencias operativas de alto impacto.",
+      recommendation: "Completar evidencia CDP/LLDP, port-channel/vPC y redundancia para los equipos criticos antes de aceptar la topologia como validada.",
+      remediation_steps: ["Recolectar vecinos CDP/LLDP desde cada equipo critico", "Validar port-channel/vPC/stack/SSO cuando aplique", "Actualizar inventario objetivo con pares redundantes esperados"],
+      related_devices: criticalSingleHomed.map((item: LowCoverageDevice) => String(item.device.hostname ?? "")).filter(Boolean),
+      related_sites: Array.from(new Set(criticalSingleHomed.map((item: LowCoverageDevice) => String(item.device.site ?? "")).filter(Boolean))),
+      dependencies: ["Inventario objetivo", "CDP/LLDP", "Evidencia de redundancia"]
+    });
+  }
+
+  if (relations.length === 0 && targetInventory.length > 1) {
+    findings.push({
+      finding_id: "topology_missing_neighbor_evidence",
+      scope: "topology",
+      title: "No hay evidencia CDP/LLDP suficiente para validar dependencias topologicas",
+      severity: "medium",
+      confidence: "high",
+      evidence: [{
+        source_type: "inventory",
+        source_name: "Inventario objetivo",
+        hostname: null,
+        command: "show cdp neighbors detail / show lldp neighbors detail",
+        excerpt: `${targetInventory.length} equipos incluidos en alcance, pero 0 relaciones topologicas parseadas.`
+      }],
+      technical_rationale: "Sin relaciones CDP/LLDP parseadas no es posible soportar con evidencia la redundancia fisica/logica ni dependencias entre capas.",
+      business_impact: "El assessment no puede concluir puntos unicos de falla o resiliencia sin evidencia topologica verificable.",
+      recommendation: "Recolectar y cargar evidencia CDP/LLDP por dispositivo antes de cerrar la evaluacion topologica.",
+      remediation_steps: ["Recolectar show cdp neighbors detail", "Recolectar show lldp neighbors detail", "Reprocesar evidencia"],
+      related_devices: targetInventory.slice(0, 8).map((device: any) => String(device.hostname ?? "")).filter(Boolean),
+      related_sites: Array.from(new Set(targetInventory.map((device: any) => String(device.site ?? "")).filter(Boolean))).slice(0, 8),
+      dependencies: ["Evidencia CDP/LLDP"]
+    });
+  }
+
+  return findings;
+}
+
+function mergeScopeFindings(aiFindings: any[], deterministicFindings: any[]) {
+  const byId = new Map<string, any>();
+  for (const finding of deterministicFindings) {
+    if (finding?.finding_id) byId.set(String(finding.finding_id), finding);
+  }
+  for (const finding of aiFindings) {
+    if (!finding?.finding_id) continue;
+    byId.set(String(finding.finding_id), finding);
+  }
+  return Array.from(byId.values());
+}
+
+function topologyRelationEvidence(relation: any, prefix: string) {
+  return {
+    source_type: "cli",
+    source_name: relation.evidence?.[0] ? "CDP/LLDP neighbors detail" : "Relacion topologica parseada",
+    hostname: relation.localHostname ?? null,
+    command: relation.protocol === "lldp" ? "show lldp neighbors detail" : "show cdp neighbors detail",
+    excerpt: `${prefix} ${relation.localHostname ?? "origen desconocido"} ${relation.localInterface ?? ""} -> ${relation.remoteHostname ?? "destino desconocido"} ${relation.remoteInterface ?? ""}. ${String(relation.evidence?.[0] ?? "").slice(0, 450)}`
+  };
+}
+
+function relationCountByHostname(relations: any[]) {
+  const counts = new Map<string, number>();
+  for (const relation of relations) {
+    const local = normalizeTopologyName(relation.localHostname);
+    const remote = normalizeTopologyName(relation.remoteHostname);
+    if (local) counts.set(local, (counts.get(local) ?? 0) + 1);
+    if (remote) counts.set(remote, (counts.get(remote) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function isHighPriorityTopologyDevice(device: any) {
+  const value = `${device?.priority ?? ""} ${device?.role ?? ""} ${device?.deviceType ?? ""}`.toLowerCase();
+  return /critical|high|core|distribution|datacenter|spine|leaf|wan|edge|firewall|controller/.test(value);
+}
+
+function normalizeTopologyName(value: unknown) {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
 }
 
 function evidenceFileMatchesScope(file: any, scopeId: AIAnalysisScopeId) {
@@ -882,6 +1248,17 @@ function extractResponseText(data: any) {
 
 function estimateTokens(value: unknown) {
   return Math.ceil(stableStringify(value).length / 4);
+}
+
+function isOpenAICredentialPlaceholderResult(findingsJson: Prisma.JsonValue) {
+  const findings = Array.isArray(findingsJson) ? findingsJson : [];
+  return findings.some((finding) => {
+    if (!finding || typeof finding !== "object" || Array.isArray(finding)) return false;
+    const value = finding as Record<string, any>;
+    const title = String(value.title ?? "");
+    const evidence = Array.isArray(value.evidence) ? value.evidence : [];
+    return title.includes("OPENAI_API_KEY") || evidence.some((item: any) => String(item?.excerpt ?? "").includes("no llamo OpenAI"));
+  });
 }
 
 function truncateText(value: string, maxLength: number) {

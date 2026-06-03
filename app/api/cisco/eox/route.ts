@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { getCiscoApiToken } from "@/lib/server-credentials";
 
 type CiscoEoxDate = {
   value?: string;
@@ -52,7 +53,7 @@ export async function POST(request: Request) {
 }
 
 async function fetchCiscoEoxByProductIds(productIds: string[], requestToken?: string) {
-  const token = normalizeBearerToken(requestToken || process.env.CISCO_API_TOKEN);
+  const token = normalizeBearerToken(requestToken || await getCiscoApiToken());
   const chunks = chunk(productIds, 20);
   const records: ReturnType<typeof normalizeCiscoRecord>[] = [];
 
@@ -65,7 +66,7 @@ async function fetchCiscoEoxByProductIds(productIds: string[], requestToken?: st
 
     if (!response.ok) {
       throw new Error(
-        `Cisco EoX respondio ${response.status}. Configura Cisco EoX API token en Ajustes o CISCO_API_TOKEN en .env.local.`
+        `Cisco EoX respondio ${response.status}. Guarda Cisco API token en Ajustes o define CISCO_API_TOKEN en .env.local.`
       );
     }
 

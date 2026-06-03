@@ -11,6 +11,12 @@ import {
   type AISuggestedFinding,
   type AssessmentAIContextInput
 } from "./ai-analysis.ts";
+import {
+  buildAIScopePacket,
+  buildAssessmentKnowledgeGraph,
+  getAIScopeStrategy,
+  validateScopeAnalysisResult
+} from "./ai-scope-strategy.ts";
 
 const baseInput = (): AssessmentAIContextInput => ({
   id: "assess_ai",
@@ -215,6 +221,149 @@ test("risk consumers include accepted/edited/validated AI findings only", () => 
   const suggested = aiSuggestedFindingToFinding(aiFinding({ id: "aif_suggested", status: "ai_suggested", evidenceRefs: ["e2"] }));
   const edited = aiSuggestedFindingToFinding(aiFinding({ id: "aif_edited", status: "edited", evidenceRefs: ["e3"] }));
   assert.deepEqual(acceptedOrValidatedFindings([accepted, suggested, edited]).map((finding) => finding.id), ["aif_accepted", "aif_edited"]);
+});
+
+test("buildAssessmentKnowledgeGraph creates stable graph nodes and edges", () => {
+  const graph = buildAssessmentKnowledgeGraph(baseInput());
+  assert.equal(graph.assessmentId, "assess_ai");
+  assert.equal(graph.nodes.devices.length, 3);
+  assert.ok(graph.nodes.configFacts.some((fact) => fact.factType === "insecure_snmp"));
+  assert.ok(graph.nodes.correlations.some((candidate) => candidate.correlationType === "topology_resiliency_gap"));
+  assert.ok(graph.edges.some((edge) => edge.type === "has_interface" && edge.from === "device:core-01"));
+});
+
+test("AIScope strategies define independent scope behavior", () => {
+  const topology = getAIScopeStrategy("topology");
+  const security = getAIScopeStrategy("security");
+  const lifecycle = getAIScopeStrategy("lifecycle");
+  assert.ok(topology.expectedFindings.some((item) => /puntos unicos/i.test(item)));
+  assert.ok(security.primaryInputs.includes("SNMP"));
+  assert.ok(lifecycle.validationRules.some((rule) => /EoX confirmado/.test(rule)));
+  assert.notDeepEqual(topology.correlationTypes, security.correlationTypes);
+});
+
+test("buildAIScopePacket sends facts and citations instead of raw evidence file content", () => {
+  const input = baseInput();
+  input.evidenceFiles.push(evidence("raw-secret.log", "hostname raw-secret\nTHIS_SECRET_RAW_LINE_SHOULD_NOT_BE_SENT\nshow running-config\n! no matching risky fact"));
+  const packet = buildAIScopePacket({ record: input, scopeId: "security", maxInputTokens: 8000 });
+  const serialized = JSON.stringify(packet);
+  assert.equal(serialized.includes("THIS_SECRET_RAW_LINE_SHOULD_NOT_BE_SENT"), false);
+  assert.ok(packet.evidencePack.every((ref) => ref.excerpt.length <= 320));
+  assert.ok(packet.graphSlice.configFacts.some((fact) => fact.factType === "insecure_snmp"));
+});
+
+test("buildAIScopePacket includes compact prior scope memory for incremental correlation", () => {
+  const packet = buildAIScopePacket({
+    record: baseInput(),
+    scopeId: "security",
+    priorScopeResults: [
+      { scopeId: "topology", status: "completed", executiveSummary: "Topologia con baja redundancia.", findingsJson: [{ id: "f1" }], recommendationsJson: ["Validar redundancia"] },
+      { scopeId: "lifecycle", status: "completed", executiveSummary: "No debe entrar aun.", findingsJson: [{ id: "f2" }], recommendationsJson: [] }
+    ]
+  });
+  assert.deepEqual(packet.memory.priorScopeSummaries.map((item) => item.scopeId), ["topology"]);
+  assert.equal(packet.memory.priorScopeSummaries[0].findingCount, 1);
+});
+
+test("buildAIScopePacket applies token budget by trimming evidence first", () => {
+  const input = baseInput();
+  for (let index = 0; index < 80; index += 1) {
+    input.evidenceFiles.push(evidence(`sec-${index}.log`, `hostname sec-${index}\nsnmp-server community public RO ${index}\nline vty 0 4\n transport input telnet ssh`));
+  }
+  const packet = buildAIScopePacket({ record: input, scopeId: "security", maxInputTokens: 1200 });
+  assert.ok(packet.budget.trimmed);
+  assert.ok(packet.budget.estimatedInputTokens >= 0);
+  assert.ok(packet.evidencePack.length < input.evidenceFiles.length);
+});
+
+test("validateScopeAnalysisResult rejects invented evidence, facts and correlations", () => {
+  const packet = buildAIScopePacket({ record: baseInput(), scopeId: "security" });
+  const result = validateScopeAnalysisResult({
+    findings: [{
+      finding_id: "sec_invented",
+      scope: "security",
+      title: "SNMP inseguro inventado",
+      finding_type: "confirmed_finding",
+      severity: "high",
+      confidence: "high",
+      evidence_refs: ["invented-ref"],
+      related_fact_ids: ["cfg_invented"],
+      related_metric_ids: [],
+      related_correlation_ids: ["corr_invented"],
+      evidence: [{ source_type: "cli", source_name: "invented", hostname: "core-01", command: "show running-config", excerpt: "invented" }],
+      technical_rationale: "Inventado",
+      business_impact: "Inventado",
+      recommendation: "Validar",
+      remediation_steps: [],
+      validation_questions: [],
+      related_devices: ["core-01"],
+      related_sites: [],
+      dependencies: []
+    }]
+  }, packet);
+  assert.equal(result.validFindings.length, 0);
+  assert.equal(result.rejectedFindings.length, 1);
+  assert.match(result.rejectedFindings[0].reason, /desconocidos/);
+});
+
+test("validateScopeAnalysisResult accepts evidence-bound security findings", () => {
+  const packet = buildAIScopePacket({ record: baseInput(), scopeId: "security" });
+  const fact = packet.graphSlice.configFacts.find((item) => item.factType === "insecure_snmp")!;
+  const result = validateScopeAnalysisResult({
+    findings: [{
+      finding_id: "sec_snmp_public",
+      scope: "security",
+      title: "SNMP comunitario inseguro",
+      finding_type: "confirmed_finding",
+      severity: "high",
+      confidence: "high",
+      evidence_refs: [fact.evidenceRef],
+      related_fact_ids: [fact.id],
+      related_metric_ids: [],
+      related_correlation_ids: [],
+      evidence: [{ source_type: "cli", source_name: fact.evidenceRef, hostname: "core-01", command: "show running-config", excerpt: "snmp-server community public RO" }],
+      technical_rationale: "SNMP community public expone administracion insegura.",
+      business_impact: "Aumenta riesgo de acceso no autorizado.",
+      recommendation: "Migrar a SNMPv3.",
+      remediation_steps: ["Eliminar comunidades inseguras"],
+      validation_questions: [],
+      related_devices: ["core-01"],
+      related_sites: ["HQ"],
+      dependencies: []
+    }]
+  }, packet);
+  assert.equal(result.validFindings.length, 1);
+  assert.equal(result.rejectedFindings.length, 0);
+});
+
+test("validateScopeAnalysisResult rejects high security findings backed only by inventory evidence", () => {
+  const packet = buildAIScopePacket({ record: baseInput(), scopeId: "security" });
+  const inventoryRef = packet.evidencePack.find((item) => !item.configFactId) ?? packet.evidencePack[0];
+  const result = validateScopeAnalysisResult({
+    findings: [{
+      finding_id: "sec_weak_evidence",
+      scope: "security",
+      title: "Exposicion de protocolos inseguros",
+      finding_type: "confirmed_finding",
+      severity: "high",
+      confidence: "medium",
+      evidence_refs: [inventoryRef.id],
+      related_fact_ids: [],
+      related_metric_ids: [],
+      related_correlation_ids: [],
+      evidence: [{ source_type: "inventory", source_name: inventoryRef.id, hostname: inventoryRef.deviceId ?? null, command: inventoryRef.command ?? null, excerpt: inventoryRef.excerpt }],
+      technical_rationale: "Afirma inseguridad sin evidencia de configuracion.",
+      business_impact: "Riesgo no soportado.",
+      recommendation: "Validar configuracion.",
+      remediation_steps: [],
+      validation_questions: [],
+      related_devices: ["core-01"],
+      related_sites: [],
+      dependencies: []
+    }]
+  }, packet);
+  assert.equal(result.validFindings.length, 0);
+  assert.match(result.rejectedFindings[0].reason, /Seguridad high\/critical/);
 });
 
 function asset(hostname: string, ip: string, model: string, role: string, priority: "low" | "medium" | "high" | "critical") {
