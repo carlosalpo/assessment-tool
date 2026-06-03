@@ -61,7 +61,7 @@ OPENAI_MODEL="gpt-4o-mini"
 CREDENTIAL_ENCRYPTION_KEY="una_clave_larga_para_cifrar_credenciales"
 ```
 
-Reinicia `npm run dev` despues de cambiar variables de entorno. Luego guarda las credenciales desde Ajustes: `OpenAI API key` y `Cisco EoX OAuth access token` se persisten cifradas en PostgreSQL y el navegador solo recibe una mascara. `OPENAI_API_KEY` y `CISCO_API_TOKEN` siguen disponibles como fallback opcional de entorno si prefieres no guardarlas en base de datos. El tab `Evaluacion AI` llama a `/api/ai/evaluate` y genera hallazgos `ai-draft` por ambito usando solo el contexto, inventario y evidencia cargada.
+Reinicia `npm run dev` despues de cambiar variables de entorno. Luego guarda las credenciales desde Ajustes: `OpenAI API key` y `Cisco EoX OAuth access token` se persisten cifradas en PostgreSQL y el navegador solo recibe una mascara. `OPENAI_API_KEY` y `CISCO_API_TOKEN` siguen disponibles como fallback opcional de entorno si prefieres no guardarlas en base de datos. El tab `Evaluacion AI` usa el motor persistente de jobs/scopes mediante `POST /api/ai-analysis/jobs`; la arquitectura objetivo esta documentada en [`docs/ai-evaluation-architecture.md`](docs/ai-evaluation-architecture.md).
 
 Para conectar PostgreSQL:
 
