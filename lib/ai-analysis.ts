@@ -8,15 +8,11 @@ import type {
   InterfaceRecord,
   NeighborRelation,
   ParsedAssessment,
-  RemediationType,
   RiskLevel
 } from "@/lib/types";
 import type { OperationalAssessment } from "@/lib/operational-assessment";
 import type { PerformanceMetric, PerformanceState } from "@/lib/performance-analysis";
 
-export type AIFindingType = "confirmed_finding" | "probable_issue" | "correlation_suspicion" | "visibility_gap" | "validation_required";
-export type AIFindingDomain = "datacenter" | "enterprise_networking" | "security" | "operations" | "performance" | "lifecycle";
-export type AISuggestedFindingStatus = "ai_suggested" | "accepted" | "edited" | "discarded" | "validated";
 export type CorrelationType =
   | "config_state_mismatch"
   | "config_performance_mismatch"
@@ -188,36 +184,9 @@ export type CorrelationCandidate = {
   recommendedAIReview: boolean;
 };
 
-export type AISuggestedFinding = {
-  id: string;
-  assessmentId: string;
-  title: string;
-  description: string;
-  findingType: AIFindingType;
-  domain: AIFindingDomain;
-  severity: Exclude<RiskLevel, "info">;
-  confidence: number;
-  evidenceRefs: string[];
-  relatedDevices: string[];
-  relatedInterfaces: string[];
-  relatedMetrics: string[];
-  relatedConfigFacts: string[];
-  relatedStateFacts: string[];
-  relatedCorrelationCandidates: string[];
-  businessImpact: string;
-  technicalImpact: string;
-  probableCause: string;
-  recommendation: string;
-  remediationType: "service" | "investment" | "mixed" | "validation_required";
-  validationQuestions: string[];
-  limitations: string[];
-  status: AISuggestedFindingStatus;
-};
-
 export type AIAnalysisState = {
   context?: AssessmentAIContext;
   correlationCandidates: CorrelationCandidate[];
-  suggestedFindings: AISuggestedFinding[];
   limitations: string[];
   updatedAt?: string;
 };
@@ -255,7 +224,6 @@ export type AssessmentAIContextInput = {
 
 export const emptyAIAnalysisState: AIAnalysisState = {
   correlationCandidates: [],
-  suggestedFindings: [],
   limitations: []
 };
 
@@ -340,115 +308,6 @@ export function generateCorrelationCandidates(context: AssessmentAIContext): Cor
     ...securityConfigExposureRule(context),
     ...evidenceConflictRule(context)
   ]);
-}
-
-export function validateAISuggestedFinding(
-  finding: AISuggestedFinding,
-  context?: AssessmentAIContext,
-  correlationCandidates: CorrelationCandidate[] = []
-) {
-  const errors: string[] = [];
-  const hasEvidence = finding.evidenceRefs.length > 0;
-  const hasMetric = finding.relatedMetrics.length > 0;
-  const evidenceCatalog = new Set(context?.evidenceReferences.map((ref) => ref.id) ?? []);
-  const metricCatalog = new Set(context?.performanceMetrics.map((metric) => metric.id) ?? []);
-  const configFactCatalog = new Set(context?.configurationFacts.map((fact) => fact.id) ?? []);
-  const stateFactCatalog = new Set(context?.operationalStateFacts.map((fact) => fact.id) ?? []);
-  const correlationCatalog = new Set(correlationCandidates.map((candidate) => candidate.id));
-
-  if (!hasEvidence && finding.findingType === "confirmed_finding") errors.push("confirmed_finding requiere evidenceRefs.");
-  if (finding.confidence < 70 && finding.findingType === "confirmed_finding") errors.push("confirmed_finding requiere confidence >= 70.");
-  if (/saturaci[oó]n|saturation|utilizacion|utilizaci[oó]n/i.test(`${finding.title} ${finding.description}`) && !hasMetric) {
-    errors.push("No se puede afirmar saturacion sin metricas relacionadas.");
-  }
-  if (finding.limitations.some((limitation) => /sin historico|snapshot/i.test(limitation)) && finding.findingType === "confirmed_finding") {
-    errors.push("Hallazgos basados solo en snapshot no deben guardarse como confirmed_finding sin validacion.");
-  }
-  if (!hasEvidence && !["visibility_gap", "validation_required"].includes(finding.findingType)) {
-    errors.push("Ausencia de evidencia debe clasificarse como visibility_gap o validation_required.");
-  }
-  if (context) {
-    const unknownEvidence = finding.evidenceRefs.filter((ref) => !evidenceCatalog.has(ref));
-    if (unknownEvidence.length > 0) errors.push(`evidenceRefs no existen en el AssessmentAIContext: ${unknownEvidence.join(", ")}.`);
-
-    const unknownMetrics = finding.relatedMetrics.filter((metricId) => !metricCatalog.has(metricId));
-    if (unknownMetrics.length > 0) errors.push(`relatedMetrics no existen en el AssessmentAIContext: ${unknownMetrics.join(", ")}.`);
-
-    const unknownConfigFacts = finding.relatedConfigFacts.filter((factId) => !configFactCatalog.has(factId));
-    if (unknownConfigFacts.length > 0) errors.push(`relatedConfigFacts no existen en el AssessmentAIContext: ${unknownConfigFacts.join(", ")}.`);
-
-    const unknownStateFacts = finding.relatedStateFacts.filter((factId) => !stateFactCatalog.has(factId));
-    if (unknownStateFacts.length > 0) errors.push(`relatedStateFacts no existen en el AssessmentAIContext: ${unknownStateFacts.join(", ")}.`);
-  }
-  if (correlationCandidates.length > 0) {
-    const unknownCorrelations = finding.relatedCorrelationCandidates.filter((candidateId) => !correlationCatalog.has(candidateId));
-    if (unknownCorrelations.length > 0) errors.push(`relatedCorrelationCandidates no existen: ${unknownCorrelations.join(", ")}.`);
-  }
-  if (context && finding.relatedMetrics.length > 0) {
-    const metrics = context.performanceMetrics.filter((metric) => finding.relatedMetrics.includes(metric.id));
-    const onlySnapshot = metrics.length > 0 && metrics.every((metric) => metric.sampleType === "snapshot");
-    const claimsTrend = /tendencia|trend|historico|hist[oó]rico|recurren|recurring|crecimiento|growth/i.test(
-      `${finding.title} ${finding.description} ${finding.technicalImpact} ${finding.probableCause}`
-    );
-    if (onlySnapshot && claimsTrend) errors.push("Metricas snapshot no pueden usarse como tendencia historica o recurrencia.");
-    if (onlySnapshot && finding.findingType === "confirmed_finding") {
-      errors.push("Metricas snapshot solo soportan probable_issue, correlation_suspicion o validation_required, no confirmed_finding.");
-    }
-  }
-
-  return { valid: errors.length === 0, errors };
-}
-
-export function validateAIOutputSchema(findings: AISuggestedFinding[]) {
-  return findings.map((finding) => ({ id: finding.id, ...validateAISuggestedFinding(finding) }));
-}
-
-export function aiSuggestedFindingToFinding(finding: AISuggestedFinding, context?: AssessmentAIContext): Finding {
-  const evidenceById = new Map(context?.evidenceReferences.map((ref) => [ref.id, ref]) ?? []);
-  return {
-    id: finding.id,
-    title: finding.title,
-    category: aiDomainToFindingCategory(finding.domain),
-    risk: finding.severity,
-    confidence: finding.confidence / 100,
-    status: finding.status,
-    affectedAssets: finding.relatedDevices,
-    evidence: finding.evidenceRefs,
-    recommendation: finding.recommendation || finding.description,
-    remediationType: aiRemediationToRemediation(finding.remediationType),
-    serviceOffer: "AI contextual correlation review",
-    architectNotes: "",
-    aiMetadata: {
-      findingType: finding.findingType,
-      domain: finding.domain,
-      relatedCorrelationCandidates: finding.relatedCorrelationCandidates,
-      relatedMetrics: finding.relatedMetrics,
-      relatedConfigFacts: finding.relatedConfigFacts,
-      relatedStateFacts: finding.relatedStateFacts,
-      evidenceTraceRefs: finding.evidenceRefs.flatMap((evidenceRef) => {
-        const ref = evidenceById.get(evidenceRef);
-        return ref
-          ? [{
-              id: ref.id,
-              sourceFile: ref.sourceFile,
-              command: ref.command,
-              deviceId: ref.deviceId,
-              interfaceId: ref.interfaceId,
-              metricId: ref.metricId,
-              configFactId: ref.configFactId,
-              stateFactId: ref.stateFactId,
-              relationId: ref.relationId,
-              excerpt: ref.excerpt
-            }]
-          : [];
-      }),
-      validationQuestions: finding.validationQuestions,
-      limitations: finding.limitations,
-      businessImpact: finding.businessImpact,
-      technicalImpact: finding.technicalImpact,
-      probableCause: finding.probableCause
-    }
-  };
 }
 
 export function acceptedOrValidatedFindings(findings: Finding[]) {
@@ -1034,56 +893,6 @@ function stableId(value: string) {
     hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
   }
   return hash.toString(36);
-}
-
-function cleanString(value: unknown) {
-  return typeof value === "string" ? value.trim() : "";
-}
-
-function normalizeStringArray(value: unknown) {
-  return Array.isArray(value) ? value.map(cleanString).filter(Boolean) : [];
-}
-
-function normalizeFindingType(value: unknown): AIFindingType {
-  return ["confirmed_finding", "probable_issue", "correlation_suspicion", "visibility_gap", "validation_required"].includes(String(value))
-    ? value as AIFindingType
-    : "validation_required";
-}
-
-function normalizeDomain(value: unknown): AIFindingDomain {
-  return ["datacenter", "enterprise_networking", "security", "operations", "performance", "lifecycle"].includes(String(value))
-    ? value as AIFindingDomain
-    : "operations";
-}
-
-function normalizeSeverity(value: unknown): Exclude<RiskLevel, "info"> {
-  return ["low", "medium", "high", "critical"].includes(String(value)) ? value as Exclude<RiskLevel, "info"> : "medium";
-}
-
-function normalizeConfidence(value: unknown) {
-  const numeric = Number(value);
-  if (Number.isNaN(numeric)) return 50;
-  return numeric <= 1 ? Math.round(numeric * 100) : clamp(Math.round(numeric), 0, 100);
-}
-
-function normalizeAIRemediation(value: unknown): AISuggestedFinding["remediationType"] {
-  return ["service", "investment", "mixed", "validation_required"].includes(String(value)) ? value as AISuggestedFinding["remediationType"] : "validation_required";
-}
-
-function normalizeAIStatus(value: unknown): AISuggestedFindingStatus {
-  return ["accepted", "edited", "discarded", "validated"].includes(String(value)) ? value as AISuggestedFindingStatus : "ai_suggested";
-}
-
-function aiDomainToFindingCategory(domain: AIFindingDomain): Finding["category"] {
-  if (domain === "security") return "security";
-  if (domain === "lifecycle") return "lifecycle";
-  if (domain === "performance" || domain === "operations") return "operations";
-  if (domain === "datacenter" || domain === "enterprise_networking") return "resiliency";
-  return "configuration";
-}
-
-function aiRemediationToRemediation(remediationType: AISuggestedFinding["remediationType"]): RemediationType {
-  return remediationType === "validation_required" ? "pending-validation" : remediationType;
 }
 
 function clamp(value: number, min: number, max: number) {

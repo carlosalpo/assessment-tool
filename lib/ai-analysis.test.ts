@@ -2,15 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   acceptedOrValidatedFindings,
-  aiSuggestedFindingToFinding,
   buildAssessmentAIContext,
   executiveSummaryFindings,
   generateCorrelationCandidates,
-  validateAISuggestedFinding,
-  validateAIOutputSchema,
-  type AISuggestedFinding,
   type AssessmentAIContextInput
 } from "./ai-analysis.ts";
+import type { Finding } from "@/lib/types";
 import {
   buildAIScopePacket,
   buildAssessmentKnowledgeGraph,
@@ -146,84 +143,17 @@ test("lack of monitoring for critical assets generates operational_visibility_ga
   assert.ok(candidates.some((candidate) => candidate.correlationType === "operational_visibility_gap"));
 });
 
-test("validateAISuggestedFinding rejects confirmed finding without evidence", () => {
-  const result = validateAISuggestedFinding(aiFinding({ findingType: "confirmed_finding", evidenceRefs: [], confidence: 92 }));
-  assert.equal(result.valid, false);
-  assert.ok(result.errors.some((error) => /evidenceRefs/.test(error)));
-});
-
-test("validateAISuggestedFinding rejects invented evidence references", () => {
-  const context = buildAssessmentAIContext(baseInput());
-  const result = validateAISuggestedFinding(
-    aiFinding({ evidenceRefs: ["invented evidence ref"], relatedMetrics: ["pm_crc"] }),
-    context,
-    generateCorrelationCandidates(context)
-  );
-  assert.equal(result.valid, false);
-  assert.ok(result.errors.some((error) => /evidenceRefs no existen/.test(error)));
-});
-
-test("validateAISuggestedFinding rejects invented correlation references", () => {
-  const context = buildAssessmentAIContext(baseInput());
-  const metric = context.performanceMetrics.find((item) => item.id === "pm_crc")!;
-  const result = validateAISuggestedFinding(
-    aiFinding({ evidenceRefs: [metric.evidenceRef], relatedMetrics: ["pm_crc"], relatedCorrelationCandidates: ["corr_invented"] }),
-    context,
-    generateCorrelationCandidates(context)
-  );
-  assert.equal(result.valid, false);
-  assert.ok(result.errors.some((error) => /relatedCorrelationCandidates/.test(error)));
-});
-
-test("validateAISuggestedFinding rejects snapshot metrics described as historical trend", () => {
-  const context = buildAssessmentAIContext(baseInput());
-  const metric = context.performanceMetrics.find((item) => item.id === "pm_util")!;
-  const result = validateAISuggestedFinding(
-    aiFinding({
-      title: "Tendencia historica de saturacion",
-      description: "El enlace muestra recurrencia historica de saturacion.",
-      findingType: "probable_issue",
-      evidenceRefs: [metric.evidenceRef],
-      relatedMetrics: ["pm_util"]
-    }),
-    context
-  );
-  assert.equal(result.valid, false);
-  assert.ok(result.errors.some((error) => /snapshot/.test(error)));
-});
-
-test("validateAISuggestedFinding rejects confirmed findings based only on snapshot metrics", () => {
-  const context = buildAssessmentAIContext(baseInput());
-  const metric = context.performanceMetrics.find((item) => item.id === "pm_util")!;
-  const result = validateAISuggestedFinding(
-    aiFinding({
-      findingType: "confirmed_finding",
-      confidence: 90,
-      evidenceRefs: [metric.evidenceRef],
-      relatedMetrics: ["pm_util"]
-    }),
-    context
-  );
-  assert.equal(result.valid, false);
-  assert.ok(result.errors.some((error) => /Metricas snapshot/.test(error)));
-});
-
-test("AI output schema validation returns errors for unsafe saturation claim", () => {
-  const result = validateAIOutputSchema([aiFinding({ title: "Saturacion critica", description: "saturation", relatedMetrics: [] })]);
-  assert.equal(result[0].valid, false);
-});
-
 test("executive summary excludes discarded AI findings and only includes accepted/validated", () => {
-  const accepted = aiSuggestedFindingToFinding(aiFinding({ id: "aif_accepted", status: "accepted", evidenceRefs: ["e1"] }));
-  const discarded = aiSuggestedFindingToFinding(aiFinding({ id: "aif_discarded", status: "discarded", evidenceRefs: ["e2"] }));
+  const accepted = findingFixture({ id: "aif_accepted", status: "accepted", evidence: ["e1"] });
+  const discarded = findingFixture({ id: "aif_discarded", status: "discarded", evidence: ["e2"] });
   const validated = { ...accepted, id: "find_validated", status: "validated" as const, aiMetadata: undefined };
   assert.deepEqual(executiveSummaryFindings([accepted, discarded, validated]).map((finding) => finding.id), ["aif_accepted", "find_validated"]);
 });
 
 test("risk consumers include accepted/edited/validated AI findings only", () => {
-  const accepted = aiSuggestedFindingToFinding(aiFinding({ id: "aif_accepted", status: "accepted", evidenceRefs: ["e1"] }));
-  const suggested = aiSuggestedFindingToFinding(aiFinding({ id: "aif_suggested", status: "ai_suggested", evidenceRefs: ["e2"] }));
-  const edited = aiSuggestedFindingToFinding(aiFinding({ id: "aif_edited", status: "edited", evidenceRefs: ["e3"] }));
+  const accepted = findingFixture({ id: "aif_accepted", status: "accepted", evidence: ["e1"] });
+  const suggested = findingFixture({ id: "aif_suggested", status: "ai_suggested", evidence: ["e2"] });
+  const edited = findingFixture({ id: "aif_edited", status: "edited", evidence: ["e3"] });
   assert.deepEqual(acceptedOrValidatedFindings([accepted, suggested, edited]).map((finding) => finding.id), ["aif_accepted", "aif_edited"]);
 });
 
@@ -739,31 +669,34 @@ function withEnv(values: Record<string, string | undefined>, run: () => void) {
   }
 }
 
-function aiFinding(patch: Partial<AISuggestedFinding> = {}): AISuggestedFinding {
+function findingFixture(patch: Partial<Finding> = {}): Finding {
   return {
-    id: "aif_test",
-    assessmentId: "assess_ai",
+    id: "finding_test",
     title: "Hallazgo AI",
-    description: "Descripcion",
-    findingType: "probable_issue",
-    domain: "performance",
-    severity: "high",
-    confidence: 80,
-    evidenceRefs: ["evidence"],
-    relatedDevices: ["core-01"],
-    relatedInterfaces: ["Te1/0/1"],
-    relatedMetrics: ["pm_util"],
-    relatedConfigFacts: [],
-    relatedStateFacts: [],
-    relatedCorrelationCandidates: [],
-    businessImpact: "Impacto potencial",
-    technicalImpact: "Impacto tecnico",
-    probableCause: "Causa probable",
-    recommendation: "Validar y corregir",
-    remediationType: "service",
-    validationQuestions: ["Confirmar ventana"],
-    limitations: [],
+    category: "operations",
+    risk: "high",
+    confidence: 0.8,
     status: "ai_suggested",
+    affectedAssets: ["core-01"],
+    evidence: ["evidence"],
+    recommendation: "Validar y corregir",
+    remediationType: "service" as const,
+    serviceOffer: "AI contextual correlation review",
+    architectNotes: "",
+    aiMetadata: {
+      findingType: "probable_issue",
+      domain: "performance",
+      relatedCorrelationCandidates: [],
+      relatedMetrics: ["pm_util"],
+      relatedConfigFacts: [],
+      relatedStateFacts: [],
+      evidenceTraceRefs: [],
+      validationQuestions: ["Confirmar ventana"],
+      limitations: [],
+      businessImpact: "Impacto potencial",
+      technicalImpact: "Impacto tecnico",
+      probableCause: "Causa probable"
+    },
     ...patch
   };
 }

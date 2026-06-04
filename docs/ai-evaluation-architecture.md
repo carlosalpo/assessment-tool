@@ -16,7 +16,7 @@ El motor vivo de Evaluacion AI es el pipeline persistente de jobs/scopes. La UI 
 - `app/api/ai/evaluate/route.ts`: endpoint legacy eliminado.
 - `runAiEvaluationForArea`, `updateEvaluationProgress` y `completeEvaluationRun`: funciones cliente legacy eliminadas de `app/page.tsx`.
 - `buildSpecializedAIPrompt`, `aiSuggestedFindingsSchema` y `normalizeAISuggestedFinding`: helpers legacy eliminados de `lib/ai-analysis.ts`.
-- Tier B diferido: `AISuggestedFinding`, `aiSuggestedFindingToFinding`, `record.aiAnalysis.suggestedFindings` y el loop legacy en `AIReviewPanel` estan obsoletos, pero permanecen hasta que exista la nueva capa de hallazgos consolidada.
+- Tier B eliminado: `AISuggestedFinding`, `aiSuggestedFindingToFinding`, `validateAISuggestedFinding`, `validateAIOutputSchema`, `record.aiAnalysis.suggestedFindings` y el loop legacy en `AIReviewPanel` fueron retirados. La revision AI consume la capa consolidada viva desde `record.parsed.findings` / `AiScopeResult.findingsJson`.
 
 ## 3. Problemas conocidos que el rework debe resolver
 

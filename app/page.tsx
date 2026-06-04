@@ -67,11 +67,9 @@ import { exportInventoryTemplate } from "@/lib/export-inventory-template";
 import { importInventoryWorkbook } from "@/lib/import-inventory-workbook";
 import {
   acceptedOrValidatedFindings,
-  aiSuggestedFindingToFinding,
   emptyAIAnalysisState,
   executiveSummaryFindings,
-  type AIAnalysisState,
-  type AISuggestedFinding
+  type AIAnalysisState
 } from "@/lib/ai-analysis";
 import {
   buildOperationalAIContext,
@@ -1652,13 +1650,11 @@ export default function HomePage() {
           : record.parsed.findings.filter((finding) =>
               generatedIds.size > 0 ? !generatedIds.has(finding.id) : !fallbackCategories.has(finding.category)
             );
-      const currentAIAnalysis = normalizeAIAnalysisState(record.aiAnalysis);
       const nextAIAnalysis =
         area === "complete"
           ? createDefaultAIAnalysisState()
           : {
-              ...currentAIAnalysis,
-              suggestedFindings: currentAIAnalysis.suggestedFindings.filter((finding) => !generatedIds.has(finding.id)),
+              ...normalizeAIAnalysisState(record.aiAnalysis),
               updatedAt: new Date().toISOString()
             };
 
@@ -1745,12 +1741,6 @@ export default function HomePage() {
 
   function updateFinding(id: string, patch: Partial<Finding>) {
     updateSelectedRecord((record) => {
-      const currentAIAnalysis = normalizeAIAnalysisState(record.aiAnalysis);
-      const nextAIStatus =
-        patch.status === "accepted" || patch.status === "edited" || patch.status === "validated" || patch.status === "discarded"
-          ? patch.status
-          : undefined;
-
       return {
         ...record,
         updatedAt: new Date().toISOString(),
@@ -1777,21 +1767,10 @@ export default function HomePage() {
                 status: patch.status === "validated" ? "validated" : record.performance.assessment.status,
                 updatedAt: new Date().toISOString()
               }
-            }
+          }
           : record.performance,
         aiAnalysis: {
-          ...currentAIAnalysis,
-          suggestedFindings: currentAIAnalysis.suggestedFindings.map((finding) =>
-            finding.id === id
-              ? {
-                  ...finding,
-                  title: patch.title ?? finding.title,
-                  recommendation: patch.recommendation ?? finding.recommendation,
-                  evidenceRefs: patch.evidence ?? finding.evidenceRefs,
-                  status: nextAIStatus ?? finding.status
-                }
-              : finding
-          ),
+          ...normalizeAIAnalysisState(record.aiAnalysis),
           updatedAt: new Date().toISOString()
         },
         assessment: {
@@ -8105,11 +8084,6 @@ function DebugJsonBlock({
 function AIReviewPanel({ record, onUpdateFinding }: { record: AssessmentRecord; onUpdateFinding: (id: string, patch: Partial<Finding>) => void }) {
   const [statusFilter, setStatusFilter] = useState<"all" | Finding["status"]>("all");
   const aiFindingsById = new Map(record.parsed.findings.filter((finding) => finding.aiMetadata).map((finding) => [finding.id, finding]));
-  for (const suggestedFinding of record.aiAnalysis.suggestedFindings) {
-    if (!aiFindingsById.has(suggestedFinding.id)) {
-      aiFindingsById.set(suggestedFinding.id, aiSuggestedFindingToFinding(suggestedFinding));
-    }
-  }
   const aiFindings = Array.from(aiFindingsById.values()).filter((finding) => statusFilter === "all" || finding.status === statusFilter);
   const acceptedCount = aiFindings.filter((finding) => finding.status === "accepted" || finding.status === "edited" || finding.status === "validated").length;
 
@@ -11190,7 +11164,6 @@ function normalizeRecord(record: AssessmentRecord) {
 function createDefaultAIAnalysisState(): AIAnalysisState {
   return {
     correlationCandidates: [...emptyAIAnalysisState.correlationCandidates],
-    suggestedFindings: [...emptyAIAnalysisState.suggestedFindings],
     limitations: [...emptyAIAnalysisState.limitations]
   };
 }
@@ -11199,7 +11172,6 @@ function normalizeAIAnalysisState(state?: AIAnalysisState): AIAnalysisState {
   return {
     context: state?.context,
     correlationCandidates: state?.correlationCandidates ?? [],
-    suggestedFindings: state?.suggestedFindings ?? [],
     limitations: state?.limitations ?? [],
     updatedAt: state?.updatedAt
   };
