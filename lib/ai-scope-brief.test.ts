@@ -8,11 +8,14 @@ import {
 } from "./ai-scope-strategy.ts";
 import {
   buildReduceDigest,
+  buildSynthesisDigest,
   buildScopeSystemPrompt,
   hashScopeInput,
   isReduceStageEnabled,
+  isSynthesisStageEnabled,
   mergeScopePartitionResults,
-  validateReduceResult
+  validateReduceResult,
+  validateSynthesisResult
 } from "./ai-analysis-jobs.ts";
 
 test("buildScopeBrief caps top findings, sorts by severity and confidence, and extracts questions", () => {
@@ -335,6 +338,72 @@ test("validateReduceResult enforces real sources from at least two scopes and kn
   assert.match(invalid.rejected[2].reason, /related_devices/);
 });
 
+test("isSynthesisStageEnabled toggles only with AI_SYNTHESIS_STAGE=1", () => {
+  withEnv({ AI_SYNTHESIS_STAGE: undefined }, () => {
+    assert.equal(isSynthesisStageEnabled(), false);
+  });
+  withEnv({ AI_SYNTHESIS_STAGE: "" }, () => {
+    assert.equal(isSynthesisStageEnabled(), false);
+  });
+  withEnv({ AI_SYNTHESIS_STAGE: "1" }, () => {
+    assert.equal(isSynthesisStageEnabled(), true);
+  });
+});
+
+test("buildSynthesisDigest includes reduce composites and excludes synthesis scopes", () => {
+  const digest = buildSynthesisDigest([
+    reduceScopeResult("security", [
+      scopeFinding({ finding_id: "sec-1", title: "SNMP insecure", severity: "high" })
+    ]),
+    reduceScopeResult("cross_scope_correlation", [
+      scopeFinding({ finding_id: "cmp-1", scope: "cross_scope_correlation", title: "Compound risk", severity: "critical" })
+    ]),
+    reduceScopeResult("roadmap", [
+      scopeFinding({ finding_id: "roadmap-1", title: "Ignored roadmap", severity: "critical" })
+    ]),
+    reduceScopeResult("executive_summary", [
+      scopeFinding({ finding_id: "summary-1", title: "Ignored summary", severity: "critical" })
+    ])
+  ]);
+
+  assert.equal(digest.digestVersion, "ai-synthesis-digest-v1");
+  assert.deepEqual(Object.keys(digest.catalog).sort(), ["cross_scope_correlation", "security"]);
+  assert.deepEqual(digest.catalog.cross_scope_correlation, ["cmp-1"]);
+  assert.equal(digest.findings.some((finding) => finding.scope === "roadmap"), false);
+  assert.equal(digest.findings.some((finding) => finding.scope === "executive_summary"), false);
+});
+
+test("validateSynthesisResult accepts real citations and rejects invented sources", () => {
+  const digest = buildSynthesisDigest([
+    reduceScopeResult("security", [
+      scopeFinding({ finding_id: "sec-1", title: "SNMP insecure", severity: "high" })
+    ]),
+    reduceScopeResult("cross_scope_correlation", [
+      scopeFinding({ finding_id: "cmp-1", scope: "cross_scope_correlation", title: "Compound risk", severity: "critical" })
+    ])
+  ]);
+
+  const roadmap = validateSynthesisResult({
+    items: [
+      roadmapItem({ item_id: "rm-1", source_finding_ids: [{ scope: "cross_scope_correlation", finding_id: "cmp-1" }] }),
+      roadmapItem({ item_id: "rm-bad", source_finding_ids: [{ scope: "security", finding_id: "missing" }] })
+    ]
+  }, digest, "roadmap");
+  assert.equal(roadmap.valid.length, 1);
+  assert.equal(roadmap.rejected.length, 1);
+  assert.match(roadmap.rejected[0].reason, /inexistentes/);
+
+  const summary = validateSynthesisResult({
+    top_risks: [
+      topRisk({ title: "Compound risk", source_finding_ids: [{ scope: "security", finding_id: "sec-1" }] }),
+      topRisk({ title: "Invented risk", source_finding_ids: [] })
+    ]
+  }, digest, "executive_summary");
+  assert.equal(summary.valid.length, 1);
+  assert.equal(summary.rejected.length, 1);
+  assert.match(summary.rejected[0].reason, /Debe citar/);
+});
+
 function finding(id: string, severity: string, confidence: string, findingType: string, validationQuestions: string[]) {
   return {
     finding_id: id,
@@ -396,6 +465,29 @@ function reduceScopeResult(scopeId: string, findingsJson: any[]) {
     findingsJson,
     recommendationsJson: [],
     resultJson: {}
+  };
+}
+
+function roadmapItem(patch: Record<string, unknown>) {
+  return {
+    item_id: "rm",
+    title: "Hardening",
+    priority: "P1",
+    severity: "high",
+    effort: "medium",
+    recommendation: "Remediar",
+    source_finding_ids: [],
+    dependencies: [],
+    ...patch
+  };
+}
+
+function topRisk(patch: Record<string, unknown>) {
+  return {
+    title: "Riesgo",
+    severity: "high",
+    source_finding_ids: [],
+    ...patch
   };
 }
 

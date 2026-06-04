@@ -43,7 +43,7 @@ export function baseFindingSchema(): JsonSchema {
 }
 
 export function scopeAnalysisResultSchemaForPattern(pattern: ScopeQueryPattern): JsonSchema {
-  if (pattern === "synthesis") throw new Error("synthesis schema llega en INC-7");
+  if (pattern === "synthesis") throw new Error("synthesis scopes use synthesisResultSchema(target)");
   return {
     type: "object",
     additionalProperties: false,
@@ -78,6 +78,62 @@ export function reduceResultSchema(): JsonSchema {
   };
 }
 
+export function synthesisResultSchema(target: "roadmap" | "executive_summary"): JsonSchema {
+  if (target === "roadmap") {
+    return {
+      type: "object",
+      additionalProperties: false,
+      required: ["phase", "items", "limitations"],
+      properties: {
+        phase: { type: "string" },
+        items: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["item_id", "title", "priority", "severity", "effort", "recommendation", "source_finding_ids", "dependencies"],
+            properties: {
+              item_id: { type: "string" },
+              title: { type: "string" },
+              priority: { type: "string" },
+              severity: { type: "string", enum: ["critical", "high", "medium", "low", "informational"] },
+              effort: { type: "string" },
+              recommendation: { type: "string" },
+              source_finding_ids: sourceFindingIdsSchema(),
+              dependencies: { type: "array", items: { type: "string" } }
+            }
+          }
+        },
+        limitations: { type: "array", items: { type: "string" } }
+      }
+    };
+  }
+
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["phase", "summary", "posture", "top_risks"],
+    properties: {
+      phase: { type: "string" },
+      summary: { type: "string" },
+      posture: { type: "string" },
+      top_risks: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["title", "severity", "source_finding_ids"],
+          properties: {
+            title: { type: "string" },
+            severity: { type: "string", enum: ["critical", "high", "medium", "low", "informational"] },
+            source_finding_ids: sourceFindingIdsSchema()
+          }
+        }
+      }
+    }
+  };
+}
+
 function reduceFindingSchema(): JsonSchema {
   return {
     type: "object",
@@ -85,19 +141,23 @@ function reduceFindingSchema(): JsonSchema {
     required: [...baseFindingRequiredProperties(), "source_finding_ids", "composite_rationale"],
     properties: {
       ...baseFindingProperties(),
-      source_finding_ids: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: ["scope", "finding_id"],
-          properties: {
-            scope: { type: "string" },
-            finding_id: { type: "string" }
-          }
-        }
-      },
+      source_finding_ids: sourceFindingIdsSchema(),
       composite_rationale: { type: "string" }
+    }
+  };
+}
+
+function sourceFindingIdsSchema(): JsonSchema {
+  return {
+    type: "array",
+    items: {
+      type: "object",
+      additionalProperties: false,
+      required: ["scope", "finding_id"],
+      properties: {
+        scope: { type: "string" },
+        finding_id: { type: "string" }
+      }
     }
   };
 }

@@ -6,6 +6,7 @@ import {
   reduceResultSchema,
   scopeAnalysisResultSchemaForPattern,
   scopePattern,
+  synthesisResultSchema,
   usesPatternQuery,
   type ScopeQueryPattern
 } from "./ai-scope-schemas.ts";
@@ -115,8 +116,8 @@ for (const pattern of ["graph", "entity", "aggregation"] as const) {
   });
 }
 
-test("synthesis schema is intentionally deferred to INC-7", () => {
-  assert.throws(() => scopeAnalysisResultSchemaForPattern("synthesis"), /INC-7/);
+test("map pattern synthesis schema is handled by the dedicated synthesis schema", () => {
+  assert.throws(() => scopeAnalysisResultSchemaForPattern("synthesis"), /synthesisResultSchema/);
 });
 
 test("reduce result schema is strict-valid and includes composite fields", () => {
@@ -126,6 +127,22 @@ test("reduce result schema is strict-valid and includes composite fields", () =>
   const expectedFields = [...baseFindingFields, "source_finding_ids", "composite_rationale"];
   assert.deepEqual(Object.keys(findingSchema.properties).sort(), expectedFields.sort());
   assert.deepEqual(findingSchema.required.sort(), expectedFields.sort());
+});
+
+test("synthesis roadmap schema is strict-valid and requires source finding ids", () => {
+  const schema = synthesisResultSchema("roadmap");
+  assertStrictSchema(schema, "synthesis roadmap");
+  const itemSchema = schema.properties.items.items;
+  assert.ok(itemSchema.properties.source_finding_ids);
+  assert.ok(itemSchema.required.includes("source_finding_ids"));
+});
+
+test("synthesis executive summary schema is strict-valid and requires source finding ids", () => {
+  const schema = synthesisResultSchema("executive_summary");
+  assertStrictSchema(schema, "synthesis executive summary");
+  const riskSchema = schema.properties.top_risks.items;
+  assert.ok(riskSchema.properties.source_finding_ids);
+  assert.ok(riskSchema.required.includes("source_finding_ids"));
 });
 
 function assertStrictSchema(schema: any, path: string) {

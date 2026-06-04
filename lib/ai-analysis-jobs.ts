@@ -23,6 +23,7 @@ import {
   patternForScope,
   reduceResultSchema,
   scopeAnalysisResultSchemaForPattern,
+  synthesisResultSchema,
   usesPatternQuery
 } from "./ai-scope-schemas.ts";
 
@@ -114,11 +115,20 @@ export type ReduceDigest = {
   catalog: Record<string, string[]>;
 };
 
+export type SynthesisTarget = "roadmap" | "executive_summary";
+
+export type SynthesisDigest = {
+  digestVersion: string;
+  findings: ReduceDigestFinding[];
+  catalog: Record<string, string[]>;
+};
+
 const engineVersion = "ai-analysis-engine-v2";
 const maxChunkChars = 14000;
 const defaultOpenAIAnalysisModel = "gpt-5.2";
 const crossScopeCorrelationScopeId = "cross_scope_correlation";
 const reduceFindingsPerScopeLimit = 8;
+const synthesisFindingsPerScopeLimit = 12;
 
 export const aiAnalysisScopes: Array<{ id: AIAnalysisScopeId; label: string; description: string }> = [
   { id: "inventory", label: "Inventario", description: "Inventario, identidad, modelos, seriales y roles." },
@@ -477,6 +487,20 @@ export async function runAIAnalysisJob(jobId: string, options?: RunAIAnalysisJob
     }
   }
 
+  if (isSynthesisStageEnabled() && job.mode === "full") {
+    try {
+      await runSynthesisStage({
+        jobId,
+        assessmentId: job.assessmentId,
+        apiKey,
+        forceReevaluate: job.forceReevaluate,
+        debugCapture
+      });
+    } catch (error) {
+      console.warn("Synthesis AI stage failed without failing the job.", error);
+    }
+  }
+
   const finalStatus: AIAnalysisJobStatus = failedScopes > 0 ? "partially_completed" : "completed";
   await prisma.aiAnalysisJob.update({
     where: { id: jobId },
@@ -593,6 +617,10 @@ async function runPhase(input: {
   }
 
   if (input.phase === "scope_analysis") {
+    if (isSynthesisStageEnabled() && patternForScope(input.scopeId) === "synthesis") {
+      return synthesisScopePlaceholder(input.scopeId);
+    }
+
     const partitions = planScopePartitions(input.record, input.scopeId, scopePacket);
     if (partitions.length <= 1) {
       return callOpenAIForScopeAnalysis(input.scopeId, scopePacket, input.previousArtifacts, input.apiKey, model, {
@@ -860,6 +888,225 @@ async function runReduceStage(input: {
   }
 }
 
+async function runSynthesisStage(input: {
+  jobId: string;
+  assessmentId: string;
+  apiKey: string;
+  forceReevaluate: boolean;
+  debugCapture: boolean;
+}) {
+  let generatedRoadmap: any = null;
+  generatedRoadmap = await runSynthesisTarget("roadmap", input, generatedRoadmap);
+  await runSynthesisTarget("executive_summary", input, generatedRoadmap);
+}
+
+async function runSynthesisTarget(
+  target: SynthesisTarget,
+  input: {
+    jobId: string;
+    assessmentId: string;
+    apiKey: string;
+    forceReevaluate: boolean;
+    debugCapture: boolean;
+  },
+  generatedRoadmap: any
+) {
+  const scopeResults = await prisma.aiScopeResult.findMany({
+    where: {
+      assessmentId: input.assessmentId,
+      status: "completed"
+    },
+    orderBy: { scopeId: "asc" }
+  });
+  const digest = buildSynthesisDigest(scopeResults);
+  if (digest.findings.length === 0) return null;
+
+  const inputHash = hashSynthesisDigest(digest, target);
+  const existingResult = await prisma.aiScopeResult.findUnique({
+    where: { assessmentId_scopeId: { assessmentId: input.assessmentId, scopeId: target } }
+  });
+  if (
+    !input.forceReevaluate &&
+    existingResult?.status === "completed" &&
+    existingResult.inputHash === inputHash
+  ) {
+    return existingResult.resultJson;
+  }
+  if (!input.apiKey) throw new Error("OpenAI API key no esta configurada para la etapa Synthesize.");
+
+  await prisma.aiAnalysisJob.update({
+    where: { id: input.jobId },
+    data: { currentPhase: `${target}:synthesis` }
+  });
+
+  const model = openAISynthesisModel();
+  const requestBody = {
+    model,
+    input: [
+      {
+        role: "system",
+        content: [{
+          type: "input_text",
+          text: buildSynthesisSystemPrompt(target)
+        }]
+      },
+      {
+        role: "user",
+        content: [{
+          type: "input_text",
+          text: JSON.stringify({
+            task: target === "roadmap"
+              ? "Genera un roadmap priorizado usando solo hallazgos del synthesisDigest."
+              : "Genera un resumen ejecutivo usando solo hallazgos del synthesisDigest y el roadmap generado si existe.",
+            requiredBehavior: [
+              "Cada item o riesgo debe citar source_finding_ids existentes en el digest.",
+              "Prioriza hallazgos compuestos cross-scope cuando existan.",
+              "No inventes equipos, scopes ni finding_id."
+            ],
+            synthesisDigest: digest,
+            generatedRoadmap: target === "executive_summary" ? compactGeneratedRoadmap(generatedRoadmap) : null
+          })
+        }]
+      }
+    ],
+    text: {
+      format: {
+        type: "json_schema",
+        name: `synthesis_${target}`,
+        strict: true,
+        schema: synthesisResultSchema(target)
+      }
+    }
+  };
+  const startedAt = Date.now();
+  let capturedFailure = false;
+  try {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${input.apiKey}`
+      },
+      body: JSON.stringify(requestBody)
+    });
+    const payload = await response.json().catch(() => null);
+    const latencyMs = Date.now() - startedAt;
+    const usage = extractOpenAIUsage(payload);
+    if (!response.ok) {
+      await captureSynthesisInteraction(input, {
+        target,
+        model,
+        inputHash,
+        requestBody,
+        payload,
+        httpStatus: response.status,
+        status: "error",
+        latencyMs,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens
+      });
+      capturedFailure = true;
+      throw new Error(payload?.error?.message ?? "Error llamando OpenAI Responses API en Synthesize.");
+    }
+
+    const parsed = JSON.parse(extractResponseText(payload) || synthesisEmptyResponse(target));
+    const validation = validateSynthesisResult(parsed, digest, target);
+    const parsedEntryCount = target === "roadmap"
+      ? (Array.isArray(parsed.items) ? parsed.items.length : 0)
+      : (Array.isArray(parsed.top_risks) ? parsed.top_risks.length : 0);
+    await captureSynthesisInteraction(input, {
+      target,
+      model,
+      inputHash,
+      requestBody,
+      payload,
+      httpStatus: response.status,
+      status: "ok",
+      latencyMs,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      rejectedItems: validation.rejected
+    });
+    if (parsedEntryCount > 0 && validation.valid.length === 0 && validation.rejected.length > 0) {
+      capturedFailure = true;
+      throw new Error(`Synthesize ${target} produjo solo elementos invalidos; se conserva el fallback existente.`);
+    }
+
+    const resultJson = buildSynthesisResultJson(parsed, validation.valid, validation.rejected, digest, target);
+    const recommendations = target === "roadmap"
+      ? validation.valid.map((item: any) => item.recommendation).filter(Boolean)
+      : [];
+    const executiveSummary = target === "executive_summary"
+      ? String(parsed.summary ?? "")
+      : validation.valid.length > 0
+        ? `Roadmap AI: ${validation.valid.length} iniciativas priorizadas.`
+        : "Roadmap AI: sin iniciativas nuevas soportadas por hallazgos validados.";
+
+    await prisma.aiAnalysisArtifact.create({
+      data: {
+        assessmentId: input.assessmentId,
+        jobId: input.jobId,
+        scopeId: target,
+        artifactType: "synthesis",
+        sourceReference: `${target}:synthesis`,
+        contentJson: resultJson as Prisma.InputJsonValue,
+        tokenCountEstimate: estimateTokens(resultJson)
+      }
+    });
+    await prisma.aiAnalysisUsage.create({
+      data: {
+        jobId: input.jobId,
+        scopeId: target,
+        phaseName: "synthesis",
+        model,
+        inputTokens: usage.inputTokens ?? estimateTokens(digest),
+        outputTokens: usage.outputTokens ?? estimateTokens(resultJson),
+        totalTokens: (usage.inputTokens ?? estimateTokens(digest)) + (usage.outputTokens ?? estimateTokens(resultJson))
+      }
+    });
+    await prisma.aiScopeResult.upsert({
+      where: { assessmentId_scopeId: { assessmentId: input.assessmentId, scopeId: target } },
+      create: {
+        assessmentId: input.assessmentId,
+        scopeId: target,
+        status: "completed",
+        inputHash,
+        promptVersion: getPromptVersion(),
+        engineVersion,
+        resultJson: resultJson as Prisma.InputJsonValue,
+        executiveSummary,
+        findingsJson: validation.valid as Prisma.InputJsonValue,
+        recommendationsJson: recommendations as Prisma.InputJsonValue
+      },
+      update: {
+        status: "completed",
+        inputHash,
+        promptVersion: getPromptVersion(),
+        engineVersion,
+        resultJson: resultJson as Prisma.InputJsonValue,
+        executiveSummary,
+        findingsJson: validation.valid as Prisma.InputJsonValue,
+        recommendationsJson: recommendations as Prisma.InputJsonValue
+      }
+    });
+    return resultJson;
+  } catch (error) {
+    if (!capturedFailure) {
+      await captureSynthesisInteraction(input, {
+        target,
+        model,
+        inputHash,
+        requestBody,
+        payload: { error: error instanceof Error ? error.message : "OpenAI no respondio durante Synthesize." },
+        httpStatus: null,
+        status: "error",
+        latencyMs: Date.now() - startedAt
+      });
+    }
+    throw error;
+  }
+}
+
 async function callOpenAIForScopeAnalysis(
   scopeId: AIAnalysisScopeId,
   scopePacket: ReturnType<typeof buildAIScopePacket>,
@@ -1082,6 +1329,45 @@ async function captureReduceInteraction(
   });
 }
 
+async function captureSynthesisInteraction(
+  debug: { jobId: string; assessmentId: string; debugCapture: boolean },
+  input: {
+    target: SynthesisTarget;
+    model: string;
+    inputHash: string;
+    requestBody: unknown;
+    payload: unknown;
+    httpStatus: number | null;
+    status: "ok" | "error" | "timeout";
+    latencyMs: number;
+    inputTokens?: number | null;
+    outputTokens?: number | null;
+    rejectedItems?: unknown;
+  }
+) {
+  if (!debug.debugCapture) return;
+  await createAiInteractionLogSafely({
+    jobId: debug.jobId,
+    assessmentId: debug.assessmentId,
+    scopeId: input.target,
+    phaseName: "synthesis",
+    model: input.model,
+    promptVersion: getPromptVersion(),
+    engineVersion,
+    httpStatus: input.httpStatus,
+    status: input.status,
+    latencyMs: input.latencyMs,
+    inputTokensEst: estimateTokens({ inputHash: input.inputHash, requestBody: input.requestBody }),
+    inputTokens: input.inputTokens,
+    outputTokens: input.outputTokens,
+    budgetTrimmed: false,
+    excludedEvidenceRefs: 0,
+    requestJson: input.requestBody,
+    responseJson: input.payload,
+    rejectedFindings: input.rejectedItems
+  });
+}
+
 function deterministicScopeAnalysisFallback(scopeId: AIAnalysisScopeId, findings: any[], reason: string) {
   return {
     phase: "scope_analysis",
@@ -1091,6 +1377,18 @@ function deterministicScopeAnalysisFallback(scopeId: AIAnalysisScopeId, findings
     findings,
     recommendations: Array.from(new Set(findings.map((finding: any) => finding.recommendation).filter(Boolean))),
     limitations: [`OpenAI no completo la fase scope_analysis; se usaron candidatos determinísticos con evidencia. Detalle: ${reason}`]
+  };
+}
+
+function synthesisScopePlaceholder(scopeId: AIAnalysisScopeId) {
+  return {
+    phase: "scope_analysis",
+    scopeId,
+    pattern: "synthesis",
+    provider: "synthesis-stage-placeholder",
+    findings: [],
+    recommendations: [],
+    limitations: ["La sintesis IA real se ejecuta en la etapa Synthesize post-Reduce; este scope conserva el fallback deterministico."]
   };
 }
 
@@ -1175,6 +1473,14 @@ function openAIReduceModel() {
   return process.env.OPENAI_REDUCE_MODEL || openAIAnalysisModel();
 }
 
+export function isSynthesisStageEnabled() {
+  return process.env.AI_SYNTHESIS_STAGE === "1";
+}
+
+function openAISynthesisModel() {
+  return process.env.OPENAI_SYNTHESIS_MODEL || openAIReduceModel();
+}
+
 function compactPreviousArtifacts(previousArtifacts: any[]) {
   return previousArtifacts.map((artifact) => ({
     phase: artifact.phase,
@@ -1249,6 +1555,17 @@ function buildReduceSystemPrompt() {
     "Produce hallazgos compuestos solo cuando fuentes reales de al menos 2 scopes distintos soporten una correlacion cross-dominio.",
     "Cada finding debe completar source_finding_ids con IDs existentes y composite_rationale con la correlacion transversal.",
     "Si la correlacion no esta soportada, devuelve findings vacio y explica la limitacion."
+  ].join("\n");
+}
+
+function buildSynthesisSystemPrompt(target: SynthesisTarget) {
+  const targetLabel = target === "roadmap" ? "roadmap priorizado" : "resumen ejecutivo";
+  return [
+    `Eres un arquitecto senior Cisco generando el ${targetLabel} final de un assessment.`,
+    "Usa solo el synthesisDigest provisto y, si aplica, el roadmap generado; no inventes findings, scopes ni equipos.",
+    "Cada item o riesgo debe citar source_finding_ids existentes en el digest.",
+    "Da prioridad a hallazgos compuestos cross-scope cuando existan, y declara limitaciones si la evidencia no alcanza.",
+    "No agregues campos fuera del schema solicitado."
   ].join("\n");
 }
 
@@ -1569,6 +1886,72 @@ export function validateReduceResult(parsed: any, digest: ReduceDigest) {
   return { validFindings, rejected };
 }
 
+export function buildSynthesisDigest(scopeResults: any[]): SynthesisDigest {
+  const digestFindings: ReduceDigestFinding[] = [];
+  const catalog: Record<string, string[]> = {};
+  const sourceResults = [...(Array.isArray(scopeResults) ? scopeResults : [])]
+    .filter((result: any) => shouldIncludeInSynthesisDigest(result))
+    .sort((left: any, right: any) => String(left.scopeId).localeCompare(String(right.scopeId)));
+
+  for (const result of sourceResults) {
+    const scope = String(result.scopeId);
+    const findings = (Array.isArray(result.findingsJson) ? result.findingsJson : [])
+      .filter((finding: any) => finding?.finding_id)
+      .sort((left: any, right: any) =>
+        severityScore(right?.severity) - severityScore(left?.severity) ||
+        confidenceScore(right?.confidence) - confidenceScore(left?.confidence) ||
+        String(left?.finding_id).localeCompare(String(right?.finding_id))
+      )
+      .slice(0, synthesisFindingsPerScopeLimit)
+      .map((finding: any) => ({
+        scope,
+        finding_id: String(finding.finding_id),
+        title: String(finding.title ?? ""),
+        severity: String(finding.severity ?? "medium"),
+        finding_type: String(finding.finding_type ?? "probable_issue"),
+        related_devices: normalizeStringList(finding.related_devices)
+      }));
+    catalog[scope] = findings.map((finding: ReduceDigestFinding) => finding.finding_id);
+    digestFindings.push(...findings);
+  }
+
+  return {
+    digestVersion: "ai-synthesis-digest-v1",
+    findings: digestFindings,
+    catalog
+  };
+}
+
+export function validateSynthesisResult(parsed: any, digest: SynthesisDigest, target: SynthesisTarget) {
+  const sourceByKey = new Set(digest.findings.map((finding) => `${finding.scope}:${finding.finding_id}`));
+  const entries = target === "roadmap"
+    ? (Array.isArray(parsed?.items) ? parsed.items : [])
+    : (Array.isArray(parsed?.top_risks) ? parsed.top_risks : []);
+  const valid: any[] = [];
+  const rejected: Array<{ id: string; title: string; reason: string }> = [];
+
+  for (const entry of entries) {
+    const sources = Array.isArray(entry?.source_finding_ids) ? entry.source_finding_ids : [];
+    const sourceKeys = sources.map((source: any) => `${String(source?.scope ?? "")}:${String(source?.finding_id ?? "")}`);
+    const missingSources = sourceKeys.filter((key: string) => !sourceByKey.has(key));
+    const reasons: string[] = [];
+    if (sources.length === 0) reasons.push("Debe citar al menos un source_finding_id existente.");
+    if (missingSources.length > 0) reasons.push(`source_finding_ids inexistentes: ${missingSources.join(", ")}.`);
+
+    if (reasons.length > 0) {
+      rejected.push({
+        id: String(entry?.item_id ?? entry?.title ?? "unknown"),
+        title: String(entry?.title ?? "Elemento de sintesis sin titulo"),
+        reason: reasons.join(" ")
+      });
+    } else {
+      valid.push(entry);
+    }
+  }
+
+  return { valid, rejected };
+}
+
 function shouldIncludeInReduceDigest(result: any) {
   const scopeId = String(result?.scopeId ?? "");
   return result?.status === "completed" &&
@@ -1577,6 +1960,63 @@ function shouldIncludeInReduceDigest(result: any) {
     scopeId !== "executive_summary" &&
     Array.isArray(result?.findingsJson) &&
     result.findingsJson.length > 0;
+}
+
+function shouldIncludeInSynthesisDigest(result: any) {
+  const scopeId = String(result?.scopeId ?? "");
+  return result?.status === "completed" &&
+    scopeId !== "roadmap" &&
+    scopeId !== "executive_summary" &&
+    Array.isArray(result?.findingsJson) &&
+    result.findingsJson.length > 0;
+}
+
+function synthesisEmptyResponse(target: SynthesisTarget) {
+  if (target === "roadmap") return "{\"phase\":\"synthesis\",\"items\":[],\"limitations\":[]}";
+  return "{\"phase\":\"synthesis\",\"summary\":\"\",\"posture\":\"Sin sintesis generada.\",\"top_risks\":[]}";
+}
+
+function buildSynthesisResultJson(parsed: any, valid: any[], rejected: any[], digest: SynthesisDigest, target: SynthesisTarget) {
+  if (target === "roadmap") {
+    return {
+      ...parsed,
+      phase: "synthesis",
+      scopeId: target,
+      items: valid,
+      rejectedItems: rejected,
+      digestSummary: synthesisDigestSummary(digest)
+    };
+  }
+  return {
+    ...parsed,
+    phase: "synthesis",
+    scopeId: target,
+    top_risks: valid,
+    rejectedTopRisks: rejected,
+    digestSummary: synthesisDigestSummary(digest)
+  };
+}
+
+function synthesisDigestSummary(digest: SynthesisDigest) {
+  return {
+    sourceScopes: Object.keys(digest.catalog).sort(),
+    sourceFindingCount: digest.findings.length
+  };
+}
+
+function compactGeneratedRoadmap(roadmap: any) {
+  return {
+    items: Array.isArray(roadmap?.items)
+      ? roadmap.items.slice(0, 12).map((item: any) => ({
+          item_id: item.item_id,
+          title: item.title,
+          priority: item.priority,
+          severity: item.severity,
+          source_finding_ids: item.source_finding_ids
+        }))
+      : [],
+    limitations: Array.isArray(roadmap?.limitations) ? roadmap.limitations.slice(0, 8) : []
+  };
 }
 
 export function mergeScopePartitionResults(scopeId: AIAnalysisScopeId, results: any[], partitions: ScopePartition[]) {
@@ -1780,6 +2220,17 @@ export function hashScopeInput(record: any, scopeId: AIAnalysisScopeId) {
 function hashReduceDigest(digest: ReduceDigest) {
   return createHash("sha256")
     .update(stableStringify({
+      promptVersion: getPromptVersion(),
+      engineVersion,
+      digest
+    }))
+    .digest("hex");
+}
+
+function hashSynthesisDigest(digest: SynthesisDigest, target: SynthesisTarget) {
+  return createHash("sha256")
+    .update(stableStringify({
+      target,
       promptVersion: getPromptVersion(),
       engineVersion,
       digest
