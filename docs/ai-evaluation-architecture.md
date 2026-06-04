@@ -207,6 +207,20 @@ Contrato Synthesize:
 - Particionar por dominio semantico: subgrafo, equipo, sitio, rol, ventana o categoria; nunca por chars como criterio principal.
 - Preservar `createAIAnalysisAudit` para trazabilidad de `sentEvidenceRefs`, `sentFactIds`, `sentCorrelationIds`, hash de payload y token estimate.
 
+## 10.1 Debug y telemetria OpenAI
+
+El debug de interacciones OpenAI es una capacidad admin por assessment y nace apagada. `AiDebugSetting` guarda `assessmentId`, `captureEnabled`, `updatedBy` y `updatedAt`; `runAIAnalysisJob` lee ese toggle una sola vez al iniciar el job y lo propaga a `runPhase` y `callOpenAIForScopeAnalysis`.
+
+Cuando `captureEnabled` esta activo, cada llamada real a OpenAI en `scope_analysis` persiste un `AiInteractionLog` con `jobId`, `assessmentId`, `scopeId`, fase, modelo, versiones de prompt/engine, status HTTP, latencia, estimacion de tokens, usage real si viene en la respuesta, estado del budget y `rejectedFindings`. Tambien guarda el body del request y la respuesta JSON cruda truncados a cerca de 200 KB.
+
+Reglas de seguridad:
+
+- Nunca se persiste ni expone la API key ni el header `Authorization`; la captura guarda solo el body del request y aplica redaccion defensiva de keys sensibles.
+- Las APIs `app/api/ai-analysis/debug/setting` y `app/api/ai-analysis/debug/interactions` son admin-only y validan usuario activo con rol admin.
+- Un fallo de captura no rompe el analisis: `createAiInteractionLogSafely` encapsula la persistencia en try/catch.
+- La retencion es manual: el admin purga logs con `DELETE /api/ai-analysis/debug/interactions?assessmentId=...`.
+- Si `AI_DEBUG_DISABLE=1`, la captura queda deshabilitada globalmente aunque el setting del assessment este activo.
+
 ## 11. Glosario y roadmap de fases
 
 Glosario:

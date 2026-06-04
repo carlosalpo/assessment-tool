@@ -322,6 +322,39 @@ model AiScopeResult {
   @@index([inputHash])
 }
 
+model AiDebugSetting {
+  assessmentId    String   @id
+  captureEnabled Boolean  @default(false)
+  updatedBy       String?
+  updatedAt       DateTime @updatedAt
+}
+
+model AiInteractionLog {
+  id                   String   @id @default(cuid())
+  jobId                String
+  assessmentId         String
+  scopeId              String
+  phaseName            String
+  model                String
+  promptVersion        String
+  engineVersion        String
+  httpStatus           Int?
+  status               String
+  latencyMs            Int?
+  inputTokensEst       Int?
+  inputTokens          Int?
+  outputTokens         Int?
+  budgetTrimmed        Boolean  @default(false)
+  excludedEvidenceRefs Int      @default(0)
+  requestJson          Json
+  responseJson         Json?
+  rejectedFindings     Json?
+  createdAt            DateTime @default(now())
+
+  @@index([assessmentId, scopeId])
+  @@index([jobId])
+}
+
 model AiAnalysisArtifact {
   id                 String        @id @default(cuid())
   assessmentId       String

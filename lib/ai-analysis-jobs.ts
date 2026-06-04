@@ -2,6 +2,11 @@ import { createHash } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import {
+  createAiInteractionLogSafely,
+  extractOpenAIUsage,
+  getAiDebugSetting
+} from "@/lib/ai-debug";
+import {
   buildAIScopePacket,
   buildAssessmentKnowledgeGraph,
   createAIAnalysisAudit,
@@ -316,6 +321,7 @@ export async function runAIAnalysisJob(jobId: string, options?: RunAIAnalysisJob
 
   const record = snapshot.data as any;
   const scopes = scopesForJob(job.mode as AIAnalysisMode, job.scopeId as AIAnalysisScopeId | null, record);
+  const debugCapture = process.env.AI_DEBUG_DISABLE === "1" ? false : (await getAiDebugSetting(job.assessmentId).catch(() => ({ captureEnabled: false }))).captureEnabled;
   let failedScopes = 0;
   let completedScopes = 0;
   let skippedScopes = 0;
@@ -356,7 +362,7 @@ export async function runAIAnalysisJob(jobId: string, options?: RunAIAnalysisJob
           data: { currentPhase: `${scopeId}:${phase}` }
         });
 
-        const content = await runPhase({ record, scopeId, phase, previousArtifacts: artifacts.map((artifact) => artifact.content), apiKey });
+        const content = await runPhase({ jobId, assessmentId: job.assessmentId, record, scopeId, phase, previousArtifacts: artifacts.map((artifact) => artifact.content), apiKey, debugCapture });
         const artifact = await prisma.aiAnalysisArtifact.create({
           data: {
             assessmentId: job.assessmentId,
@@ -442,11 +448,14 @@ export async function runAIAnalysisJob(jobId: string, options?: RunAIAnalysisJob
 }
 
 async function runPhase(input: {
+  jobId: string;
+  assessmentId: string;
   record: any;
   scopeId: AIAnalysisScopeId;
   phase: AIAnalysisPhaseName;
   previousArtifacts: any[];
   apiKey: string;
+  debugCapture: boolean;
 }) {
   const scope = aiAnalysisScopes.find((item) => item.id === input.scopeId);
   const baseContext = buildScopeContext(input.record, input.scopeId);
@@ -538,7 +547,11 @@ async function runPhase(input: {
   }
 
   if (input.phase === "scope_analysis") {
-    return callOpenAIForScopeAnalysis(input.scopeId, scopePacket, input.previousArtifacts, input.apiKey, model);
+    return callOpenAIForScopeAnalysis(input.scopeId, scopePacket, input.previousArtifacts, input.apiKey, model, {
+      jobId: input.jobId,
+      assessmentId: input.assessmentId,
+      debugCapture: input.debugCapture
+    });
   }
 
   if (input.phase === "validation") {
@@ -577,7 +590,14 @@ async function runPhase(input: {
   };
 }
 
-async function callOpenAIForScopeAnalysis(scopeId: AIAnalysisScopeId, scopePacket: ReturnType<typeof buildAIScopePacket>, previousArtifacts: any[], apiKey: string, model: string) {
+async function callOpenAIForScopeAnalysis(
+  scopeId: AIAnalysisScopeId,
+  scopePacket: ReturnType<typeof buildAIScopePacket>,
+  previousArtifacts: any[],
+  apiKey: string,
+  model: string,
+  debug?: { jobId: string; assessmentId: string; debugCapture: boolean }
+) {
   if (!apiKey) {
     throw new Error("OpenAI API key no esta configurada para el motor persistente.");
   }
@@ -587,6 +607,55 @@ async function callOpenAIForScopeAnalysis(scopeId: AIAnalysisScopeId, scopePacke
   const audit = createAIAnalysisAudit({ packet: scopePacket, model, promptVersion, engineVersion });
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), Number(process.env.OPENAI_TIMEOUT_MS ?? 90000));
+  const requestBody = {
+    model,
+    input: [
+      {
+        role: "system",
+        content: [{
+          type: "input_text",
+          text: [
+            "Eres un arquitecto senior Cisco ejecutando una fase incremental de assessment.",
+            "No inventes equipos, rutas, conexiones ni vulnerabilidades.",
+            "Usa solo el AIScopePacket provisto. No uses conocimiento externo para completar datos faltantes.",
+            "Todo hallazgo debe tener evidencia_refs existentes en AIScopePacket.evidencePack o debe clasificarse como visibility_gap/validation_required.",
+            "Respeta la estrategia, tipos de hallazgo y reglas de validacion especificas del ambito.",
+            "Si la evidencia es insuficiente, usa validation_required o visibility_gap en vez de inferir.",
+            `Prompt version: ${promptVersion}. Engine version: ${engineVersion}.`
+          ].join("\n")
+        }]
+      },
+      {
+        role: "user",
+        content: [{
+          type: "input_text",
+          text: JSON.stringify({
+            task: `Analiza el ambito ${scopeId} usando solo este AIScopePacket y la memoria incremental incluida.`,
+            requiredBehavior: [
+              "Devuelve hallazgos si hay riesgos o inconsistencias explicitamente soportadas por evidencia.",
+              "Usa memory.acceptedOrDeterministicFindings y memory.openCorrelationCandidates como candidatos con evidencia.",
+              "Puedes conservar, ajustar severidad o descartar candidatos solo si la evidencia contradice el candidato.",
+              "No devuelvas findings vacio cuando la memoria tenga candidatos validos soportados por evidencia.",
+              "Incluye evidence_refs, related_fact_ids, related_metric_ids y related_correlation_ids usando solo IDs existentes en el packet."
+            ],
+            aiScopePacket: scopePacket,
+            previousArtifacts: compactPreviousArtifacts(previousArtifacts),
+            audit
+          })
+        }]
+      }
+    ],
+    text: {
+      format: {
+        type: "json_schema",
+        name: "scope_analysis_result",
+        strict: true,
+        schema: scopeAnalysisResultSchema()
+      }
+    }
+  };
+  const startedAt = Date.now();
+  let capturedFailure = false;
   try {
     const response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
@@ -595,62 +664,46 @@ async function callOpenAIForScopeAnalysis(scopeId: AIAnalysisScopeId, scopePacke
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`
       },
-      body: JSON.stringify({
-        model,
-        input: [
-          {
-            role: "system",
-            content: [{
-              type: "input_text",
-              text: [
-                "Eres un arquitecto senior Cisco ejecutando una fase incremental de assessment.",
-                "No inventes equipos, rutas, conexiones ni vulnerabilidades.",
-                "Usa solo el AIScopePacket provisto. No uses conocimiento externo para completar datos faltantes.",
-                "Todo hallazgo debe tener evidencia_refs existentes en AIScopePacket.evidencePack o debe clasificarse como visibility_gap/validation_required.",
-                "Respeta la estrategia, tipos de hallazgo y reglas de validacion especificas del ambito.",
-                "Si la evidencia es insuficiente, usa validation_required o visibility_gap en vez de inferir.",
-                `Prompt version: ${promptVersion}. Engine version: ${engineVersion}.`
-              ].join("\n")
-            }]
-          },
-          {
-            role: "user",
-            content: [{
-              type: "input_text",
-              text: JSON.stringify({
-                task: `Analiza el ambito ${scopeId} usando solo este AIScopePacket y la memoria incremental incluida.`,
-                requiredBehavior: [
-                  "Devuelve hallazgos si hay riesgos o inconsistencias explicitamente soportadas por evidencia.",
-                  "Usa memory.acceptedOrDeterministicFindings y memory.openCorrelationCandidates como candidatos con evidencia.",
-                  "Puedes conservar, ajustar severidad o descartar candidatos solo si la evidencia contradice el candidato.",
-                  "No devuelvas findings vacio cuando la memoria tenga candidatos validos soportados por evidencia.",
-                  "Incluye evidence_refs, related_fact_ids, related_metric_ids y related_correlation_ids usando solo IDs existentes en el packet."
-                ],
-                aiScopePacket: scopePacket,
-                previousArtifacts: compactPreviousArtifacts(previousArtifacts),
-                audit
-              })
-            }]
-          }
-        ],
-        text: {
-          format: {
-            type: "json_schema",
-            name: "scope_analysis_result",
-            strict: true,
-            schema: scopeAnalysisResultSchema()
-          }
-        }
-      })
+      body: JSON.stringify(requestBody)
     });
     const payload = await response.json().catch(() => null);
+    const latencyMs = Date.now() - startedAt;
+    const usage = extractOpenAIUsage(payload);
     if (!response.ok) {
       const message = payload?.error?.message ?? "Error llamando OpenAI Responses API.";
+      await captureOpenAIInteraction(debug, {
+        scopeId,
+        model,
+        audit,
+        scopePacket,
+        requestBody,
+        payload,
+        httpStatus: response.status,
+        status: "error",
+        latencyMs,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens
+      });
+      capturedFailure = true;
       if (response.status === 401 || response.status === 403 || deterministicScopeFindings.length === 0) throw new Error(message);
       return deterministicScopeAnalysisFallback(scopeId, deterministicScopeFindings, message);
     }
     const parsed = JSON.parse(extractResponseText(payload) || "{\"findings\":[],\"recommendations\":[]}");
     const validation = validateScopeAnalysisResult(parsed, scopePacket);
+    await captureOpenAIInteraction(debug, {
+      scopeId,
+      model,
+      audit,
+      scopePacket,
+      requestBody,
+      payload,
+      httpStatus: response.status,
+      status: "ok",
+      latencyMs,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      rejectedFindings: validation.rejectedFindings
+    });
     const mergedFindings = mergeScopeFindings(validation.validFindings, deterministicScopeFindings);
     return {
       ...parsed,
@@ -663,12 +716,67 @@ async function callOpenAIForScopeAnalysis(scopeId: AIAnalysisScopeId, scopePacke
       recommendations: Array.from(new Set([...(Array.isArray(parsed.recommendations) ? parsed.recommendations : []), ...deterministicScopeFindings.map((finding: any) => finding.recommendation).filter(Boolean)]))
     };
   } catch (error) {
+    if (!capturedFailure) {
+      await captureOpenAIInteraction(debug, {
+        scopeId,
+        model,
+        audit,
+        scopePacket,
+        requestBody,
+        payload: {
+          error: error instanceof Error ? error.message : "OpenAI no respondio durante scope_analysis."
+        },
+        httpStatus: null,
+        status: error instanceof Error && error.name === "AbortError" ? "timeout" : "error",
+        latencyMs: Date.now() - startedAt
+      });
+    }
     if (deterministicScopeFindings.length === 0) throw error;
     const message = error instanceof Error ? error.message : "OpenAI no respondio durante scope_analysis.";
     return deterministicScopeAnalysisFallback(scopeId, deterministicScopeFindings, message);
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function captureOpenAIInteraction(
+  debug: { jobId: string; assessmentId: string; debugCapture: boolean } | undefined,
+  input: {
+    scopeId: AIAnalysisScopeId;
+    model: string;
+    audit: ReturnType<typeof createAIAnalysisAudit>;
+    scopePacket: ReturnType<typeof buildAIScopePacket>;
+    requestBody: unknown;
+    payload: unknown;
+    httpStatus: number | null;
+    status: "ok" | "error" | "timeout";
+    latencyMs: number;
+    inputTokens?: number | null;
+    outputTokens?: number | null;
+    rejectedFindings?: unknown;
+  }
+) {
+  if (!debug?.debugCapture) return;
+  await createAiInteractionLogSafely({
+    jobId: debug.jobId,
+    assessmentId: debug.assessmentId,
+    scopeId: input.scopeId,
+    phaseName: "scope_analysis",
+    model: input.model,
+    promptVersion,
+    engineVersion,
+    httpStatus: input.httpStatus,
+    status: input.status,
+    latencyMs: input.latencyMs,
+    inputTokensEst: input.audit.inputTokenEstimate,
+    inputTokens: input.inputTokens,
+    outputTokens: input.outputTokens,
+    budgetTrimmed: input.scopePacket.budget.trimmed,
+    excludedEvidenceRefs: input.scopePacket.budget.excludedEvidenceRefs,
+    requestJson: input.requestBody,
+    responseJson: input.payload,
+    rejectedFindings: input.rejectedFindings
+  });
 }
 
 function deterministicScopeAnalysisFallback(scopeId: AIAnalysisScopeId, findings: any[], reason: string) {
