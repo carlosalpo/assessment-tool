@@ -71,6 +71,7 @@ import {
   executiveSummaryFindings,
   type AIAnalysisState
 } from "@/lib/ai-analysis";
+import { humanizeScopeStatus } from "@/lib/ai-status-labels";
 import {
   buildOperationalAIContext,
   createDefaultOperationalAssessment,
@@ -7709,6 +7710,8 @@ function AiEvaluationTab({
             const scopeJob = latestScopeJob && isScopeRunning ? latestScopeJob : undefined;
             const areaFindings = record.parsed.findings.filter((finding) => finding.category === areaToCategory(area.id));
             const canResetArea = run.status !== "pending" || run.progress > 0 || areaFindings.length > 0;
+            const displayedStatus = scopeStatus?.status ?? run.status;
+            const displayedStatusLabel = humanizeScopeStatus(displayedStatus);
             return (
               <div key={area.id} className="rounded-md border border-border p-3">
                 <div className="flex items-start justify-between gap-3">
@@ -7716,9 +7719,11 @@ function AiEvaluationTab({
                     <p className="text-sm font-semibold">{area.label}</p>
                       <p className="mt-1 text-xs text-muted-foreground">{area.description}</p>
                     </div>
-                  <Badge tone={scopeStatusTone(scopeStatus?.status ?? run.status)}>
-                    {scopeStatus?.status ?? run.status}
-                  </Badge>
+                  <span title={displayedStatusLabel.tooltip}>
+                    <Badge tone={scopeStatusTone(displayedStatus)}>
+                      {displayedStatusLabel.label}
+                    </Badge>
+                  </span>
                 </div>
                 <div className="mt-3 h-2 rounded-full bg-muted">
                   <div className="h-2 rounded-full bg-primary" style={{ width: `${scopeJob?.progress ?? run.progress}%` }} />
@@ -7776,6 +7781,7 @@ function AIAnalysisJobStatusPanel({
   const failed = job.steps.filter((step) => step.status === "failed").length;
   const skipped = job.steps.filter((step) => step.status === "skipped").length;
   const completed = job.steps.filter((step) => step.status === "completed").length;
+  const jobStatusLabel = humanizeScopeStatus(job.status);
 
   return (
     <div className="rounded-md border border-primary/30 bg-primary/5 p-3">
@@ -7783,7 +7789,9 @@ function AIAnalysisJobStatusPanel({
         <div>
           <div className="flex flex-wrap items-center gap-2">
             <p className="text-sm font-semibold">Motor persistente de analisis AI</p>
-            <Badge tone={scopeStatusTone(job.status)}>{job.status}</Badge>
+            <span title={jobStatusLabel.tooltip}>
+              <Badge tone={scopeStatusTone(job.status)}>{jobStatusLabel.label}</Badge>
+            </span>
             <Badge tone="neutral">{job.mode === "full" ? "Evaluacion completa" : job.scopeId}</Badge>
           </div>
           <p className="mt-1 text-xs text-muted-foreground">
@@ -7819,11 +7827,15 @@ function AIAnalysisJobStatusPanel({
         {Object.entries(grouped).slice(0, 8).map(([scopeId, steps]) => {
           const active = steps.find((step) => step.status === "running");
           const scopeProgress = Math.round((steps.filter((step) => step.status === "completed" || step.status === "skipped").length / Math.max(steps.length, 1)) * 100);
+          const stepStatus = active?.status ?? steps.at(-1)?.status ?? "pending";
+          const stepStatusLabel = humanizeScopeStatus(stepStatus);
           return (
             <div key={scopeId} className="rounded border border-border bg-background/50 p-2">
               <div className="flex items-center justify-between gap-2">
                 <p className="font-medium">{scopeLabel(scopeId as AIAnalysisScopeId)}</p>
-                <Badge tone={scopeStatusTone(active?.status ?? steps.at(-1)?.status ?? "pending")}>{scopeProgress}%</Badge>
+                <span title={`${stepStatusLabel.tooltip} Progreso: ${scopeProgress}%.`}>
+                  <Badge tone={scopeStatusTone(stepStatus)}>{stepStatusLabel.label}</Badge>
+                </span>
               </div>
               <p className="mt-1 text-muted-foreground">{active?.phaseName ?? steps.find((step) => step.status === "failed")?.errorMessage ?? "Fases en checkpoint persistente"}</p>
             </div>
@@ -7980,12 +7992,15 @@ function AIDebugAdminPanel({ record, currentUser }: { record: AssessmentRecord; 
                 <div className="space-y-2 p-3">
                   {group.items.map((interaction) => {
                     const rejectedSummary = summarizeRejectedFindings(interaction.rejectedFindings);
+                    const interactionStatusLabel = humanizeScopeStatus(interaction.status);
                     return (
                       <div key={interaction.id} className="rounded-md border border-border bg-background/50 p-3">
                         <div className="flex flex-wrap items-start justify-between gap-3">
                           <div className="min-w-0">
                             <div className="flex flex-wrap items-center gap-2">
-                              <Badge tone={scopeStatusTone(interaction.status)}>{interaction.status}</Badge>
+                              <span title={interactionStatusLabel.tooltip}>
+                                <Badge tone={scopeStatusTone(interaction.status)}>{interactionStatusLabel.label}</Badge>
+                              </span>
                               <span className="text-xs font-medium">{interaction.model}</span>
                               <span className="text-xs text-muted-foreground">{formatDate(interaction.createdAt)}</span>
                             </div>
