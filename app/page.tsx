@@ -71,6 +71,7 @@ import {
   executiveSummaryFindings,
   type AIAnalysisState
 } from "@/lib/ai-analysis";
+import { summarizeAreaFindings } from "@/lib/ai-finding-summary";
 import { humanizeScopeStatus } from "@/lib/ai-status-labels";
 import {
   buildOperationalAIContext,
@@ -567,6 +568,17 @@ const riskSummaryLabel: Record<RiskLevel, string> = {
   medium: "Media",
   low: "Baja",
   info: "Info"
+};
+
+const findingTypeSummaryOrder = ["confirmed_finding", "probable_issue", "correlation_suspicion", "visibility_gap", "validation_required", "sin_tipo"];
+
+const findingTypeSummaryLabel: Record<string, string> = {
+  confirmed_finding: "Confirmados",
+  probable_issue: "Probables",
+  correlation_suspicion: "Correlaciones",
+  visibility_gap: "Gaps",
+  validation_required: "Validación",
+  sin_tipo: "Sin tipo"
 };
 
 const statusLabel: Record<Assessment["status"], string> = {
@@ -7712,6 +7724,16 @@ function AiEvaluationTab({
             const canResetArea = run.status !== "pending" || run.progress > 0 || areaFindings.length > 0;
             const displayedStatus = scopeStatus?.status ?? run.status;
             const displayedStatusLabel = humanizeScopeStatus(displayedStatus);
+            const findingSummary = summarizeAreaFindings(areaFindings);
+            const severitySummary = riskSummaryOrder
+              .map((risk) => ({ risk, count: findingSummary.bySeverity[risk] }))
+              .filter((item) => item.count > 0);
+            const findingTypeSummary = findingTypeSummaryOrder
+              .map((type) => ({ type, count: findingSummary.byFindingType[type] ?? 0 }))
+              .concat(Object.entries(findingSummary.byFindingType)
+                .filter(([type]) => !findingTypeSummaryOrder.includes(type))
+                .map(([type, count]) => ({ type, count })))
+              .filter((item) => item.count > 0);
             return (
               <div key={area.id} className="rounded-md border border-border p-3">
                 <div className="flex items-start justify-between gap-3">
@@ -7731,6 +7753,30 @@ function AiEvaluationTab({
                 <p className="mt-2 text-xs text-muted-foreground">
                   {scopeJob ? `${scopeJob.progress}% · ${scopeJob.currentPhase ?? "Procesando fases"}` : `${run.progress}% · ${scopeStatus?.updatedAt ? `${run.message} · Ultima evaluacion ${formatDate(scopeStatus.updatedAt)}` : run.message}`}
                 </p>
+                <div className="mt-2 space-y-1 text-xs">
+                  {findingSummary.total === 0 ? (
+                    <p className="text-muted-foreground">Sin hallazgos</p>
+                  ) : (
+                    <>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-medium text-foreground">{findingSummary.total} {findingSummary.total === 1 ? "hallazgo" : "hallazgos"}</span>
+                        {severitySummary.map((item) => (
+                          <Badge key={item.risk} tone={riskTone[item.risk]}>
+                            {riskSummaryLabel[item.risk]} {item.count}
+                          </Badge>
+                        ))}
+                        {findingSummary.pendingValidation > 0 && (
+                          <Badge tone="warning">{findingSummary.pendingValidation} por validar</Badge>
+                        )}
+                      </div>
+                      {findingTypeSummary.length > 0 && (
+                        <p className="text-muted-foreground">
+                          Tipos: {findingTypeSummary.map((item) => `${findingTypeSummaryLabel[item.type] ?? item.type}: ${item.count}`).join(" · ")}
+                        </p>
+                      )}
+                    </>
+                  )}
+                </div>
                 <div className="mt-3 flex flex-wrap gap-2">
                   <Button variant="secondary" size="sm" onClick={() => onRunEvaluation(area.id)} disabled={isScopeRunning || hasRunningAnalysis}>
                     <PlayCircle size={14} />
