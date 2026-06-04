@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowDown,
@@ -14,6 +14,7 @@ import {
   ChevronDown,
   ChevronRight,
   ClipboardList,
+  Copy,
   FileCode2,
   FileArchive,
   FileDown,
@@ -379,6 +380,36 @@ type AIAssessmentAnalysisResults = {
     recommendations: unknown;
     updatedAt: string;
   }>;
+};
+
+type AIDebugSetting = {
+  assessmentId: string;
+  captureEnabled: boolean;
+  updatedBy: string | null;
+  updatedAt: string | null;
+};
+
+type AIDebugInteraction = {
+  id: string;
+  jobId: string;
+  assessmentId: string;
+  scopeId: string;
+  phaseName: string;
+  model: string;
+  promptVersion: string;
+  engineVersion: string;
+  httpStatus: number | null;
+  status: "ok" | "error" | "timeout";
+  latencyMs: number | null;
+  inputTokensEst: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  budgetTrimmed: boolean;
+  excludedEvidenceRefs: number;
+  requestJson: unknown;
+  responseJson: unknown | null;
+  rejectedFindings: unknown | null;
+  createdAt: string;
 };
 
 type RunEvaluationOptions = {
@@ -3129,6 +3160,7 @@ function AssessmentWorkspace({
         {activeTab === "Evaluacion AI" && (
           <AiEvaluationTab
             record={record}
+            currentUser={currentUser}
             aiAnalysisStatus={aiAnalysisStatus}
             onRunEvaluation={canEdit ? onRunEvaluation : () => undefined}
             onCancelAnalysisJob={canEdit ? onCancelAnalysisJob : () => undefined}
@@ -7629,6 +7661,7 @@ function truncateSvgText(value: string, maxLength: number) {
 
 function AiEvaluationTab({
   record,
+  currentUser,
   aiAnalysisStatus,
   onRunEvaluation,
   onCancelAnalysisJob,
@@ -7640,6 +7673,7 @@ function AiEvaluationTab({
   onResetPerformance
 }: {
   record: AssessmentRecord;
+  currentUser: AppUser | null;
   aiAnalysisStatus?: AIAssessmentAnalysisStatus;
   onRunEvaluation: (area: EvaluationArea | "complete", options?: RunEvaluationOptions) => void;
   onCancelAnalysisJob: (jobId: string) => void;
@@ -7654,6 +7688,7 @@ function AiEvaluationTab({
   const hasRunningAnalysis = record.evaluationRuns.some((run) => run.status === "running") || hasRunningAIJob(aiAnalysisStatus);
   const performanceEnabled = record.scope.performanceAnalysis.enabled;
   const latestJob = aiAnalysisStatus?.jobs[0];
+  const isAdmin = Boolean(currentUser && canManageUsers(currentUser));
 
   return (
     <div className="space-y-4">
@@ -7740,6 +7775,7 @@ function AiEvaluationTab({
           </div>
         </PanelBody>
       </Panel>
+      {isAdmin && currentUser && <AIDebugAdminPanel record={record} currentUser={currentUser} />}
       <AIReviewPanel record={record} onUpdateFinding={onUpdateFinding} />
     </div>
   );
@@ -7816,6 +7852,253 @@ function AIAnalysisJobStatusPanel({
         })}
       </div>
     </div>
+  );
+}
+
+function AIDebugAdminPanel({ record, currentUser }: { record: AssessmentRecord; currentUser: AppUser }) {
+  const isAdmin = canManageUsers(currentUser);
+  const [setting, setSetting] = useState<AIDebugSetting | null>(null);
+  const [interactions, setInteractions] = useState<AIDebugInteraction[]>([]);
+  const [status, setStatus] = useState<{ state: "idle" | "loading" | "saving" | "purging" | "error"; message: string }>({
+    state: "idle",
+    message: ""
+  });
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  const groupedInteractions = useMemo(() => {
+    const groups = new Map<string, { scopeId: string; phaseName: string; items: AIDebugInteraction[] }>();
+    interactions.forEach((interaction) => {
+      const key = `${interaction.scopeId}:${interaction.phaseName}`;
+      const group = groups.get(key) ?? { scopeId: interaction.scopeId, phaseName: interaction.phaseName, items: [] };
+      group.items.push(interaction);
+      groups.set(key, group);
+    });
+    return Array.from(groups.values());
+  }, [interactions]);
+
+  const loadDebugData = useCallback(async () => {
+    if (!isAdmin) return;
+    try {
+      const [nextSetting, nextInteractions] = await Promise.all([
+        fetchAIDebugSetting(record.id, currentUser),
+        fetchAIDebugInteractions(record.id, currentUser)
+      ]);
+      setSetting(nextSetting);
+      setInteractions(nextInteractions);
+      setStatus({ state: "idle", message: nextInteractions.length ? `Ultima consulta: ${formatDate(new Date().toISOString())}` : "" });
+    } catch (error) {
+      setStatus({ state: "error", message: error instanceof Error ? error.message : "No se pudo cargar debug AI." });
+    }
+  }, [currentUser, isAdmin, record.id]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadDebugData();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [loadDebugData]);
+
+  async function toggleCapture(nextEnabled: boolean) {
+    setStatus({ state: "saving", message: nextEnabled ? "Activando captura..." : "Desactivando captura..." });
+    try {
+      const nextSetting = await updateAIDebugSetting(record.id, nextEnabled, currentUser);
+      setSetting(nextSetting);
+      setStatus({ state: "idle", message: nextEnabled ? "Captura activa para este assessment." : "Captura desactivada." });
+    } catch (error) {
+      setStatus({ state: "error", message: error instanceof Error ? error.message : "No se pudo actualizar captura AI." });
+    }
+  }
+
+  async function purgeInteractions() {
+    if (!window.confirm("Eliminar interacciones capturadas de este assessment?")) return;
+    setStatus({ state: "purging", message: "Eliminando interacciones..." });
+    try {
+      await deleteAIDebugInteractions(record.id, currentUser);
+      setInteractions([]);
+      setStatus({ state: "idle", message: "Interacciones eliminadas." });
+    } catch (error) {
+      setStatus({ state: "error", message: error instanceof Error ? error.message : "No se pudo purgar debug AI." });
+    }
+  }
+
+  async function copyInteractionJson(key: string, value: unknown) {
+    await navigator.clipboard.writeText(prettyDebugJson(value));
+    setCopiedKey(key);
+    window.setTimeout(() => setCopiedKey((current) => current === key ? null : current), 1600);
+  }
+
+  if (!isAdmin) return null;
+
+  const busy = status.state === "loading" || status.state === "saving" || status.state === "purging";
+  const captureEnabled = Boolean(setting?.captureEnabled);
+
+  return (
+    <Panel>
+      <PanelHeader className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <FileCode2 size={16} className="text-primary" />
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-sm font-semibold">Debug OpenAI</h2>
+              <Badge tone={captureEnabled ? "success" : "neutral"}>{captureEnabled ? "Captura activa" : "Captura off"}</Badge>
+              <Badge tone="neutral">{interactions.length} logs</Badge>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {setting?.updatedAt ? `Actualizado ${formatDate(setting.updatedAt)} por ${setting.updatedBy ?? "admin"}` : "Sin configuracion persistida"}
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="flex h-9 items-center gap-2 rounded-md border border-border px-3 text-xs font-medium">
+            <input
+              type="checkbox"
+              className="h-4 w-4 accent-primary"
+              checked={captureEnabled}
+              disabled={busy}
+              onChange={(event) => void toggleCapture(event.target.checked)}
+            />
+            Capturar
+          </label>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => {
+              setStatus({ state: "loading", message: "Cargando captura AI..." });
+              void loadDebugData();
+            }}
+            disabled={busy}
+          >
+            <RotateCcw size={14} />
+            Refrescar
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => void purgeInteractions()} disabled={busy || interactions.length === 0}>
+            <Trash2 size={14} />
+            Purgar
+          </Button>
+        </div>
+      </PanelHeader>
+      <PanelBody className="space-y-3">
+        {status.message && (
+          <div className={cn("rounded-md border px-3 py-2 text-xs", status.state === "error" ? "border-rose-500/40 bg-rose-500/10 text-rose-300" : "border-border bg-muted/40 text-muted-foreground")}>
+            {status.message}
+          </div>
+        )}
+        {groupedInteractions.length === 0 ? (
+          <div className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">
+            No hay interacciones capturadas para este assessment.
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {groupedInteractions.map((group) => (
+              <div key={`${group.scopeId}:${group.phaseName}`} className="rounded-md border border-border">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2">
+                  <div>
+                    <p className="text-sm font-semibold">{scopeLabel(group.scopeId as AIAnalysisScopeId)}</p>
+                    <p className="text-xs text-muted-foreground">{group.phaseName}</p>
+                  </div>
+                  <Badge tone="neutral">{group.items.length} llamadas</Badge>
+                </div>
+                <div className="space-y-2 p-3">
+                  {group.items.map((interaction) => {
+                    const rejectedSummary = summarizeRejectedFindings(interaction.rejectedFindings);
+                    return (
+                      <div key={interaction.id} className="rounded-md border border-border bg-background/50 p-3">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <Badge tone={scopeStatusTone(interaction.status)}>{interaction.status}</Badge>
+                              <span className="text-xs font-medium">{interaction.model}</span>
+                              <span className="text-xs text-muted-foreground">{formatDate(interaction.createdAt)}</span>
+                            </div>
+                            <p className="mt-1 truncate text-xs text-muted-foreground">
+                              job {interaction.jobId} · {interaction.promptVersion} · {interaction.engineVersion}
+                            </p>
+                          </div>
+                          <div className="grid min-w-full gap-2 text-xs sm:min-w-[520px] sm:grid-cols-4">
+                            <DebugMetric label="HTTP" value={interaction.httpStatus ?? "-"} />
+                            <DebugMetric label="Latencia" value={formatDebugLatency(interaction.latencyMs)} />
+                            <DebugMetric label="Input" value={`${formatDebugNumber(interaction.inputTokensEst)} est / ${formatDebugNumber(interaction.inputTokens)} real`} />
+                            <DebugMetric label="Output" value={formatDebugNumber(interaction.outputTokens)} />
+                          </div>
+                        </div>
+                        <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                          <Badge tone={interaction.budgetTrimmed ? "warning" : "neutral"}>
+                            {interaction.budgetTrimmed ? "Budget recortado" : "Budget completo"}
+                          </Badge>
+                          <Badge tone={interaction.excludedEvidenceRefs > 0 ? "warning" : "neutral"}>
+                            {interaction.excludedEvidenceRefs} evidencias excluidas
+                          </Badge>
+                          <Badge tone={rejectedSummary.count > 0 ? "danger" : "neutral"}>
+                            {rejectedSummary.count} rechazados
+                          </Badge>
+                          {rejectedSummary.reasons.map((reason) => (
+                            <span key={reason} className="rounded bg-muted px-2 py-1 text-muted-foreground">{reason}</span>
+                          ))}
+                        </div>
+                        <div className="mt-3 grid gap-2 lg:grid-cols-2">
+                          <DebugJsonBlock
+                            title="Request"
+                            size={debugJsonSizeLabel(interaction.requestJson)}
+                            value={interaction.requestJson}
+                            copied={copiedKey === `${interaction.id}:request`}
+                            onCopy={() => void copyInteractionJson(`${interaction.id}:request`, interaction.requestJson)}
+                          />
+                          <DebugJsonBlock
+                            title="Response"
+                            size={debugJsonSizeLabel(interaction.responseJson)}
+                            value={interaction.responseJson}
+                            copied={copiedKey === `${interaction.id}:response`}
+                            onCopy={() => void copyInteractionJson(`${interaction.id}:response`, interaction.responseJson)}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </PanelBody>
+    </Panel>
+  );
+}
+
+function DebugMetric({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="rounded border border-border bg-muted/30 px-2 py-1">
+      <p className="text-[11px] font-medium text-muted-foreground">{label}</p>
+      <p className="mt-0.5 break-words font-semibold">{value}</p>
+    </div>
+  );
+}
+
+function DebugJsonBlock({
+  title,
+  size,
+  value,
+  copied,
+  onCopy
+}: {
+  title: string;
+  size: string;
+  value: unknown;
+  copied: boolean;
+  onCopy: () => void;
+}) {
+  return (
+    <details className="rounded-md border border-border bg-muted/20">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-3 py-2 text-xs font-medium">
+        <span>{title} · {size}</span>
+        <Button variant="ghost" size="sm" onClick={(event) => { event.preventDefault(); onCopy(); }}>
+          {copied ? <Check size={14} /> : <Copy size={14} />}
+          {copied ? "Copiado" : "Copiar"}
+        </Button>
+      </summary>
+      <pre className="max-h-80 overflow-auto border-t border-border p-3 text-[11px] leading-relaxed text-muted-foreground">
+        {prettyDebugJson(value)}
+      </pre>
+    </details>
   );
 }
 
@@ -10991,11 +11274,42 @@ function hasRunningAIJob(status?: AIAssessmentAnalysisStatus) {
 }
 
 function scopeStatusTone(status: string | undefined): React.ComponentProps<typeof Badge>["tone"] {
+  if (status === "ok") return "success";
   if (status === "completed" || status === "complete") return "success";
   if (status === "running" || status === "queued" || status === "pending") return "warning";
-  if (status === "failed" || status === "blocked" || status === "cancelled") return "danger";
+  if (status === "error" || status === "timeout" || status === "failed" || status === "blocked" || status === "cancelled") return "danger";
   if (status === "skipped" || status === "partially_completed") return "info";
   return "neutral";
+}
+
+function formatDebugNumber(value: number | null | undefined) {
+  return Number.isFinite(value) ? new Intl.NumberFormat("es-ES").format(value as number) : "-";
+}
+
+function formatDebugLatency(value: number | null | undefined) {
+  if (!Number.isFinite(value)) return "-";
+  return `${new Intl.NumberFormat("es-ES").format(value as number)} ms`;
+}
+
+function prettyDebugJson(value: unknown) {
+  return JSON.stringify(value ?? null, null, 2);
+}
+
+function debugJsonSizeLabel(value: unknown) {
+  const chars = prettyDebugJson(value).length;
+  if (chars < 1024) return `${chars} B`;
+  return `${Math.ceil(chars / 1024)} KB`;
+}
+
+function summarizeRejectedFindings(value: unknown) {
+  const items = Array.isArray(value) ? value : [];
+  const reasons = Array.from(new Set(items
+    .map((item) => {
+      const candidate = item as { reason?: unknown; message?: unknown; error?: unknown };
+      return String(candidate.reason ?? candidate.message ?? candidate.error ?? "").trim();
+    })
+    .filter(Boolean))).slice(0, 3);
+  return { count: items.length, reasons };
 }
 
 async function fetchAIAnalysisStatus(assessmentId: string): Promise<AIAssessmentAnalysisStatus> {
@@ -11011,6 +11325,54 @@ async function resetPersistentAIAnalysisStatus(assessmentId: string, scopeId?: A
   const payload = await response.json();
   if (!response.ok) throw new Error(payload?.error || "No se pudo limpiar estado AI.");
   return payload as AIAssessmentAnalysisStatus;
+}
+
+async function fetchAIDebugSetting(assessmentId: string, currentUser: AppUser): Promise<AIDebugSetting> {
+  const response = await fetch(`/api/ai-analysis/debug/setting?assessmentId=${encodeURIComponent(assessmentId)}`, {
+    cache: "no-store",
+    headers: { "x-user-email": currentUser.email }
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload?.error || "No se pudo consultar configuracion debug AI.");
+  return payload.setting as AIDebugSetting;
+}
+
+async function updateAIDebugSetting(assessmentId: string, captureEnabled: boolean, currentUser: AppUser): Promise<AIDebugSetting> {
+  const response = await fetch("/api/ai-analysis/debug/setting", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      "x-user-email": currentUser.email
+    },
+    body: JSON.stringify({
+      assessmentId,
+      captureEnabled,
+      updatedBy: currentUser.email
+    })
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload?.error || "No se pudo actualizar configuracion debug AI.");
+  return payload.setting as AIDebugSetting;
+}
+
+async function fetchAIDebugInteractions(assessmentId: string, currentUser: AppUser): Promise<AIDebugInteraction[]> {
+  const response = await fetch(`/api/ai-analysis/debug/interactions?assessmentId=${encodeURIComponent(assessmentId)}`, {
+    cache: "no-store",
+    headers: { "x-user-email": currentUser.email }
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload?.error || "No se pudieron consultar interacciones debug AI.");
+  return payload.interactions as AIDebugInteraction[];
+}
+
+async function deleteAIDebugInteractions(assessmentId: string, currentUser: AppUser) {
+  const response = await fetch(`/api/ai-analysis/debug/interactions?assessmentId=${encodeURIComponent(assessmentId)}`, {
+    method: "DELETE",
+    headers: { "x-user-email": currentUser.email }
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload?.error || "No se pudieron purgar interacciones debug AI.");
+  return payload as { ok: boolean; deleted: number };
 }
 
 function persistentAIResultsToFindings(results: AIAssessmentAnalysisResults["results"], assessmentId: string): Finding[] {
