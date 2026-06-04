@@ -1,17 +1,20 @@
 import { createHash } from "node:crypto";
 import { Prisma } from "@prisma/client";
-import { prisma } from "@/lib/prisma";
+import { prisma } from "./prisma.ts";
 import {
   createAiInteractionLogSafely,
   extractOpenAIUsage,
   getAiDebugSetting
-} from "@/lib/ai-debug";
+} from "./ai-debug.ts";
 import {
   buildAIScopePacket,
   buildAssessmentKnowledgeGraph,
+  buildScopeBrief,
   createAIAnalysisAudit,
+  getPromptVersion,
+  isScopeBriefEnabled,
   validateScopeAnalysisResult
-} from "@/lib/ai-scope-strategy";
+} from "./ai-scope-strategy.ts";
 
 export type AIAnalysisJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "partially_completed";
 export type AIAnalysisStepStatus = "pending" | "running" | "completed" | "failed" | "skipped" | "cancelled";
@@ -87,7 +90,6 @@ type RunAIAnalysisJobOptions = {
 };
 
 const engineVersion = "ai-analysis-engine-v2";
-const promptVersion = "assessment-ai-prompts-v1";
 const maxChunkChars = 14000;
 const defaultOpenAIAnalysisModel = "gpt-5.2";
 
@@ -401,7 +403,7 @@ export async function runAIAnalysisJob(jobId: string, options?: RunAIAnalysisJob
           scopeId,
           status: "completed",
           inputHash,
-          promptVersion,
+          promptVersion: getPromptVersion(),
           engineVersion,
           resultJson: finalArtifact as Prisma.InputJsonValue,
           executiveSummary: finalArtifact.executiveSummary ?? null,
@@ -411,7 +413,7 @@ export async function runAIAnalysisJob(jobId: string, options?: RunAIAnalysisJob
         update: {
           status: "completed",
           inputHash,
-          promptVersion,
+          promptVersion: getPromptVersion(),
           engineVersion,
           resultJson: finalArtifact as Prisma.InputJsonValue,
           executiveSummary: finalArtifact.executiveSummary ?? null,
@@ -495,7 +497,7 @@ async function runPhase(input: {
       deterministicCandidateCount: baseContext.deterministicFindings.length,
       tokenBudget: scopePacket.budget.maxInputTokens,
       packetBudget: scopePacket.budget,
-      promptVersion,
+      promptVersion: getPromptVersion(),
       engineVersion
     };
   }
@@ -574,12 +576,14 @@ async function runPhase(input: {
 
   const validation = input.previousArtifacts.find((artifact) => artifact.phase === "validation") ?? {};
   const findings = validation.validatedFindings ?? [];
+  const scopeLabel = scope?.label ?? input.scopeId;
   return {
     phase: input.phase,
     scopeId: input.scopeId,
+    ...(isScopeBriefEnabled() ? { scopeBrief: buildScopeBrief(findings, input.scopeId, scopeLabel) } : {}),
     executiveSummary: findings.length > 0
-      ? `${scope?.label ?? input.scopeId}: ${findings.length} hallazgos soportados por evidencia listos para revision del arquitecto.`
-      : `${scope?.label ?? input.scopeId}: sin hallazgos AI soportados por evidencia con la informacion disponible.`,
+      ? `${scopeLabel}: ${findings.length} hallazgos soportados por evidencia listos para revision del arquitecto.`
+      : `${scopeLabel}: sin hallazgos AI soportados por evidencia con la informacion disponible.`,
     findings,
     recommendations: findings.flatMap((finding: any) => finding.remediation_steps ?? finding.recommendation ? [finding.recommendation].filter(Boolean) : []),
     dashboard: {
@@ -604,6 +608,7 @@ async function callOpenAIForScopeAnalysis(
 
   const deterministicFindings = scopePacket.memory.acceptedOrDeterministicFindings ?? [];
   const deterministicScopeFindings = deterministicFindingsToScopeAnalysisFindings(deterministicFindings, scopePacket);
+  const promptVersion = getPromptVersion();
   const audit = createAIAnalysisAudit({ packet: scopePacket, model, promptVersion, engineVersion });
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), Number(process.env.OPENAI_TIMEOUT_MS ?? 90000));
@@ -763,7 +768,7 @@ async function captureOpenAIInteraction(
     scopeId: input.scopeId,
     phaseName: "scope_analysis",
     model: input.model,
-    promptVersion,
+    promptVersion: getPromptVersion(),
     engineVersion,
     httpStatus: input.httpStatus,
     status: input.status,
@@ -1237,12 +1242,12 @@ function chunkFromText(scopeId: AIAnalysisScopeId, index: number, text: string) 
   };
 }
 
-function hashScopeInput(record: any, scopeId: AIAnalysisScopeId) {
+export function hashScopeInput(record: any, scopeId: AIAnalysisScopeId) {
   const context = buildScopeContext(record, scopeId);
   return createHash("sha256")
     .update(stableStringify({
       scopeId,
-      promptVersion,
+      promptVersion: getPromptVersion(),
       engineVersion,
       client: context.client,
       assessment: context.assessment,

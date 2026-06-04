@@ -73,7 +73,15 @@ export type AIScopePacket = {
     analysisLimitations: string[];
   };
   memory: {
-    priorScopeSummaries: Array<{ scopeId: string; status: string; executiveSummary?: string | null; findingCount: number; recommendationCount: number }>;
+    priorScopeSummaries: Array<{
+      scopeId: string;
+      status: string;
+      executiveSummary?: string | null;
+      findingCount: number;
+      recommendationCount: number;
+      topFindings?: ScopeBrief["topFindings"];
+      openQuestions?: string[];
+    }>;
     acceptedOrDeterministicFindings: AssessmentAIContext["deterministicFindings"];
     openCorrelationCandidates: CorrelationCandidate[];
     unresolvedQuestions: string[];
@@ -121,6 +129,29 @@ export type ScopeValidationResult = {
   validFindings: any[];
   rejectedFindings: Array<{ finding_id: string; title: string; reason: string }>;
 };
+
+export type ScopeBrief = {
+  scopeId: string;
+  scopeLabel: string;
+  topFindings: Array<{
+    finding_id: string;
+    title: string;
+    severity: string;
+    finding_type: string;
+    related_devices: string[];
+    evidence_refs: string[];
+    rationale: string;
+  }>;
+  openQuestions: string[];
+};
+
+export function isScopeBriefEnabled() {
+  return process.env.AI_SCOPE_BRIEF === "1";
+}
+
+export function getPromptVersion() {
+  return isScopeBriefEnabled() ? "assessment-ai-prompts-v2" : "assessment-ai-prompts-v1";
+}
 
 const packetVersion = "ai-scope-packet-v1";
 const defaultMaxInputTokens = 24000;
@@ -470,6 +501,35 @@ export function validateScopeAnalysisResult(parsed: any, packet: AIScopePacket):
   return { validFindings, rejectedFindings };
 }
 
+export function buildScopeBrief(findings: any[], scopeId: AIScopeId | string, scopeLabel: string): ScopeBrief {
+  const sortedFindings = [...(Array.isArray(findings) ? findings : [])].sort((left, right) => {
+    const severityDelta = severityRank(right?.severity) - severityRank(left?.severity);
+    if (severityDelta !== 0) return severityDelta;
+    return confidenceRank(right?.confidence) - confidenceRank(left?.confidence);
+  });
+  const openQuestions = uniqueStrings([
+    ...sortedFindings.flatMap((finding) => normalizeStringArray(finding?.validation_questions)),
+    ...sortedFindings
+      .filter((finding) => finding?.finding_type === "validation_required" || finding?.finding_type === "visibility_gap")
+      .map((finding) => String(finding?.title ?? "").trim())
+  ]).slice(0, 5);
+
+  return {
+    scopeId: String(scopeId),
+    scopeLabel,
+    topFindings: sortedFindings.slice(0, 5).map((finding) => ({
+      finding_id: String(finding?.finding_id ?? ""),
+      title: String(finding?.title ?? ""),
+      severity: String(finding?.severity ?? ""),
+      finding_type: String(finding?.finding_type ?? ""),
+      related_devices: normalizeStringArray(finding?.related_devices),
+      evidence_refs: normalizeStringArray(finding?.evidence_refs),
+      rationale: firstSentence(finding?.technical_rationale)
+    })),
+    openQuestions
+  };
+}
+
 function buildGraphEdges(context: AssessmentAIContext, interfaces: AssessmentKnowledgeGraph["nodes"]["interfaces"], correlations: CorrelationCandidate[]) {
   const edges: AssessmentKnowledgeGraph["edges"] = [];
   for (const intf of interfaces) edges.push({ from: `device:${intf.hostname}`, to: `interface:${intf.hostname}:${intf.name}`, type: "has_interface" });
@@ -548,17 +608,24 @@ function evidenceScore(ref: EvidenceReference, packet: AIScopePacket, directIds:
   return score;
 }
 
-function summarizePriorScopeResults(results: any[], strategy: AIScopeStrategy) {
+export function summarizePriorScopeResults(results: any[], strategy: AIScopeStrategy) {
   const wanted = new Set(strategy.priorScopes);
   return results
     .filter((result) => wanted.has(String(result.scopeId) as AIScopeId))
-    .map((result) => ({
-      scopeId: String(result.scopeId),
-      status: String(result.status ?? "unknown"),
-      executiveSummary: result.executiveSummary ?? result.resultJson?.executiveSummary ?? null,
-      findingCount: Array.isArray(result.findingsJson) ? result.findingsJson.length : Array.isArray(result.resultJson?.findings) ? result.resultJson.findings.length : 0,
-      recommendationCount: Array.isArray(result.recommendationsJson) ? result.recommendationsJson.length : Array.isArray(result.resultJson?.recommendations) ? result.resultJson.recommendations.length : 0
-    }))
+    .map((result) => {
+      const scopeBrief = result.resultJson?.scopeBrief;
+      return {
+        scopeId: String(result.scopeId),
+        status: String(result.status ?? "unknown"),
+        executiveSummary: result.executiveSummary ?? result.resultJson?.executiveSummary ?? null,
+        findingCount: Array.isArray(result.findingsJson) ? result.findingsJson.length : Array.isArray(result.resultJson?.findings) ? result.resultJson.findings.length : 0,
+        recommendationCount: Array.isArray(result.recommendationsJson) ? result.recommendationsJson.length : Array.isArray(result.resultJson?.recommendations) ? result.resultJson.recommendations.length : 0,
+        ...(scopeBrief ? {
+          topFindings: Array.isArray(scopeBrief.topFindings) ? scopeBrief.topFindings.slice(0, 5) : [],
+          openQuestions: normalizeStringArray(scopeBrief.openQuestions).slice(0, 5)
+        } : {})
+      };
+    })
     .slice(0, 6);
 }
 
@@ -689,6 +756,27 @@ function isExplicitSecurityEvidence(ref: EvidenceReference) {
 
 function normalizeStringArray(value: unknown) {
   return Array.isArray(value) ? value.map(String).map((item) => item.trim()).filter(Boolean) : [];
+}
+
+function uniqueStrings(values: string[]) {
+  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
+}
+
+function severityRank(value: unknown) {
+  const rank: Record<string, number> = { critical: 5, high: 4, medium: 3, low: 2, informational: 1, info: 1 };
+  return rank[String(value ?? "").toLowerCase()] ?? 0;
+}
+
+function confidenceRank(value: unknown) {
+  const rank: Record<string, number> = { high: 3, medium: 2, low: 1 };
+  if (typeof value === "number") return value;
+  return rank[String(value ?? "").toLowerCase()] ?? 0;
+}
+
+function firstSentence(value: unknown) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  const match = text.match(/^.*?[.!?](?:\s|$)/);
+  return truncateText((match?.[0] ?? text).trim(), 220);
 }
 
 function estimateTokens(value: unknown) {
