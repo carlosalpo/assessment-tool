@@ -149,12 +149,22 @@ export function isScopeBriefEnabled() {
   return process.env.AI_SCOPE_BRIEF === "1";
 }
 
+export function isEvidenceTieringEnabled() {
+  return process.env.AI_EVIDENCE_TIERING === "1";
+}
+
 export function getPromptVersion() {
   return isScopeBriefEnabled() ? "assessment-ai-prompts-v2" : "assessment-ai-prompts-v1";
 }
 
 const packetVersion = "ai-scope-packet-v1";
 const defaultMaxInputTokens = 24000;
+export const EVIDENCE_TOP_K = 12;
+const fullEvidenceExcerptChars = 1200;
+const compactEvidenceExcerptChars = 120;
+const smallAssessmentMaxInputTokens = 16000;
+const mediumAssessmentMaxInputTokens = 24000;
+const largeAssessmentMaxInputTokens = 32000;
 
 const scopeStrategies: Partial<Record<AIScopeId, AIScopeStrategy>> = {
   topology: {
@@ -349,7 +359,7 @@ export function buildAIScopePacket(input: {
   const unresolvedQuestions = missingEvidence.map((item) => `${item.expectedEvidence}: ${item.reason}`);
   const selectedEvidence = graph.nodes.evidenceRefs
     .filter((ref) => relevantEvidenceIds.has(ref.id) || evidenceMatchesStrategy(ref, strategy))
-    .map(compactEvidenceRef);
+    .map((ref) => isEvidenceTieringEnabled() ? ref : compactEvidenceRef(ref));
 
   const initialPacket: AIScopePacket = {
     packetVersion,
@@ -388,7 +398,7 @@ export function buildAIScopePacket(input: {
       allowedFindingTypes: strategy.allowedFindingTypes
     },
     budget: {
-      maxInputTokens: input.maxInputTokens ?? defaultMaxInputTokens,
+      maxInputTokens: resolveMaxInputTokens(input.record, input.maxInputTokens),
       estimatedInputTokens: 0,
       trimmed: false,
       excludedEvidenceRefs: 0
@@ -396,6 +406,16 @@ export function buildAIScopePacket(input: {
   };
 
   return applyContextBudget(initialPacket);
+}
+
+export function resolveMaxInputTokens(record: any, explicit?: number) {
+  if (explicit !== undefined && Number.isFinite(explicit)) return explicit;
+  if (!isEvidenceTieringEnabled()) return defaultMaxInputTokens;
+
+  const deviceCount = countIncludedDevices(record);
+  if (deviceCount < 20) return smallAssessmentMaxInputTokens;
+  if (deviceCount <= 100) return mediumAssessmentMaxInputTokens;
+  return largeAssessmentMaxInputTokens;
 }
 
 export function createAIAnalysisAudit(input: {
@@ -547,6 +567,11 @@ function buildGraphEdges(context: AssessmentAIContext, interfaces: AssessmentKno
 }
 
 function applyContextBudget(packet: AIScopePacket): AIScopePacket {
+  if (isEvidenceTieringEnabled()) return applyTieredContextBudget(packet);
+  return applyLegacyContextBudget(packet);
+}
+
+function applyLegacyContextBudget(packet: AIScopePacket): AIScopePacket {
   let next = { ...packet, evidencePack: rankEvidence(packet).map(compactEvidenceRef) };
   let estimated = estimateTokens(next);
   let excludedEvidenceRefs = 0;
@@ -581,6 +606,56 @@ function applyContextBudget(packet: AIScopePacket): AIScopePacket {
       estimatedInputTokens: estimated,
       trimmed: excludedEvidenceRefs > 0 || estimated > packet.budget.maxInputTokens,
       excludedEvidenceRefs
+    }
+  };
+}
+
+function applyTieredContextBudget(packet: AIScopePacket): AIScopePacket {
+  const rankedEvidence = rankEvidence(packet);
+  const fullEvidence = rankedEvidence.slice(0, EVIDENCE_TOP_K).map((ref) => tierEvidenceRef(ref, "full"));
+  let compactEvidence = rankedEvidence.slice(EVIDENCE_TOP_K).map((ref) => tierEvidenceRef(ref, "compact"));
+  let next = { ...packet, evidencePack: [...fullEvidence, ...compactEvidence] };
+  let estimated = estimateTokens(next);
+  let excludedEvidenceRefs = 0;
+
+  while (estimated > next.budget.maxInputTokens && compactEvidence.length > 0) {
+    compactEvidence = compactEvidence.slice(0, -1);
+    excludedEvidenceRefs += 1;
+    next = { ...next, evidencePack: [...fullEvidence, ...compactEvidence] };
+    estimated = estimateTokens(next);
+  }
+
+  if (estimated > next.budget.maxInputTokens) {
+    next = trimGraphAndMemory(next);
+    estimated = estimateTokens(next);
+  }
+
+  return {
+    ...next,
+    budget: {
+      ...next.budget,
+      estimatedInputTokens: estimated,
+      trimmed: excludedEvidenceRefs > 0 || estimated > packet.budget.maxInputTokens,
+      excludedEvidenceRefs
+    }
+  };
+}
+
+function trimGraphAndMemory(packet: AIScopePacket): AIScopePacket {
+  return {
+    ...packet,
+    graphSlice: {
+      ...packet.graphSlice,
+      devices: packet.graphSlice.devices.slice(0, 50),
+      relationships: packet.graphSlice.relationships.slice(0, 45),
+      configFacts: packet.graphSlice.configFacts.slice(0, 40),
+      stateFacts: packet.graphSlice.stateFacts.slice(0, 40),
+      performanceMetrics: packet.graphSlice.performanceMetrics.slice(0, 35)
+    },
+    memory: {
+      ...packet.memory,
+      acceptedOrDeterministicFindings: packet.memory.acceptedOrDeterministicFindings.slice(0, 30),
+      openCorrelationCandidates: packet.memory.openCorrelationCandidates.slice(0, 30)
     }
   };
 }
@@ -627,6 +702,13 @@ export function summarizePriorScopeResults(results: any[], strategy: AIScopeStra
       };
     })
     .slice(0, 6);
+}
+
+export function tierEvidenceRef(ref: EvidenceReference, tier: "full" | "compact"): EvidenceReference {
+  return {
+    ...ref,
+    excerpt: truncateText(ref.excerpt ?? ref.id, tier === "full" ? fullEvidenceExcerptChars : compactEvidenceExcerptChars)
+  };
 }
 
 function compactEvidenceRef(ref: EvidenceReference): EvidenceReference {
@@ -747,6 +829,14 @@ function buildScopeDerivedFindingRefs(context: AssessmentAIContext, graph: Asses
 function evidenceMatchesStrategy(ref: EvidenceReference, strategy: AIScopeStrategy) {
   const value = `${ref.id} ${ref.sourceFile ?? ""} ${ref.command ?? ""} ${ref.excerpt ?? ""}`.toLowerCase();
   return strategy.evidenceKeywords.some((keyword) => value.includes(keyword.toLowerCase()));
+}
+
+function countIncludedDevices(record: any) {
+  if (Array.isArray(record?.targetInventory)) {
+    return record.targetInventory.filter((device: any) => device?.included !== false).length;
+  }
+  if (Array.isArray(record?.parsed?.devices)) return record.parsed.devices.length;
+  return 0;
 }
 
 function isExplicitSecurityEvidence(ref: EvidenceReference) {

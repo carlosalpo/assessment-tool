@@ -162,6 +162,20 @@ test("hashScopeInput changes for entity graph and aggregation but not synthesis 
   });
 });
 
+test("hashScopeInput changes when AI_EVIDENCE_TIERING is enabled", () => {
+  const record = minimalRecord("assess_evidence_tiering_hash");
+
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined }, () => {
+    const offHash = hashScopeInput(record, "security");
+    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: "1" }, () => {
+      assert.notEqual(hashScopeInput(record, "security"), offHash);
+    });
+    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: "" }, () => {
+      assert.equal(hashScopeInput(record, "security"), offHash);
+    });
+  });
+});
+
 function finding(id: string, severity: string, confidence: string, findingType: string, validationQuestions: string[]) {
   return {
     finding_id: id,

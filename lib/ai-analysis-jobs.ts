@@ -12,6 +12,7 @@ import {
   buildScopeBrief,
   createAIAnalysisAudit,
   getPromptVersion,
+  isEvidenceTieringEnabled,
   isScopeBriefEnabled,
   validateScopeAnalysisResult
 } from "./ai-scope-strategy.ts";
@@ -467,11 +468,14 @@ async function runPhase(input: {
   const scope = aiAnalysisScopes.find((item) => item.id === input.scopeId);
   const baseContext = buildScopeContext(input.record, input.scopeId);
   const priorScopeResults = await loadPriorScopeResults(input.record?.id, input.scopeId);
+  const explicitMaxInputTokens = process.env.OPENAI_MAX_INPUT_TOKENS?.trim()
+    ? Number(process.env.OPENAI_MAX_INPUT_TOKENS)
+    : undefined;
   const scopePacket = buildAIScopePacket({
     record: input.record,
     scopeId: input.scopeId,
     priorScopeResults,
-    maxInputTokens: Number(process.env.OPENAI_MAX_INPUT_TOKENS ?? 24000)
+    maxInputTokens: explicitMaxInputTokens
   });
   const model = openAIAnalysisModel();
 
@@ -1272,6 +1276,7 @@ export function hashScopeInput(record: any, scopeId: AIAnalysisScopeId) {
       scopeId,
       promptVersion: getPromptVersion(),
       ...(usesPatternQuery(scopeId) ? { patternQuery: true } : {}),
+      ...(isEvidenceTieringEnabled() ? { evidenceTiering: true } : {}),
       engineVersion,
       client: context.client,
       assessment: context.assessment,

@@ -14,7 +14,10 @@ import {
 import {
   buildAIScopePacket,
   buildAssessmentKnowledgeGraph,
+  EVIDENCE_TOP_K,
   getAIScopeStrategy,
+  resolveMaxInputTokens,
+  tierEvidenceRef,
   validateScopeAnalysisResult
 } from "./ai-scope-strategy.ts";
 
@@ -276,6 +279,57 @@ test("buildAIScopePacket applies token budget by trimming evidence first", () =>
   assert.ok(packet.evidencePack.length < input.evidenceFiles.length);
 });
 
+test("tierEvidenceRef preserves fuller top evidence and compact references stay short", () => {
+  const longExcerpt = `snmp-server community public RO ${"x".repeat(1800)}`;
+  const full = tierEvidenceRef({ id: "full-ref", command: "show running-config", excerpt: longExcerpt }, "full");
+  const compact = tierEvidenceRef({ id: "compact-ref", command: "show running-config", excerpt: longExcerpt }, "compact");
+
+  assert.ok(full.excerpt.length > 320);
+  assert.ok(full.excerpt.length <= 1202);
+  assert.ok(compact.excerpt.length <= 122);
+});
+
+test("buildAIScopePacket keeps legacy 320 char evidence excerpts when evidence tiering is off", () => {
+  withEnv({ AI_EVIDENCE_TIERING: undefined }, () => {
+    const input = inputWithLongSecurityEvidence(18);
+    const packet = buildAIScopePacket({ record: input, scopeId: "security", maxInputTokens: 50000 });
+
+    assert.ok(packet.evidencePack.length > EVIDENCE_TOP_K);
+    assert.ok(packet.evidencePack.every((ref) => ref.excerpt.length <= 322));
+  });
+});
+
+test("buildAIScopePacket tiers evidence and preserves top full refs while trimming compact refs", () => {
+  withEnv({ AI_EVIDENCE_TIERING: "1" }, () => {
+    const input = inputWithLongSecurityEvidence(36);
+    const untrimmed = buildAIScopePacket({ record: input, scopeId: "security", maxInputTokens: 200000 });
+    const topFullIds = untrimmed.evidencePack.slice(0, EVIDENCE_TOP_K).map((ref) => ref.id);
+
+    assert.ok(untrimmed.evidencePack.length > EVIDENCE_TOP_K);
+    assert.ok(untrimmed.evidencePack.slice(EVIDENCE_TOP_K).every((ref) => ref.excerpt.length <= 122));
+
+    const trimmed = buildAIScopePacket({ record: input, scopeId: "security", maxInputTokens: 1200 });
+    assert.ok(trimmed.budget.trimmed);
+    assert.ok(trimmed.evidencePack.length >= EVIDENCE_TOP_K);
+    assert.ok(trimmed.evidencePack.length < untrimmed.evidencePack.length);
+    assert.deepEqual(trimmed.evidencePack.slice(0, EVIDENCE_TOP_K).map((ref) => ref.id), topFullIds);
+  });
+});
+
+test("resolveMaxInputTokens uses assessment size tiers only when evidence tiering is enabled", () => {
+  withEnv({ AI_EVIDENCE_TIERING: undefined }, () => {
+    assert.equal(resolveMaxInputTokens(recordWithDeviceCount(10)), 24000);
+    assert.equal(resolveMaxInputTokens(recordWithDeviceCount(101)), 24000);
+  });
+
+  withEnv({ AI_EVIDENCE_TIERING: "1" }, () => {
+    assert.equal(resolveMaxInputTokens(recordWithDeviceCount(10)), 16000);
+    assert.equal(resolveMaxInputTokens(recordWithDeviceCount(20)), 24000);
+    assert.equal(resolveMaxInputTokens(recordWithDeviceCount(101)), 32000);
+    assert.equal(resolveMaxInputTokens(recordWithDeviceCount(101), 12345), 12345);
+  });
+});
+
 test("validateScopeAnalysisResult rejects invented evidence, facts and correlations", () => {
   const packet = buildAIScopePacket({ record: baseInput(), scopeId: "security" });
   const result = validateScopeAnalysisResult({
@@ -533,6 +587,51 @@ function metric(id: string, deviceId: string, interfaceId: string | undefined, m
     evidenceFileId: `ev_${deviceId}`,
     confidence: 0.7
   };
+}
+
+function inputWithLongSecurityEvidence(count: number) {
+  const input = baseInput();
+  for (let index = 0; index < count; index += 1) {
+    const hostname = `sec-${String(index).padStart(2, "0")}`;
+    input.targetInventory.push(asset(hostname, `10.10.0.${index + 10}`, "C9300-48P", "access", "high"));
+    input.parsed.devices.push(device(`dev_${hostname}`, hostname, "C9300-48P", "17.9.4"));
+    input.evidenceFiles.push(evidence(`${hostname}.log`, [
+      `hostname ${hostname}`,
+      `snmp-server community public RO ${"security-control-gap ".repeat(90)}${index}`,
+      "line vty 0 4",
+      " transport input telnet ssh"
+    ].join("\n")));
+  }
+  return input;
+}
+
+function recordWithDeviceCount(count: number) {
+  const record = baseInput();
+  record.targetInventory = Array.from({ length: count }, (_item, index) => asset(`dev-${index}`, `10.20.0.${index}`, "C9300-48P", "access", "medium"));
+  record.parsed.devices = Array.from({ length: count }, (_item, index) => device(`dev_${index}`, `dev-${index}`, "C9300-48P", "17.9.4"));
+  return record;
+}
+
+function withEnv(values: Record<string, string | undefined>, run: () => void) {
+  const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+  try {
+    for (const [key, value] of Object.entries(values)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    run();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
 }
 
 function aiFinding(patch: Partial<AISuggestedFinding> = {}): AISuggestedFinding {
