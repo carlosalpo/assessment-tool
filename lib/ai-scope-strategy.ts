@@ -8,6 +8,7 @@ import {
   type EvidenceReference,
   type OperationalStateFact
 } from "./ai-analysis.ts";
+import { patternForScope } from "./ai-scope-schemas.ts";
 
 export type AIScopeId =
   | "inventory"
@@ -109,6 +110,11 @@ export type AIScopePacket = {
   };
 };
 
+export type ScopePartition = {
+  id: string;
+  deviceHostnames: string[];
+};
+
 export type AIAnalysisAudit = {
   auditVersion: string;
   assessmentId: string;
@@ -153,6 +159,10 @@ export function isEvidenceTieringEnabled() {
   return process.env.AI_EVIDENCE_TIERING === "1";
 }
 
+export function isDomainPartitionEnabled() {
+  return process.env.AI_DOMAIN_PARTITION === "1";
+}
+
 export function getPromptVersion() {
   return isScopeBriefEnabled() ? "assessment-ai-prompts-v2" : "assessment-ai-prompts-v1";
 }
@@ -165,6 +175,9 @@ const compactEvidenceExcerptChars = 120;
 const smallAssessmentMaxInputTokens = 16000;
 const mediumAssessmentMaxInputTokens = 24000;
 const largeAssessmentMaxInputTokens = 32000;
+const domainPartitionDeviceThreshold = 20;
+const domainPartitionDeviceCap = 40;
+const maxDomainPartitions = 6;
 
 const scopeStrategies: Partial<Record<AIScopeId, AIScopeStrategy>> = {
   topology: {
@@ -304,15 +317,17 @@ export function buildAIScopePacket(input: {
   scopeId: AIScopeId;
   priorScopeResults?: any[];
   maxInputTokens?: number;
+  partitionDevices?: string[];
 }): AIScopePacket {
   const strategy = getAIScopeStrategy(input.scopeId);
   const context = buildAssessmentAIContext(input.record);
   const graph = buildAssessmentKnowledgeGraph(input.record);
+  const partitionDeviceSet = input.partitionDevices?.length ? new Set(input.partitionDevices.map(normalize)) : null;
   const relevantDeviceIds = new Set<string>();
   const relevantEvidenceIds = new Set<string>();
 
   const openCorrelationCandidates = graph.nodes.correlations
-    .filter((candidate) => isCorrelationRelevant(candidate, strategy, input.scopeId))
+    .filter((candidate) => isCorrelationRelevant(candidate, strategy, input.scopeId) && candidateMatchesPartition(candidate, partitionDeviceSet))
     .slice(0, input.scopeId === "topology" ? 90 : 50);
   for (const candidate of openCorrelationCandidates) {
     candidate.involvedDevices.forEach((device) => relevantDeviceIds.add(normalize(device)));
@@ -320,45 +335,51 @@ export function buildAIScopePacket(input: {
   }
 
   const devices = graph.nodes.devices
-    .filter((device) => isDeviceRelevant(device, input.scopeId, relevantDeviceIds))
+    .filter((device) => hostnameMatchesPartition(device.hostname, partitionDeviceSet) && isDeviceRelevant(device, input.scopeId, relevantDeviceIds))
     .slice(0, input.scopeId === "topology" ? 160 : 90);
   devices.forEach((device) => device.evidenceRefs.forEach((ref) => relevantEvidenceIds.add(ref)));
 
   const relationships = graph.nodes.relationships
-    .filter((relation) => input.scopeId === "topology" || relevantDeviceIds.has(normalize(relation.sourceDevice)) || relevantDeviceIds.has(normalize(relation.targetDevice)))
+    .filter((relation) => relationMatchesPartition(relation, partitionDeviceSet) && (input.scopeId === "topology" || relevantDeviceIds.has(normalize(relation.sourceDevice)) || relevantDeviceIds.has(normalize(relation.targetDevice))))
     .slice(0, input.scopeId === "topology" ? 140 : 60);
   relationships.forEach((relation) => relevantEvidenceIds.add(relation.evidenceSource));
 
   const configFacts = graph.nodes.configFacts
-    .filter((fact) => isConfigFactRelevant(fact, strategy, relevantDeviceIds))
+    .filter((fact) => hostnameMatchesPartition(fact.deviceId, partitionDeviceSet) && isConfigFactRelevant(fact, strategy, relevantDeviceIds))
     .slice(0, input.scopeId === "configuration" || input.scopeId === "security" ? 120 : 45);
   configFacts.forEach((fact) => relevantEvidenceIds.add(fact.evidenceRef));
 
   const stateFacts = graph.nodes.stateFacts
-    .filter((fact) => isStateFactRelevant(fact, strategy, relevantDeviceIds))
+    .filter((fact) => hostnameMatchesPartition(fact.deviceId, partitionDeviceSet) && isStateFactRelevant(fact, strategy, relevantDeviceIds))
     .slice(0, input.scopeId === "operations" || input.scopeId === "evidence" ? 120 : 45);
   stateFacts.forEach((fact) => relevantEvidenceIds.add(fact.evidenceRef));
 
   const performanceMetrics = graph.nodes.performanceMetrics
-    .filter((metric) => isMetricRelevant(metric, input.scopeId, relevantDeviceIds, openCorrelationCandidates))
+    .filter((metric) => hostnameMatchesPartition(metric.deviceId, partitionDeviceSet) && isMetricRelevant(metric, input.scopeId, relevantDeviceIds, openCorrelationCandidates))
     .slice(0, 70);
   performanceMetrics.forEach((metric) => relevantEvidenceIds.add(metric.evidenceRef));
 
   const deterministicFindings = graph.nodes.deterministicFindings
-    .filter((finding) => isFindingRelevant(finding, input.scopeId, relevantDeviceIds))
+    .filter((finding) => findingMatchesPartition(finding, partitionDeviceSet) && isFindingRelevant(finding, input.scopeId, relevantDeviceIds))
     .slice(0, 60);
-  const scopeDerivedFindings = buildScopeDerivedFindingRefs(context, graph, input.scopeId);
+  const scopeDerivedFindings = buildScopeDerivedFindingRefs(context, graph, input.scopeId)
+    .filter((finding) => findingMatchesPartition(finding, partitionDeviceSet));
   deterministicFindings.forEach((finding) => finding.evidenceRefs.forEach((ref) => relevantEvidenceIds.add(ref)));
   scopeDerivedFindings.forEach((finding) => finding.evidenceRefs.forEach((ref) => relevantEvidenceIds.add(ref)));
 
   const missingEvidence = context.missingEvidence
     .filter((item) => isMissingEvidenceRelevant(item, input.scopeId))
     .slice(0, 12)
-    .map((item) => ({ ...item, missingForDevices: item.missingForDevices.slice(0, 25) }));
+    .map((item) => ({
+      ...item,
+      missingForDevices: item.missingForDevices.filter((device) => hostnameMatchesPartition(device, partitionDeviceSet)).slice(0, 25)
+    }))
+    .filter((item) => !partitionDeviceSet || item.missingForDevices.length > 0);
 
   const unresolvedQuestions = missingEvidence.map((item) => `${item.expectedEvidence}: ${item.reason}`);
   const selectedEvidence = graph.nodes.evidenceRefs
     .filter((ref) => relevantEvidenceIds.has(ref.id) || evidenceMatchesStrategy(ref, strategy))
+    .filter((ref) => evidenceMatchesPartition(ref, partitionDeviceSet, relevantEvidenceIds))
     .map((ref) => isEvidenceTieringEnabled() ? ref : compactEvidenceRef(ref));
 
   const initialPacket: AIScopePacket = {
@@ -416,6 +437,34 @@ export function resolveMaxInputTokens(record: any, explicit?: number) {
   if (deviceCount < 20) return smallAssessmentMaxInputTokens;
   if (deviceCount <= 100) return mediumAssessmentMaxInputTokens;
   return largeAssessmentMaxInputTokens;
+}
+
+export function planScopePartitions(record: any, scopeId: AIScopeId, basePacket: AIScopePacket): ScopePartition[] {
+  if (
+    !isDomainPartitionEnabled() ||
+    !basePacket.budget.trimmed ||
+    patternForScope(scopeId) === "synthesis"
+  ) {
+    return [allScopePartition()];
+  }
+
+  const context = buildAssessmentAIContext(record);
+  const devices = context.devices
+    .map((device) => ({
+      hostname: String(device.hostname ?? "").trim(),
+      site: String(device.site ?? "unknown").trim() || "unknown"
+    }))
+    .filter((device) => device.hostname);
+
+  if (devices.length <= domainPartitionDeviceThreshold) return [allScopePartition()];
+
+  const pattern = patternForScope(scopeId);
+  const partitions = pattern === "graph"
+    ? planGraphPartitions(devices, context.topologyRelationships)
+    : planSitePartitions(devices);
+
+  if (partitions.length <= 1) return [allScopePartition()];
+  return applyPartitionCap(partitions);
 }
 
 export function createAIAnalysisAudit(input: {
@@ -829,6 +878,133 @@ function buildScopeDerivedFindingRefs(context: AssessmentAIContext, graph: Asses
 function evidenceMatchesStrategy(ref: EvidenceReference, strategy: AIScopeStrategy) {
   const value = `${ref.id} ${ref.sourceFile ?? ""} ${ref.command ?? ""} ${ref.excerpt ?? ""}`.toLowerCase();
   return strategy.evidenceKeywords.some((keyword) => value.includes(keyword.toLowerCase()));
+}
+
+function allScopePartition(): ScopePartition {
+  return { id: "all", deviceHostnames: [] };
+}
+
+function planGraphPartitions(
+  devices: Array<{ hostname: string; site: string }>,
+  relationships: AssessmentAIContext["topologyRelationships"]
+): ScopePartition[] {
+  if (relationships.length === 0) return planSitePartitions(devices);
+
+  const knownHosts = new Set(devices.map((device) => normalize(device.hostname)));
+  const labels = new Map(devices.map((device) => [normalize(device.hostname), device.hostname]));
+  const adjacency = new Map<string, Set<string>>();
+  for (const device of devices) adjacency.set(normalize(device.hostname), new Set());
+
+  for (const relation of relationships) {
+    const source = normalize(relation.sourceDevice);
+    const target = normalize(relation.targetDevice);
+    if (!knownHosts.has(source) || !knownHosts.has(target)) continue;
+    adjacency.get(source)?.add(target);
+    adjacency.get(target)?.add(source);
+  }
+
+  const visited = new Set<string>();
+  const partitions: ScopePartition[] = [];
+  for (const host of Array.from(adjacency.keys()).sort()) {
+    if (visited.has(host)) continue;
+    const stack = [host];
+    const component: string[] = [];
+    visited.add(host);
+    while (stack.length > 0) {
+      const current = stack.pop() as string;
+      component.push(labels.get(current) ?? current);
+      for (const next of Array.from(adjacency.get(current) ?? []).sort()) {
+        if (visited.has(next)) continue;
+        visited.add(next);
+        stack.push(next);
+      }
+    }
+    partitions.push({
+      id: `component-${String(partitions.length + 1).padStart(2, "0")}`,
+      deviceHostnames: uniqueSorted(component)
+    });
+  }
+  return partitions;
+}
+
+function planSitePartitions(devices: Array<{ hostname: string; site: string }>): ScopePartition[] {
+  const bySite = new Map<string, string[]>();
+  for (const device of devices) {
+    const site = partitionSlug(device.site || "unknown");
+    bySite.set(site, [...(bySite.get(site) ?? []), device.hostname]);
+  }
+
+  const partitions: ScopePartition[] = [];
+  for (const [site, hostnames] of Array.from(bySite.entries()).sort(([left], [right]) => left.localeCompare(right))) {
+    const sortedHostnames = uniqueSorted(hostnames);
+    for (let index = 0; index < sortedHostnames.length; index += domainPartitionDeviceCap) {
+      partitions.push({
+        id: `site-${site}-${String(Math.floor(index / domainPartitionDeviceCap) + 1).padStart(2, "0")}`,
+        deviceHostnames: sortedHostnames.slice(index, index + domainPartitionDeviceCap)
+      });
+    }
+  }
+  return partitions;
+}
+
+function applyPartitionCap(partitions: ScopePartition[]): ScopePartition[] {
+  const normalizedPartitions = partitions
+    .map((partition) => ({ ...partition, deviceHostnames: uniqueSorted(partition.deviceHostnames) }))
+    .filter((partition) => partition.deviceHostnames.length > 0);
+  if (normalizedPartitions.length <= maxDomainPartitions) return sortPartitions(normalizedPartitions);
+
+  const bySize = [...normalizedPartitions].sort((left, right) =>
+    right.deviceHostnames.length - left.deviceHostnames.length || left.id.localeCompare(right.id)
+  );
+  const kept = bySize.slice(0, maxDomainPartitions - 1);
+  const merged = bySize.slice(maxDomainPartitions - 1);
+  return sortPartitions([
+    ...kept,
+    {
+      id: "merged-small",
+      deviceHostnames: uniqueSorted(merged.flatMap((partition) => partition.deviceHostnames))
+    }
+  ]);
+}
+
+function sortPartitions(partitions: ScopePartition[]) {
+  return [...partitions].sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function partitionSlug(value: string) {
+  return normalize(value).replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "unknown";
+}
+
+function uniqueSorted(values: string[]) {
+  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean))).sort((left, right) => left.localeCompare(right));
+}
+
+function candidateMatchesPartition(candidate: CorrelationCandidate, partitionDeviceSet: Set<string> | null) {
+  return !partitionDeviceSet || candidate.involvedDevices.some((device) => partitionDeviceSet.has(normalize(device)));
+}
+
+function relationMatchesPartition(
+  relation: AssessmentAIContext["topologyRelationships"][number],
+  partitionDeviceSet: Set<string> | null
+) {
+  return !partitionDeviceSet ||
+    (partitionDeviceSet.has(normalize(relation.sourceDevice)) && partitionDeviceSet.has(normalize(relation.targetDevice)));
+}
+
+function hostnameMatchesPartition(hostname: string, partitionDeviceSet: Set<string> | null) {
+  return !partitionDeviceSet || partitionDeviceSet.has(normalize(hostname));
+}
+
+function findingMatchesPartition(finding: { affectedAssets?: string[] }, partitionDeviceSet: Set<string> | null) {
+  return !partitionDeviceSet || (Array.isArray(finding.affectedAssets) && finding.affectedAssets.some((device) => partitionDeviceSet.has(normalize(device))));
+}
+
+function evidenceMatchesPartition(ref: EvidenceReference, partitionDeviceSet: Set<string> | null, relevantEvidenceIds: Set<string>) {
+  if (!partitionDeviceSet) return true;
+  if (relevantEvidenceIds.has(ref.id)) return true;
+  if (ref.deviceId && partitionDeviceSet.has(normalize(ref.deviceId))) return true;
+  const source = `${ref.id} ${ref.sourceFile ?? ""}`.toLowerCase();
+  return Array.from(partitionDeviceSet).some((hostname) => source.includes(hostname));
 }
 
 function countIncludedDevices(record: any) {

@@ -6,7 +6,7 @@ import {
   getPromptVersion,
   summarizePriorScopeResults
 } from "./ai-scope-strategy.ts";
-import { buildScopeSystemPrompt, hashScopeInput } from "./ai-analysis-jobs.ts";
+import { buildScopeSystemPrompt, hashScopeInput, mergeScopePartitionResults } from "./ai-analysis-jobs.ts";
 
 test("buildScopeBrief caps top findings, sorts by severity and confidence, and extracts questions", () => {
   const brief = buildScopeBrief([
@@ -176,6 +176,57 @@ test("hashScopeInput changes when AI_EVIDENCE_TIERING is enabled", () => {
   });
 });
 
+test("hashScopeInput changes when AI_DOMAIN_PARTITION is enabled", () => {
+  const record = minimalRecord("assess_domain_partition_hash");
+
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined }, () => {
+    const offHash = hashScopeInput(record, "security");
+    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: "1" }, () => {
+      assert.notEqual(hashScopeInput(record, "security"), offHash);
+    });
+    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: "" }, () => {
+      assert.equal(hashScopeInput(record, "security"), offHash);
+    });
+  });
+});
+
+test("mergeScopePartitionResults dedupes findings and is stable when inputs are reordered", () => {
+  const partitions = [
+    { id: "site-a-01", deviceHostnames: ["core-01"] },
+    { id: "site-b-01", deviceHostnames: ["core-02"] }
+  ];
+  const resultA = {
+    partitionId: "site-a-01",
+    pattern: "entity",
+    findings: [
+      scopeFinding({ finding_id: "low-dup", title: "SNMP inseguro", severity: "medium", confidence: "low", related_devices: ["core-01"] }),
+      scopeFinding({ finding_id: "unique-a", title: "Telnet habilitado", severity: "high", confidence: "medium", related_devices: ["core-01"] })
+    ],
+    recommendations: ["Migrar a SNMPv3", "Deshabilitar Telnet"],
+    limitations: ["site-a limitation"]
+  };
+  const resultB = {
+    partitionId: "site-b-01",
+    pattern: "entity",
+    findings: [
+      scopeFinding({ finding_id: "high-dup", title: "SNMP inseguro", severity: "high", confidence: "high", related_devices: ["core-01"] }),
+      scopeFinding({ finding_id: "unique-b", title: "HTTP habilitado", severity: "medium", confidence: "medium", related_devices: ["core-02"] })
+    ],
+    recommendations: ["Migrar a SNMPv3", "Deshabilitar HTTP"],
+    limitations: ["site-b limitation"]
+  };
+
+  const merged = mergeScopePartitionResults("security", [resultB, resultA], partitions);
+  const reordered = mergeScopePartitionResults("security", [resultA, resultB], [...partitions].reverse());
+
+  assert.deepEqual(merged.findings, reordered.findings);
+  assert.deepEqual(merged.recommendations, ["Migrar a SNMPv3", "Deshabilitar Telnet", "Deshabilitar HTTP"]);
+  assert.equal(merged.partitions, 2);
+  assert.deepEqual(merged.partitionIds, ["site-a-01", "site-b-01"]);
+  assert.ok(merged.limitations.includes("merged from 2 partitions"));
+  assert.equal(merged.findings.find((finding: any) => finding.title === "SNMP inseguro")?.finding_id, "high-dup");
+});
+
 function finding(id: string, severity: string, confidence: string, findingType: string, validationQuestions: string[]) {
   return {
     finding_id: id,
@@ -187,6 +238,31 @@ function finding(id: string, severity: string, confidence: string, findingType: 
     evidence_refs: [`evidence-${id}`],
     technical_rationale: `First sentence for ${id}. Second sentence should not appear in rationale.`,
     validation_questions: validationQuestions
+  };
+}
+
+function scopeFinding(patch: Record<string, unknown>) {
+  return {
+    finding_id: "finding",
+    scope: "security",
+    title: "Finding",
+    finding_type: "probable_issue",
+    severity: "medium",
+    confidence: "medium",
+    evidence_refs: [],
+    related_fact_ids: [],
+    related_metric_ids: [],
+    related_correlation_ids: [],
+    evidence: [],
+    technical_rationale: "Rationale",
+    business_impact: "Impact",
+    recommendation: "Recommendation",
+    remediation_steps: [],
+    validation_questions: [],
+    related_devices: [],
+    related_sites: [],
+    dependencies: [],
+    ...patch
   };
 }
 

@@ -13,7 +13,10 @@ import {
   createAIAnalysisAudit,
   getPromptVersion,
   isEvidenceTieringEnabled,
+  isDomainPartitionEnabled,
   isScopeBriefEnabled,
+  planScopePartitions,
+  type ScopePartition,
   validateScopeAnalysisResult
 } from "./ai-scope-strategy.ts";
 import {
@@ -558,11 +561,37 @@ async function runPhase(input: {
   }
 
   if (input.phase === "scope_analysis") {
-    return callOpenAIForScopeAnalysis(input.scopeId, scopePacket, input.previousArtifacts, input.apiKey, model, {
-      jobId: input.jobId,
-      assessmentId: input.assessmentId,
-      debugCapture: input.debugCapture
-    });
+    const partitions = planScopePartitions(input.record, input.scopeId, scopePacket);
+    if (partitions.length <= 1) {
+      return callOpenAIForScopeAnalysis(input.scopeId, scopePacket, input.previousArtifacts, input.apiKey, model, {
+        jobId: input.jobId,
+        assessmentId: input.assessmentId,
+        debugCapture: input.debugCapture
+      });
+    }
+
+    const partitionResults = [];
+    for (const partition of [...partitions].sort((left, right) => left.id.localeCompare(right.id))) {
+      const partitionPacket = buildAIScopePacket({
+        record: input.record,
+        scopeId: input.scopeId,
+        priorScopeResults,
+        maxInputTokens: explicitMaxInputTokens,
+        partitionDevices: partition.deviceHostnames
+      });
+      const partitionResult = await callOpenAIForScopeAnalysis(input.scopeId, partitionPacket, input.previousArtifacts, input.apiKey, model, {
+        jobId: input.jobId,
+        assessmentId: input.assessmentId,
+        debugCapture: input.debugCapture
+      });
+      partitionResults.push({
+        ...partitionResult,
+        partitionId: partition.id,
+        partitionDevices: partition.deviceHostnames
+      });
+    }
+
+    return mergeScopePartitionResults(input.scopeId, partitionResults, partitions);
   }
 
   if (input.phase === "validation") {
@@ -1178,6 +1207,95 @@ function mergeScopeFindings(aiFindings: any[], deterministicFindings: any[]) {
   return Array.from(byId.values());
 }
 
+export function mergeScopePartitionResults(scopeId: AIAnalysisScopeId, results: any[], partitions: ScopePartition[]) {
+  const sortedPartitions = [...partitions].sort((left, right) => left.id.localeCompare(right.id));
+  const partitionIds = sortedPartitions.map((partition) => partition.id);
+  const sortedResults = [...results].sort((left, right) =>
+    String(left?.partitionId ?? "").localeCompare(String(right?.partitionId ?? ""))
+  );
+  const bySignature = new Map<string, any>();
+
+  for (const result of sortedResults) {
+    for (const finding of Array.isArray(result?.findings) ? result.findings : []) {
+      const signature = partitionFindingSignature(scopeId, finding);
+      const current = bySignature.get(signature);
+      if (!current || comparePartitionFindings(finding, current) > 0) bySignature.set(signature, finding);
+    }
+  }
+
+  const findings = Array.from(bySignature.values()).sort((left, right) =>
+    partitionFindingSignature(scopeId, left).localeCompare(partitionFindingSignature(scopeId, right))
+  );
+  const recommendations = uniqueStringValues(sortedResults.flatMap((result) => Array.isArray(result?.recommendations) ? result.recommendations : []));
+  const limitations = [
+    ...uniqueStringValues(sortedResults.flatMap((result) => Array.isArray(result?.limitations) ? result.limitations : [])),
+    `merged from ${sortedPartitions.length} partitions`
+  ];
+  const rejectedFindings = sortedResults.flatMap((result) => Array.isArray(result?.rejectedFindings) ? result.rejectedFindings : []);
+
+  return {
+    phase: "scope_analysis",
+    scopeId,
+    pattern: sortedResults.find((result) => result?.pattern)?.pattern ?? (usesPatternQuery(scopeId) ? patternForScope(scopeId) : "generic"),
+    findings,
+    recommendations,
+    limitations,
+    rejectedFindings,
+    partitions: sortedPartitions.length,
+    partitionIds,
+    partitionPlan: sortedPartitions.map((partition) => ({
+      id: partition.id,
+      deviceHostnames: partition.deviceHostnames
+    })),
+    partitionResults: sortedResults.map((result) => ({
+      partitionId: result?.partitionId,
+      findingCount: Array.isArray(result?.findings) ? result.findings.length : 0,
+      recommendationCount: Array.isArray(result?.recommendations) ? result.recommendations.length : 0,
+      rejectedFindingCount: Array.isArray(result?.rejectedFindings) ? result.rejectedFindings.length : 0,
+      audit: result?.audit,
+      packetSummary: result?.packetSummary
+    }))
+  };
+}
+
+function partitionFindingSignature(scopeId: AIAnalysisScopeId, finding: any) {
+  const scope = normalizeSignatureText(finding?.scope ?? scopeId);
+  const title = normalizeSignatureText(finding?.title ?? finding?.finding_id ?? "");
+  const devices = normalizeStringList(finding?.related_devices).map(normalizeSignatureText).sort().join(",");
+  return `${scope}|${title}|${devices}`;
+}
+
+function comparePartitionFindings(left: any, right: any) {
+  const severityDelta = severityScore(left?.severity) - severityScore(right?.severity);
+  if (severityDelta !== 0) return severityDelta;
+  const confidenceDelta = confidenceScore(left?.confidence) - confidenceScore(right?.confidence);
+  if (confidenceDelta !== 0) return confidenceDelta;
+  return String(right?.finding_id ?? "").localeCompare(String(left?.finding_id ?? ""));
+}
+
+function severityScore(value: unknown) {
+  const rank: Record<string, number> = { critical: 5, high: 4, medium: 3, low: 2, informational: 1, info: 1 };
+  return rank[String(value ?? "").toLowerCase()] ?? 0;
+}
+
+function confidenceScore(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const rank: Record<string, number> = { high: 3, medium: 2, low: 1 };
+  return rank[String(value ?? "").toLowerCase()] ?? 0;
+}
+
+function normalizeSignatureText(value: unknown) {
+  return String(value ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function normalizeStringList(value: unknown) {
+  return Array.isArray(value) ? value.map(String).map((item) => item.trim()).filter(Boolean) : [];
+}
+
+function uniqueStringValues(values: unknown[]) {
+  return Array.from(new Set(values.map(String).map((item) => item.trim()).filter(Boolean)));
+}
+
 function topologyRelationEvidence(relation: any, prefix: string) {
   return {
     source_type: "cli",
@@ -1277,6 +1395,7 @@ export function hashScopeInput(record: any, scopeId: AIAnalysisScopeId) {
       promptVersion: getPromptVersion(),
       ...(usesPatternQuery(scopeId) ? { patternQuery: true } : {}),
       ...(isEvidenceTieringEnabled() ? { evidenceTiering: true } : {}),
+      ...(isDomainPartitionEnabled() ? { domainPartition: true } : {}),
       engineVersion,
       client: context.client,
       assessment: context.assessment,

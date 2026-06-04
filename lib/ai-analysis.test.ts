@@ -16,6 +16,7 @@ import {
   buildAssessmentKnowledgeGraph,
   EVIDENCE_TOP_K,
   getAIScopeStrategy,
+  planScopePartitions,
   resolveMaxInputTokens,
   tierEvidenceRef,
   validateScopeAnalysisResult
@@ -330,6 +331,71 @@ test("resolveMaxInputTokens uses assessment size tiers only when evidence tierin
   });
 });
 
+test("planScopePartitions splits graph scopes by connected components without crossing them", () => {
+  withEnv({ AI_DOMAIN_PARTITION: "1" }, () => {
+    const input = domainRecord([
+      { site: "HQ", hostnames: Array.from({ length: 12 }, (_item, index) => `hq-${index}`) },
+      { site: "DR", hostnames: Array.from({ length: 12 }, (_item, index) => `dr-${index}`) }
+    ], true);
+    const packet = buildAIScopePacket({ record: input, scopeId: "topology", maxInputTokens: 1 });
+    const partitions = planScopePartitions(input, "topology", packet);
+
+    assert.equal(partitions.length, 2);
+    assert.ok(partitions.every((partition) => partition.deviceHostnames.length === 12));
+    assert.ok(partitions.some((partition) => partition.deviceHostnames.every((hostname) => hostname.startsWith("hq-"))));
+    assert.ok(partitions.some((partition) => partition.deviceHostnames.every((hostname) => hostname.startsWith("dr-"))));
+  });
+});
+
+test("planScopePartitions splits entity scopes by site and falls back to all when disabled or untrimmed", () => {
+  const input = domainRecord([
+    { site: "HQ", hostnames: Array.from({ length: 12 }, (_item, index) => `hq-sec-${index}`) },
+    { site: "DR", hostnames: Array.from({ length: 12 }, (_item, index) => `dr-sec-${index}`) }
+  ], false);
+
+  withEnv({ AI_DOMAIN_PARTITION: undefined }, () => {
+    const packet = buildAIScopePacket({ record: input, scopeId: "security", maxInputTokens: 1 });
+    assert.deepEqual(planScopePartitions(input, "security", packet), [{ id: "all", deviceHostnames: [] }]);
+  });
+
+  withEnv({ AI_DOMAIN_PARTITION: "1" }, () => {
+    const untrimmed = buildAIScopePacket({ record: input, scopeId: "security", maxInputTokens: 200000 });
+    assert.deepEqual(planScopePartitions(input, "security", untrimmed), [{ id: "all", deviceHostnames: [] }]);
+
+    const trimmed = buildAIScopePacket({ record: input, scopeId: "security", maxInputTokens: 1 });
+    const partitions = planScopePartitions(input, "security", trimmed);
+    assert.deepEqual(partitions.map((partition) => partition.id), ["site-dr-01", "site-hq-01"]);
+    assert.ok(partitions.every((partition) => partition.deviceHostnames.length === 12));
+  });
+});
+
+test("planScopePartitions respects the partition cap by consolidating small groups", () => {
+  withEnv({ AI_DOMAIN_PARTITION: "1" }, () => {
+    const input = domainRecord(Array.from({ length: 8 }, (_item, siteIndex) => ({
+      site: `Site ${siteIndex}`,
+      hostnames: Array.from({ length: 3 }, (_host, hostIndex) => `site-${siteIndex}-${hostIndex}`)
+    })), false);
+    const packet = buildAIScopePacket({ record: input, scopeId: "security", maxInputTokens: 1 });
+    const partitions = planScopePartitions(input, "security", packet);
+    const coveredDevices = partitions.flatMap((partition) => partition.deviceHostnames);
+
+    assert.equal(partitions.length, 6);
+    assert.ok(partitions.some((partition) => partition.id === "merged-small"));
+    assert.equal(new Set(coveredDevices).size, 24);
+  });
+});
+
+test("buildAIScopePacket partitionDevices restricts devices facts relationships and evidence", () => {
+  const packet = buildAIScopePacket({ record: baseInput(), scopeId: "security", partitionDevices: ["core-01"], maxInputTokens: 8000 });
+
+  assert.deepEqual(packet.graphSlice.devices.map((device) => device.hostname), ["core-01"]);
+  assert.ok(packet.graphSlice.configFacts.every((fact) => fact.deviceId === "core-01"));
+  assert.ok(packet.graphSlice.stateFacts.every((fact) => fact.deviceId === "core-01"));
+  assert.ok(packet.graphSlice.performanceMetrics.every((metric) => metric.deviceId === "core-01"));
+  assert.ok(packet.graphSlice.relationships.every((relation) => relation.sourceDevice === "core-01" && relation.targetDevice === "core-01"));
+  assert.equal(packet.evidencePack.some((ref) => ref.deviceId === "dist-01" || ref.deviceId === "core-02"), false);
+});
+
 test("validateScopeAnalysisResult rejects invented evidence, facts and correlations", () => {
   const packet = buildAIScopePacket({ record: baseInput(), scopeId: "security" });
   const result = validateScopeAnalysisResult({
@@ -609,6 +675,45 @@ function recordWithDeviceCount(count: number) {
   const record = baseInput();
   record.targetInventory = Array.from({ length: count }, (_item, index) => asset(`dev-${index}`, `10.20.0.${index}`, "C9300-48P", "access", "medium"));
   record.parsed.devices = Array.from({ length: count }, (_item, index) => device(`dev_${index}`, `dev-${index}`, "C9300-48P", "17.9.4"));
+  return record;
+}
+
+function domainRecord(groups: Array<{ site: string; hostnames: string[] }>, connectWithinGroups: boolean) {
+  const record = baseInput();
+  record.targetInventory = [];
+  record.evidenceFiles = [];
+  record.parsed.devices = [];
+  record.parsed.interfaces = [];
+  record.parsed.relations = [];
+  record.performance.metrics = [];
+
+  for (const group of groups) {
+    for (const [index, hostname] of group.hostnames.entries()) {
+      record.targetInventory.push({ ...asset(hostname, `10.30.${record.targetInventory.length}.1`, "C9300-48P", "access", "high"), site: group.site });
+      record.parsed.devices.push(device(`dev_${hostname}`, hostname, "C9300-48P", "17.9.4"));
+      record.evidenceFiles.push(evidence(`${hostname}.log`, [
+        `hostname ${hostname}`,
+        `snmp-server community public RO ${hostname}`,
+        "line vty 0 4",
+        " transport input ssh"
+      ].join("\n")));
+      if (connectWithinGroups && index > 0) {
+        const previous = group.hostnames[index - 1];
+        record.parsed.relations.push({
+          id: `rel_${previous}_${hostname}`,
+          localDeviceId: `dev_${previous}`,
+          localHostname: previous,
+          localInterface: "Te1/0/1",
+          remoteHostname: hostname,
+          remoteInterface: "Te1/0/1",
+          protocol: "cdp",
+          confidence: 0.9,
+          evidence: [`Device ID: ${hostname} Interface: Te1/0/1`]
+        });
+      }
+    }
+  }
+
   return record;
 }
 
