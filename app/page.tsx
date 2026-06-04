@@ -84,6 +84,7 @@ import {
   aiScopePhaseDisplay,
   crossScopeCorrelationDisplay,
   flagForStage,
+  scopeProgressFromStatus,
   type AIStageFlag,
   type AIScopeDisplayGroup,
   type AIScopeDisplayMetadata,
@@ -362,15 +363,6 @@ type SupportCoverageRow = LifecycleHardwareRow & {
   coverage?: SupportCoverageRecord;
 };
 
-type EvaluationRun = {
-  area: EvaluationArea;
-  status: "pending" | "running" | "complete" | "blocked";
-  progress: number;
-  message: string;
-  updatedAt?: string;
-  generatedFindingIds?: string[];
-};
-
 type AIAssessmentAnalysisStatus = {
   assessmentId: string;
   jobs: AIAnalysisJobSnapshot[];
@@ -454,7 +446,6 @@ type AssessmentRecord = {
   evidenceFiles: EvidenceFile[];
   parsed: ParsedAssessment;
   aiAnalysis: AIAnalysisState;
-  evaluationRuns: EvaluationRun[];
   updatedAt: string;
 };
 
@@ -970,7 +961,6 @@ export default function HomePage() {
       const jobScopeIds = new Set<string>(latestJob.steps.map((step) => step.scopeId));
       const importedResults = payload.results.filter((result) => latestJob.mode === "full" || jobScopeIds.has(result.scopeId));
       const findings = persistentAIResultsToFindings(importedResults, recordId);
-      const resultSummary = importedResults.map((result) => result.executiveSummary).filter(Boolean).join(" · ");
 
       setRecords((current) =>
         current.map((record) => {
@@ -983,7 +973,6 @@ export default function HomePage() {
               ...record.parsed,
               findings: [...record.parsed.findings, ...nextFindings]
             },
-            evaluationRuns: markPersistentAIRuns(record.evaluationRuns, latestJob, nextFindings.length, resultSummary),
             assessment: { ...record.assessment, status: nextFindings.length > 0 ? "review" : record.assessment.status },
             updatedAt: new Date().toISOString()
           };
@@ -1515,11 +1504,6 @@ export default function HomePage() {
     if (!selectedRecord) return;
     const mode = area === "complete" ? "full" : "scope";
     const scopeId = area === "complete" ? null : evaluationAreaToAIScope(area);
-    if (area === "complete") {
-      evaluationAreas.forEach((item) => startEvaluationRun(selectedRecord.id, item.id));
-    } else {
-      startEvaluationRun(selectedRecord.id, area);
-    }
     const response = await fetch("/api/ai-analysis/jobs", {
       method: "POST",
       headers: {
@@ -1534,14 +1518,7 @@ export default function HomePage() {
         requestedBy: currentUser?.email ?? currentUser?.name ?? "local-user"
       })
     });
-    const payload = await response.json().catch(() => null);
     if (!response.ok) {
-      const message = payload?.error || "No se pudo crear el job AI.";
-      if (area === "complete") {
-        evaluationAreas.forEach((item) => blockEvaluationRun(selectedRecord.id, item.id, message));
-      } else {
-        blockEvaluationRun(selectedRecord.id, area, message);
-      }
       return;
     }
 
@@ -1669,19 +1646,13 @@ export default function HomePage() {
 
     updateSelectedRecord((record) => {
       const areas = area === "complete" ? evaluationAreas.map((item) => item.id) : [area];
-      const runsByArea = new Map(record.evaluationRuns.map((run) => [run.area, run]));
-      const generatedIds = new Set(
-        areas.flatMap((currentArea) => runsByArea.get(currentArea)?.generatedFindingIds ?? [])
-      );
       const fallbackCategories = new Set(areas.map(areaToCategory));
       const clearLifecycle = areas.includes("lifecycle");
       const clearPerformance = area === "complete";
       const nextFindings =
         area === "complete"
           ? []
-          : record.parsed.findings.filter((finding) =>
-              generatedIds.size > 0 ? !generatedIds.has(finding.id) : !fallbackCategories.has(finding.category)
-            );
+          : record.parsed.findings.filter((finding) => !fallbackCategories.has(finding.category));
       const nextAIAnalysis =
         area === "complete"
           ? createDefaultAIAnalysisState()
@@ -1696,10 +1667,6 @@ export default function HomePage() {
           ...record.parsed,
           findings: nextFindings
         },
-        evaluationRuns:
-          area === "complete"
-            ? createDefaultRuns()
-            : upsertRun(record.evaluationRuns, defaultRun(area)),
         assessment: {
           ...record.assessment,
           status: nextFindings.length > 0 ? "review" : record.evidenceFiles.length > 0 ? "evidence" : "draft"
@@ -1739,34 +1706,6 @@ export default function HomePage() {
       supportCoverageRecords: {},
       supportCoverageConsultedSerials: [],
       supportCoverageMessage: "",
-      updatedAt: new Date().toISOString()
-    }));
-  }
-
-  function startEvaluationRun(recordId: string, area: EvaluationArea) {
-    updateRecord(recordId, (record) => ({
-      ...record,
-      evaluationRuns: upsertRun(record.evaluationRuns, {
-        area,
-        status: hasEvidenceForArea(record, area) ? "running" : "blocked",
-        progress: hasEvidenceForArea(record, area) ? 15 : 0,
-        message: hasEvidenceForArea(record, area) ? "Preparando contexto para evaluacion" : "Bloqueado: falta evidencia para este ambito",
-        updatedAt: new Date().toISOString()
-      }),
-      updatedAt: new Date().toISOString()
-    }));
-  }
-
-  function blockEvaluationRun(recordId: string, area: EvaluationArea, message: string) {
-    updateRecord(recordId, (record) => ({
-      ...record,
-      evaluationRuns: upsertRun(record.evaluationRuns, {
-        area,
-        status: "blocked",
-        progress: 0,
-        message,
-        updatedAt: new Date().toISOString()
-      }),
       updatedAt: new Date().toISOString()
     }));
   }
@@ -1917,7 +1856,6 @@ export default function HomePage() {
       operationalAssessment: createDefaultOperationalAssessment(assessmentId, clientId),
       performance: createDefaultPerformanceState(assessmentId),
       aiAnalysis: createDefaultAIAnalysisState(),
-      evaluationRuns: createDefaultRuns(),
       updatedAt: new Date().toISOString()
     };
 
@@ -7695,8 +7633,8 @@ function AiEvaluationTab({
   onRunPerformanceAi: () => void;
   onResetPerformance: () => void;
 }) {
-  const hasAnyAnalysis = record.parsed.findings.length > 0 || record.evaluationRuns.some((run) => run.status !== "pending" || run.progress > 0);
-  const hasRunningAnalysis = record.evaluationRuns.some((run) => run.status === "running") || hasRunningAIJob(aiAnalysisStatus);
+  const hasAnyAnalysis = record.parsed.findings.length > 0 || hasAnyScopeAnalysisActivity(aiAnalysisStatus);
+  const hasRunningAnalysis = hasRunningAIJob(aiAnalysisStatus);
   const performanceEnabled = record.scope.performanceAnalysis.enabled;
   const latestJob = aiAnalysisStatus?.jobs[0];
   const isAdmin = Boolean(currentUser && canManageUsers(currentUser));
@@ -7749,16 +7687,16 @@ function AiEvaluationTab({
           )}
           <div className="grid gap-3 md:grid-cols-2">
           {evaluationAreas.map((area) => {
-            const run = record.evaluationRuns.find((item) => item.area === area.id) ?? defaultRun(area.id);
             const scopeId = evaluationAreaToAIScope(area.id);
             const scopeStatus = aiAnalysisStatus?.scopes.find((scope) => scope.id === scopeId);
             const latestScopeJob = latestJob?.mode === "scope" && latestJob.scopeId === scopeId ? latestJob : undefined;
-            const isScopeRunning = latestScopeJob ? isActiveAIJobStatus(latestScopeJob.status) : false;
-            const scopeJob = latestScopeJob && isScopeRunning ? latestScopeJob : undefined;
+            const isScopeRunning = isScopeJobActive(scopeId, aiAnalysisStatus, latestJob);
             const areaFindings = record.parsed.findings.filter((finding) => finding.category === areaToCategory(area.id));
-            const canResetArea = run.status !== "pending" || run.progress > 0 || areaFindings.length > 0;
-            const displayedStatus = scopeStatus?.status ?? run.status;
+            const canResetArea = hasScopeDisplayActivity(scopeId, aiAnalysisStatus, latestJob, areaFindings);
+            const displayedStatus = statusForScopeDisplay(scopeId, aiAnalysisStatus, latestJob);
             const displayedStatusLabel = humanizeScopeStatus(displayedStatus);
+            const scopeProgress = scopeProgressFromStatus(scopeId, aiAnalysisStatus, latestJob);
+            const scopeMessage = scopeStatusMessage(scopeId, displayedStatus, scopeStatus, latestScopeJob ?? latestJob);
             const findingSummary = summarizeAreaFindings(areaFindings);
             const scopeDisplay = aiScopeDisplayOrder.find((scope) => scope.id === scopeId);
             const detailOpen = Boolean(expandedAreaDetails[area.id]);
@@ -7777,10 +7715,10 @@ function AiEvaluationTab({
                   </span>
                 </div>
                 <div className="mt-3 h-2 rounded-full bg-muted">
-                  <div className="h-2 rounded-full bg-primary" style={{ width: `${scopeJob?.progress ?? run.progress}%` }} />
+                  <div className="h-2 rounded-full bg-primary" style={{ width: `${scopeProgress}%` }} />
                 </div>
                 <p className="mt-2 text-xs text-muted-foreground">
-                  {scopeJob ? `${scopeJob.progress}% · ${scopeJob.currentPhase ?? "Procesando fases"}` : `${run.progress}% · ${scopeStatus?.updatedAt ? `${run.message} · Ultima evaluacion ${formatDate(scopeStatus.updatedAt)}` : run.message}`}
+                  {scopeProgress}% · {scopeMessage}
                 </p>
                 <CompactFindingSummary summary={findingSummary} />
                 <div className="mt-2 flex flex-wrap gap-3">
@@ -7826,7 +7764,7 @@ function AiEvaluationTab({
                       {
                         label: "Reset",
                         onSelect: () => onResetEvaluation(area.id),
-                        disabled: !canResetArea || run.status === "running"
+                        disabled: !canResetArea || isScopeRunning
                       }
                     ]}
                   />
@@ -8147,7 +8085,7 @@ function AIAnalysisJobStatusPanel({
       <div className="mt-3 grid gap-2 md:grid-cols-2">
         {Object.entries(grouped).slice(0, 8).map(([scopeId, steps]) => {
           const active = steps.find((step) => step.status === "running");
-          const scopeProgress = Math.round((steps.filter((step) => step.status === "completed" || step.status === "skipped").length / Math.max(steps.length, 1)) * 100);
+          const scopeProgress = scopeProgressFromStatus(scopeId, undefined, job);
           const stepStatus = active?.status ?? steps.at(-1)?.status ?? "pending";
           const stepStatusLabel = humanizeScopeStatus(stepStatus);
           return (
@@ -11535,8 +11473,7 @@ function normalizeRecord(record: AssessmentRecord) {
       charts: performance.charts ?? []
     },
     evidenceSkips: record.evidenceSkips ?? [],
-    aiAnalysis: normalizeAIAnalysisState(record.aiAnalysis),
-    evaluationRuns: record.evaluationRuns ?? createDefaultRuns()
+    aiAnalysis: normalizeAIAnalysisState(record.aiAnalysis)
   };
 }
 
@@ -11572,10 +11509,6 @@ function createDefaultScope(selectedDomains: Domain[]): ScopeDefinition {
     deliverables: defaultDeliverables,
     performanceAnalysis: createDefaultPerformanceScope()
   };
-}
-
-function createDefaultRuns(): EvaluationRun[] {
-  return evaluationAreas.map((area) => defaultRun(area.id));
 }
 
 function evaluationAreaLabel(area: EvaluationArea) {
@@ -11672,6 +11605,30 @@ function hasScopeDisplayActivity(
   ));
 }
 
+function hasAnyScopeAnalysisActivity(aiAnalysisStatus: AIAssessmentAnalysisStatus | undefined) {
+  return Boolean(aiAnalysisStatus?.scopes.some((scope) =>
+    scope.status !== "pending" || scope.inputHash || scope.updatedAt
+  ) || aiAnalysisStatus?.jobs.some((job) =>
+    job.steps.some((step) => step.status !== "pending" || step.inputHash || step.completedAt)
+  ));
+}
+
+function isScopeJobActive(
+  scopeId: AIScopeOrStageDisplayId,
+  aiAnalysisStatus: AIAssessmentAnalysisStatus | undefined,
+  latestJob: AIAnalysisJobSnapshot | undefined
+) {
+  const activeJobs = [
+    ...(latestJob ? [latestJob] : []),
+    ...(aiAnalysisStatus?.jobs ?? [])
+  ].filter((job) => isActiveAIJobStatus(job.status));
+  return activeJobs.some((job) =>
+    job.currentPhase?.startsWith(`${scopeId}:`) ||
+    job.scopeId === scopeId ||
+    job.steps.some((step) => step.scopeId === scopeId)
+  );
+}
+
 function statusForScopeDisplay(
   scopeId: AIScopeOrStageDisplayId,
   aiAnalysisStatus: AIAssessmentAnalysisStatus | undefined,
@@ -11685,6 +11642,20 @@ function statusForScopeDisplay(
     .filter((step) => step.scopeId === scopeId)
     .sort((left, right) => String(right.completedAt ?? right.startedAt ?? "").localeCompare(String(left.completedAt ?? left.startedAt ?? "")))[0];
   return latestStep?.status ?? "pending";
+}
+
+function scopeStatusMessage(
+  scopeId: AIScopeOrStageDisplayId,
+  status: string,
+  scopeStatus: AIAssessmentAnalysisStatus["scopes"][number] | undefined,
+  latestJob: AIAnalysisJobSnapshot | undefined
+) {
+  const statusLabel = humanizeScopeStatus(status).label;
+  const currentPhase = latestJob?.currentPhase?.startsWith(`${scopeId}:`)
+    ? latestJob.currentPhase.split(":").slice(1).join(":")
+    : null;
+  const updatedAt = scopeStatus?.updatedAt ? ` · Ultima evaluacion ${formatDate(scopeStatus.updatedAt)}` : "";
+  return currentPhase ? `${statusLabel} · ${currentPhase}${updatedAt}` : `${statusLabel}${updatedAt}`;
 }
 
 function isUIStageFlagEnabled(flag: AIStageFlag) {
@@ -11849,20 +11820,6 @@ function persistentAIFindingToFinding(finding: any, scopeId: string, assessmentI
   };
 }
 
-function markPersistentAIRuns(runs: EvaluationRun[], job: AIAnalysisJobSnapshot, findingCount: number, resultSummary?: string) {
-  const scopeIds = new Set(job.steps.map((step) => step.scopeId));
-  const areas = evaluationAreas.filter((area) => scopeIds.has(evaluationAreaToAIScope(area.id))).map((area) => area.id);
-  if (areas.length === 0) return runs;
-  return areas.reduce((nextRuns, area) => upsertRun(nextRuns, {
-    area,
-    status: job.status === "failed" ? "blocked" : "complete",
-    progress: 100,
-    message: findingCount > 0 ? `${findingCount} hallazgos agregados desde motor persistente` : resultSummary || "Evaluacion completada sin hallazgos soportados por evidencia",
-    updatedAt: new Date().toISOString(),
-    generatedFindingIds: []
-  }), runs);
-}
-
 function scopeToFindingCategory(scopeId: string): Finding["category"] {
   if (scopeId === "lifecycle") return "lifecycle";
   if (scopeId === "security" || scopeId === "perimeter") return "security";
@@ -11894,28 +11851,6 @@ function normalizePersistentAIConfidence(value: unknown) {
 
 function cleanPersistentAIText(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
-}
-
-function defaultRun(area: EvaluationArea): EvaluationRun {
-  return {
-    area,
-    status: "pending",
-    progress: 0,
-    message: "Pendiente de ejecucion"
-  };
-}
-
-function upsertRun(runs: EvaluationRun[], nextRun: EvaluationRun) {
-  const exists = runs.some((run) => run.area === nextRun.area);
-  return exists ? runs.map((run) => (run.area === nextRun.area ? nextRun : run)) : [...runs, nextRun];
-}
-
-function hasEvidenceForArea(record: AssessmentRecord, area: EvaluationArea) {
-  const effectiveParsed = effectiveParsedNetworkData(record);
-  if (area === "lifecycle") return record.targetInventory.length > 0 || effectiveParsed.devices.length > 0;
-  if (area === "topology") return effectiveParsed.relations.length > 0 || record.targetInventory.length > 1;
-  if (area === "logs") return record.evidenceFiles.some((file) => /log|show tech|logging/i.test(`${file.name}\n${file.content}`));
-  return record.evidenceFiles.length > 0 || effectiveParsed.devices.length > 0;
 }
 
 function areaToCategory(area: EvaluationArea): Finding["category"] {
@@ -13206,7 +13141,7 @@ function assessmentProgress(record: AssessmentRecord) {
     record.evidenceFiles.length > 0,
     effectiveParsed.devices.length > 0,
     effectiveParsed.relations.length > 0,
-    record.evaluationRuns.some((run) => run.status === "complete"),
+    record.parsed.findings.some((finding) => finding.aiMetadata),
     record.parsed.findings.length > 0,
     record.parsed.findings.some((finding) => finding.status === "validated")
   ];

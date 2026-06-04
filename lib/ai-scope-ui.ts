@@ -32,6 +32,33 @@ export type AIScopePhaseDisplay = {
   label: string;
 };
 
+type ScopeProgressStep = {
+  scopeId: string;
+  phaseName?: string;
+  status: string;
+  progress?: number | null;
+  inputHash?: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+};
+
+type ScopeProgressStatus = {
+  scopes?: Array<{
+    id: string;
+    status: string;
+  }>;
+  jobs?: Array<{
+    steps: ScopeProgressStep[];
+  }>;
+};
+
+type ScopeProgressJob = {
+  status?: string;
+  currentPhase?: string | null;
+  progress?: number | null;
+  steps: ScopeProgressStep[];
+};
+
 // Display-only mirror of lib/ai-analysis-jobs.ts fullAssessmentScopeOrder.
 // Keep this in sync when backend scope order changes; do not import server/prisma code into the client bundle.
 export const aiScopeDisplayOrder: AIScopeDisplayMetadata[] = [
@@ -72,4 +99,49 @@ export function flagForStage(scopeId: AIScopeOrStageDisplayId): AIStageFlag | nu
   if (scopeId === "cross_scope_correlation") return "AI_REDUCE_STAGE";
   if (scopeId === "roadmap" || scopeId === "executive_summary") return "AI_SYNTHESIS_STAGE";
   return null;
+}
+
+export function scopeProgressFromStatus(
+  scopeId: string,
+  aiAnalysisStatus?: ScopeProgressStatus,
+  latestJob?: ScopeProgressJob | null
+): number {
+  const scopeStatus = aiAnalysisStatus?.scopes?.find((scope) => scope.id === scopeId)?.status;
+  if (isCompletedScopeStatus(scopeStatus)) return 100;
+
+  const stepsByPhase = new Map<string, ScopeProgressStep>();
+  for (const step of [
+    ...(aiAnalysisStatus?.jobs ?? []).flatMap((job) => job.steps),
+    ...(latestJob?.steps ?? [])
+  ]) {
+    if (step.scopeId !== scopeId) continue;
+    stepsByPhase.set(step.phaseName ?? `${stepsByPhase.size}`, step);
+  }
+
+  const steps = Array.from(stepsByPhase.values());
+  const currentPhase = latestJob?.currentPhase;
+  const currentScopeIsActive = Boolean(currentPhase?.startsWith(`${scopeId}:`) && isActiveJobStatus(latestJob?.status));
+  if (steps.length === 0) return currentScopeIsActive ? 1 : 0;
+
+  const completedSteps = steps.filter((step) => isCompletedScopeStatus(step.status)).length;
+  const runningStep = steps.find((step) => step.status === "running" || currentPhase === `${step.scopeId}:${step.phaseName}`);
+  const runningStepProgress = typeof runningStep?.progress === "number" ? clampProgress(runningStep.progress) : 0;
+  const rawProgress = ((completedSteps + runningStepProgress / 100) / Math.max(steps.length, 1)) * 100;
+  const progress = Math.round(rawProgress);
+  if (currentScopeIsActive && progress === 0) return 1;
+  if (progress >= 100 && !isCompletedScopeStatus(scopeStatus)) return 99;
+  return clampProgress(progress);
+}
+
+function isCompletedScopeStatus(status: string | undefined) {
+  return status === "completed" || status === "complete" || status === "skipped" || status === "skipped_existing_result";
+}
+
+function isActiveJobStatus(status: string | undefined) {
+  return status === "queued" || status === "running";
+}
+
+function clampProgress(value: number) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, value));
 }

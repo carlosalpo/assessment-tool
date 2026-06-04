@@ -4,6 +4,7 @@ import {
   aiScopeDisplayOrder,
   crossScopeCorrelationDisplay,
   flagForStage,
+  scopeProgressFromStatus,
   type AIScopeDisplayGroup,
   type AIScopeOrStageDisplayId
 } from "./ai-scope-ui.ts";
@@ -69,4 +70,41 @@ test("flagForStage marks only reduce and synthesis stages", () => {
       assert.equal(flag, null);
     }
   }
+});
+
+test("scopeProgressFromStatus returns 0 for pending scopes without activity", () => {
+  assert.equal(scopeProgressFromStatus("security", { scopes: [{ id: "security", status: "pending" }], jobs: [] }), 0);
+});
+
+test("scopeProgressFromStatus is proportional to completed scope phases", () => {
+  const steps = [
+    { scopeId: "security", phaseName: "context_preparation", status: "completed" },
+    { scopeId: "security", phaseName: "evidence_extraction", status: "completed" },
+    { scopeId: "security", phaseName: "normalization", status: "pending" },
+    { scopeId: "security", phaseName: "scope_analysis", status: "pending" }
+  ];
+
+  assert.equal(scopeProgressFromStatus("security", { jobs: [{ steps }] }), 50);
+});
+
+test("scopeProgressFromStatus returns 100 for completed and skipped scopes", () => {
+  assert.equal(scopeProgressFromStatus("topology", { scopes: [{ id: "topology", status: "completed" }] }), 100);
+  assert.equal(scopeProgressFromStatus("topology", { scopes: [{ id: "topology", status: "skipped_existing_result" }] }), 100);
+});
+
+test("scopeProgressFromStatus reflects the active current phase", () => {
+  const steps = [
+    { scopeId: "operations", phaseName: "context_preparation", status: "completed" },
+    { scopeId: "operations", phaseName: "evidence_extraction", status: "running", progress: 40 },
+    { scopeId: "operations", phaseName: "normalization", status: "pending" },
+    { scopeId: "operations", phaseName: "scope_analysis", status: "pending" }
+  ];
+
+  const progress = scopeProgressFromStatus(
+    "operations",
+    { scopes: [{ id: "operations", status: "running" }], jobs: [{ steps }] },
+    { status: "running", currentPhase: "operations:evidence_extraction", steps }
+  );
+
+  assert.equal(progress, 35);
 });
