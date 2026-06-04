@@ -83,6 +83,7 @@ import {
   type AIScopeDisplayMetadata,
   type AIScopeOrStageDisplayId
 } from "@/lib/ai-scope-ui";
+import { buildPipelineView, type PipelineViewStage } from "@/lib/ai-pipeline-view";
 import {
   buildOperationalAIContext,
   createDefaultOperationalAssessment,
@@ -7695,6 +7696,7 @@ function AiEvaluationTab({
   const isAdmin = Boolean(currentUser && canManageUsers(currentUser));
   const [expandedAreaDetails, setExpandedAreaDetails] = useState<Partial<Record<EvaluationArea, boolean>>>({});
   const [showFullBreakdown, setShowFullBreakdown] = useState(false);
+  const pipelineStages = buildPipelineView(aiAnalysisStatus, latestJob).filter((stage) => shouldShowPipelineStage(stage, record, aiAnalysisStatus, latestJob));
 
   return (
     <div className="space-y-4">
@@ -7723,6 +7725,7 @@ function AiEvaluationTab({
           </div>
         </PanelHeader>
         <PanelBody className="space-y-3">
+          <AIEvaluationPipeline stages={pipelineStages} />
           {showFullBreakdown && (
             <FullEvaluationScopeBreakdown
               record={record}
@@ -7819,6 +7822,33 @@ function AiEvaluationTab({
       </Panel>
       {isAdmin && currentUser && <AIDebugAdminPanel record={record} currentUser={currentUser} />}
       <AIReviewPanel record={record} onUpdateFinding={onUpdateFinding} />
+    </div>
+  );
+}
+
+function AIEvaluationPipeline({ stages }: { stages: PipelineViewStage[] }) {
+  return (
+    <div className="rounded-md border border-border bg-muted/20 p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-semibold text-muted-foreground">Pipeline</span>
+        {stages.map((stage, index) => {
+          const statusLabel = humanizeScopeStatus(stage.status);
+          return (
+            <React.Fragment key={stage.stage}>
+              {index > 0 && <span className="text-xs text-muted-foreground">→</span>}
+              <div className={cn("flex flex-wrap items-center gap-2 rounded border px-2 py-1 text-xs", stage.active ? "border-primary bg-primary/10" : "border-border bg-background/60")}>
+                <span className="font-medium text-foreground">{stage.label}</span>
+                {stage.stage === "map" && <span className="text-muted-foreground">{stage.completed}/{stage.total} scopes</span>}
+                {stage.stage !== "map" && <span className="text-muted-foreground">{stage.completed}/{stage.total}</span>}
+                <span title={statusLabel.tooltip}>
+                  <Badge tone={scopeStatusTone(stage.status)}>{statusLabel.label}</Badge>
+                </span>
+                {stage.active && <Badge tone="info">Etapa activa</Badge>}
+              </div>
+            </React.Fragment>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -11472,6 +11502,25 @@ function shouldShowScopeDisplay(
   const flag = flagForStage(scope.id);
   if (!flag) return true;
   return isUIStageFlagEnabled(flag) || hasScopeDisplayActivity(scope.id, aiAnalysisStatus, latestJob, findings);
+}
+
+function shouldShowPipelineStage(
+  stage: PipelineViewStage,
+  record: AssessmentRecord,
+  aiAnalysisStatus: AIAssessmentAnalysisStatus | undefined,
+  latestJob: AIAnalysisJobSnapshot | undefined
+) {
+  if (stage.stage === "map") return true;
+  if (stage.stage === "reduce") {
+    const findings = findingsForScopeDisplay(record.parsed.findings, crossScopeCorrelationDisplay);
+    return shouldShowScopeDisplay(crossScopeCorrelationDisplay, aiAnalysisStatus, latestJob, findings);
+  }
+  return ["roadmap", "executive_summary"].some((scopeId) => {
+    const scope = aiScopeDisplayOrder.find((item) => item.id === scopeId);
+    if (!scope) return false;
+    const findings = findingsForScopeDisplay(record.parsed.findings, scope);
+    return shouldShowScopeDisplay(scope, aiAnalysisStatus, latestJob, findings);
+  });
 }
 
 function hasScopeDisplayActivity(
