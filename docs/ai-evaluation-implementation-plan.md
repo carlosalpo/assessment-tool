@@ -44,6 +44,22 @@ INC-1 -> INC-2 -> INC-3a/3b/3c -> (INC-4, INC-5 en paralelo) -> INC-6 -> INC-7 -
 - INC-7 (Synthesize) requiere INC-6.
 - INC-8 (retiro Tier B) solo ocurre cuando exista la capa consolidada (INC-6/7).
 
+## Incrementos UI/UX del Tab "Evaluacion AI"
+
+El rediseno UX del tab se documenta en [`docs/ai-evaluation-ux.md`](ai-evaluation-ux.md). Ese plan conserva la fachada de 6 areas como vista principal, revela los 16 scopes reales de "Evaluacion completa" bajo expansion y alinea la UI con Map -> Reduce -> Synthesize.
+
+Resumen de incrementos:
+
+| ID | Objetivo | Verificacion especifica |
+|---|---|---|
+| **UI-INC-1** | Humanizar estados y fases sin cambiar layout. | `tsc` + smoke del tab; badges no muestran strings crudos. |
+| **UI-INC-2** | Mostrar resumen de resultado por scope-card. | Conteos por severidad/tipo/pendientes visibles y consistentes. |
+| **UI-INC-3** | Agregar detalle expandible por area y desglose de los 16 scopes de evaluacion completa. | La vista principal sigue siendo de 6 areas; el detalle completo esta a un clic. |
+| **UI-INC-4** | Mostrar pipeline Map -> Reduce -> Synthesize y avance por etapa. | Job full muestra progreso por etapa sin cambiar `POST /api/ai-analysis/jobs`. |
+| **UI-INC-5** | Unificar Performance con la scope-card. | Performance conserva preprocesamiento/AI review con estados humanizados. |
+| **UI-INC-6** | Consolidar acciones y enlazar scope con `AIReviewPanel`. | Accion primaria + overflow; filtros por scope/area funcionan. |
+| **UI-INC-7** | Eliminar `record.evaluationRuns` como fuente de estado. | Estado/progreso provienen de DB; coordinado con Tier B / INC-8. |
+
 ## Ciclo de vida de flags
 
 Cada flag nace OFF, se verifica, recibe un flip minimo para quedar ON por default, y se elimina en un cleanup posterior cuando este estable.

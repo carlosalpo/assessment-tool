@@ -236,6 +236,7 @@ Glosario:
 Roadmap de implementacion:
 
 - Plan detallado de rollout por incrementos: [`docs/ai-evaluation-implementation-plan.md`](ai-evaluation-implementation-plan.md).
+- Auditoria UX y plan de rediseno del Tab "Evaluacion AI": [`docs/ai-evaluation-ux.md`](ai-evaluation-ux.md).
 - Harness offline de hallazgos esperados: [`eval/README.md`](../eval/README.md).
 - Fase 3: push escalonados.
 - Fase 4: evaluacion de hallazgos esperados.
