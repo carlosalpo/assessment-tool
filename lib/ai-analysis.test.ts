@@ -329,7 +329,11 @@ test("validateScopeAnalysisResult accepts evidence-bound security findings", () 
       validation_questions: [],
       related_devices: ["core-01"],
       related_sites: ["HQ"],
-      dependencies: []
+      dependencies: [],
+      entity_target: "core-01",
+      expected_state: "SNMPv3 o comunidades no inseguras",
+      observed_state: "snmp-server community public RO",
+      standard_or_control: "Management plane hardening"
     }]
   }, packet);
   assert.equal(result.validFindings.length, 1);

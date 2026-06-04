@@ -5,6 +5,7 @@ import {
   patternForScope,
   scopeAnalysisResultSchemaForPattern,
   scopePattern,
+  usesPatternQuery,
   type ScopeQueryPattern
 } from "./ai-scope-schemas.ts";
 import type { AIScopeId } from "./ai-scope-strategy.ts";
@@ -66,6 +67,29 @@ test("patternForScope returns expected representative patterns", () => {
   assert.equal(patternForScope("security"), "entity");
   assert.equal(patternForScope("evidence"), "aggregation");
   assert.equal(patternForScope("roadmap"), "synthesis");
+});
+
+test("usesPatternQuery wires only entity scopes in INC-3a and only when flag is enabled", () => {
+  const original = process.env.AI_PATTERN_QUERIES;
+  try {
+    delete process.env.AI_PATTERN_QUERIES;
+    assert.equal(usesPatternQuery("security"), false);
+    process.env.AI_PATTERN_QUERIES = "";
+    assert.equal(usesPatternQuery("security"), false);
+    process.env.AI_PATTERN_QUERIES = "1";
+    assert.equal(usesPatternQuery("security"), true);
+    assert.equal(usesPatternQuery("configuration"), true);
+    assert.equal(usesPatternQuery("performance"), true);
+    assert.equal(usesPatternQuery("topology"), false);
+    assert.equal(usesPatternQuery("evidence"), false);
+    assert.equal(usesPatternQuery("roadmap"), false);
+  } finally {
+    if (original === undefined) {
+      delete process.env.AI_PATTERN_QUERIES;
+    } else {
+      process.env.AI_PATTERN_QUERIES = original;
+    }
+  }
 });
 
 test("baseFindingSchema keeps the current generic finding contract", () => {

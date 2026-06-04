@@ -15,6 +15,11 @@ import {
   isScopeBriefEnabled,
   validateScopeAnalysisResult
 } from "./ai-scope-strategy.ts";
+import {
+  patternForScope,
+  scopeAnalysisResultSchemaForPattern,
+  usesPatternQuery
+} from "./ai-scope-schemas.ts";
 
 export type AIAnalysisJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "partially_completed";
 export type AIAnalysisStepStatus = "pending" | "running" | "completed" | "failed" | "skipped" | "cancelled";
@@ -610,6 +615,7 @@ async function callOpenAIForScopeAnalysis(
   const deterministicScopeFindings = deterministicFindingsToScopeAnalysisFindings(deterministicFindings, scopePacket);
   const promptVersion = getPromptVersion();
   const audit = createAIAnalysisAudit({ packet: scopePacket, model, promptVersion, engineVersion });
+  const resultSchema = usesPatternQuery(scopeId) ? scopeAnalysisResultSchemaForPattern(patternForScope(scopeId)) : scopeAnalysisResultSchema();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), Number(process.env.OPENAI_TIMEOUT_MS ?? 90000));
   const requestBody = {
@@ -619,15 +625,7 @@ async function callOpenAIForScopeAnalysis(
         role: "system",
         content: [{
           type: "input_text",
-          text: [
-            "Eres un arquitecto senior Cisco ejecutando una fase incremental de assessment.",
-            "No inventes equipos, rutas, conexiones ni vulnerabilidades.",
-            "Usa solo el AIScopePacket provisto. No uses conocimiento externo para completar datos faltantes.",
-            "Todo hallazgo debe tener evidencia_refs existentes en AIScopePacket.evidencePack o debe clasificarse como visibility_gap/validation_required.",
-            "Respeta la estrategia, tipos de hallazgo y reglas de validacion especificas del ambito.",
-            "Si la evidencia es insuficiente, usa validation_required o visibility_gap en vez de inferir.",
-            `Prompt version: ${promptVersion}. Engine version: ${engineVersion}.`
-          ].join("\n")
+          text: buildScopeSystemPrompt(scopeId)
         }]
       },
       {
@@ -655,7 +653,7 @@ async function callOpenAIForScopeAnalysis(
         type: "json_schema",
         name: "scope_analysis_result",
         strict: true,
-        schema: scopeAnalysisResultSchema()
+        schema: resultSchema
       }
     }
   };
@@ -714,6 +712,7 @@ async function callOpenAIForScopeAnalysis(
       ...parsed,
       phase: "scope_analysis",
       scopeId,
+      pattern: usesPatternQuery(scopeId) ? patternForScope(scopeId) : "generic",
       audit,
       packetSummary: summarizeScopePacket(scopePacket),
       findings: mergedFindings,
@@ -788,6 +787,7 @@ function deterministicScopeAnalysisFallback(scopeId: AIAnalysisScopeId, findings
   return {
     phase: "scope_analysis",
     scopeId,
+    pattern: usesPatternQuery(scopeId) ? patternForScope(scopeId) : "generic",
     provider: "deterministic-fallback",
     findings,
     recommendations: Array.from(new Set(findings.map((finding: any) => finding.recommendation).filter(Boolean))),
@@ -910,6 +910,23 @@ function summarizeScopePacket(packet: ReturnType<typeof buildAIScopePacket>) {
     evidenceRefs: packet.evidencePack.length,
     budget: packet.budget
   };
+}
+
+export function buildScopeSystemPrompt(scopeId: AIAnalysisScopeId) {
+  const promptVersion = getPromptVersion();
+  const lines = [
+    "Eres un arquitecto senior Cisco ejecutando una fase incremental de assessment.",
+    "No inventes equipos, rutas, conexiones ni vulnerabilidades.",
+    "Usa solo el AIScopePacket provisto. No uses conocimiento externo para completar datos faltantes.",
+    "Todo hallazgo debe tener evidencia_refs existentes en AIScopePacket.evidencePack o debe clasificarse como visibility_gap/validation_required.",
+    "Respeta la estrategia, tipos de hallazgo y reglas de validacion especificas del ambito.",
+    "Si la evidencia es insuficiente, usa validation_required o visibility_gap en vez de inferir.",
+    `Prompt version: ${promptVersion}. Engine version: ${engineVersion}.`
+  ];
+  if (usesPatternQuery(scopeId) && patternForScope(scopeId) === "entity") {
+    lines.splice(lines.length - 1, 0, "Razona por equipo/grupo contra el estandar/control esperado. Para cada hallazgo completa `entity_target` (equipo o grupo), `expected_state`, `observed_state` y `standard_or_control`. No infieras estado sin fact/evidencia; usa visibility_gap/validation_required si falta.");
+  }
+  return lines.join("\n");
 }
 
 function scopeAnalysisResultSchema() {
@@ -1248,6 +1265,7 @@ export function hashScopeInput(record: any, scopeId: AIAnalysisScopeId) {
     .update(stableStringify({
       scopeId,
       promptVersion: getPromptVersion(),
+      ...(usesPatternQuery(scopeId) ? { patternQuery: true } : {}),
       engineVersion,
       client: context.client,
       assessment: context.assessment,

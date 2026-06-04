@@ -6,7 +6,7 @@ import {
   getPromptVersion,
   summarizePriorScopeResults
 } from "./ai-scope-strategy.ts";
-import { hashScopeInput } from "./ai-analysis-jobs.ts";
+import { buildScopeSystemPrompt, hashScopeInput } from "./ai-analysis-jobs.ts";
 
 test("buildScopeBrief caps top findings, sorts by severity and confidence, and extracts questions", () => {
   const brief = buildScopeBrief([
@@ -116,6 +116,35 @@ test("hashScopeInput changes when AI_SCOPE_BRIEF changes the effective prompt ve
   }
 });
 
+test("buildScopeSystemPrompt keeps the base prompt unless an entity pattern query is wired", () => {
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined }, () => {
+    assert.equal(buildScopeSystemPrompt("security"), baseSystemPrompt());
+  });
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: "1" }, () => {
+    const entityPrompt = buildScopeSystemPrompt("security");
+    assert.notEqual(entityPrompt, baseSystemPrompt());
+    assert.match(entityPrompt, /Razona por equipo\/grupo contra el estandar\/control esperado/);
+    assert.match(entityPrompt, /entity_target/);
+    assert.match(entityPrompt, /No inventes equipos, rutas, conexiones ni vulnerabilidades/);
+    assert.match(entityPrompt, /Usa solo el AIScopePacket provisto/);
+    assert.match(entityPrompt, /evidencia_refs existentes/);
+    assert.equal(buildScopeSystemPrompt("topology"), baseSystemPrompt());
+  });
+});
+
+test("hashScopeInput changes only for wired entity scopes when AI_PATTERN_QUERIES is enabled", () => {
+  const record = minimalRecord("assess_pattern_hash");
+
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined }, () => {
+    const securityOff = hashScopeInput(record, "security");
+    const topologyOff = hashScopeInput(record, "topology");
+    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: "1" }, () => {
+      assert.notEqual(hashScopeInput(record, "security"), securityOff);
+      assert.equal(hashScopeInput(record, "topology"), topologyOff);
+    });
+  });
+});
+
 function finding(id: string, severity: string, confidence: string, findingType: string, validationQuestions: string[]) {
   return {
     finding_id: id,
@@ -128,4 +157,51 @@ function finding(id: string, severity: string, confidence: string, findingType: 
     technical_rationale: `First sentence for ${id}. Second sentence should not appear in rationale.`,
     validation_questions: validationQuestions
   };
+}
+
+function minimalRecord(id: string) {
+  return {
+    id,
+    client: { id: `${id}_client`, name: "HashCo", industry: "Network", owner: "Arquitectura", createdAt: "2026-06-01" },
+    assessment: { id, clientId: `${id}_client`, name: "Hash Test", domains: ["enterprise-networking"], status: "review", createdAt: "2026-06-01" },
+    scope: { performanceAnalysis: { enabled: false, mode: "snapshot" } },
+    targetInventory: [],
+    evidenceFiles: [],
+    parsed: {},
+    performance: {}
+  };
+}
+
+function baseSystemPrompt() {
+  return [
+    "Eres un arquitecto senior Cisco ejecutando una fase incremental de assessment.",
+    "No inventes equipos, rutas, conexiones ni vulnerabilidades.",
+    "Usa solo el AIScopePacket provisto. No uses conocimiento externo para completar datos faltantes.",
+    "Todo hallazgo debe tener evidencia_refs existentes en AIScopePacket.evidencePack o debe clasificarse como visibility_gap/validation_required.",
+    "Respeta la estrategia, tipos de hallazgo y reglas de validacion especificas del ambito.",
+    "Si la evidencia es insuficiente, usa validation_required o visibility_gap en vez de inferir.",
+    "Prompt version: assessment-ai-prompts-v1. Engine version: ai-analysis-engine-v2."
+  ].join("\n");
+}
+
+function withEnv(values: Record<string, string | undefined>, run: () => void) {
+  const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+  try {
+    for (const [key, value] of Object.entries(values)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    run();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
 }

@@ -4,6 +4,8 @@ type JsonSchema = Record<string, any>;
 
 export type ScopeQueryPattern = "graph" | "entity" | "aggregation" | "synthesis";
 
+const WIRED_PATTERN_QUERIES = new Set<ScopeQueryPattern>(["entity"]);
+
 export const scopePattern: Record<AIScopeId, ScopeQueryPattern> = {
   inventory: "entity",
   configuration: "entity",
@@ -25,6 +27,10 @@ export const scopePattern: Record<AIScopeId, ScopeQueryPattern> = {
 
 export function patternForScope(scopeId: AIScopeId): ScopeQueryPattern {
   return scopePattern[scopeId];
+}
+
+export function usesPatternQuery(scopeId: AIScopeId): boolean {
+  return process.env.AI_PATTERN_QUERIES === "1" && WIRED_PATTERN_QUERIES.has(patternForScope(scopeId));
 }
 
 export function baseFindingSchema(): JsonSchema {
