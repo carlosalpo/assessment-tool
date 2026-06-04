@@ -1,5 +1,7 @@
 import type { Finding, RiskLevel } from "@/lib/types";
 
+export type FindingAreaFilter = "topology" | "configuration" | "security" | "lifecycle" | "operations" | "logs";
+
 export type AreaFindingSummary = {
   total: number;
   bySeverity: Record<RiskLevel, number>;
@@ -9,6 +11,24 @@ export type AreaFindingSummary = {
 
 const severityKeys: RiskLevel[] = ["critical", "high", "medium", "low", "info"];
 const completedAIStatuses = new Set<Finding["status"]>(["accepted", "validated", "discarded"]);
+const areaCategoryMap: Record<FindingAreaFilter, Finding["category"]> = {
+  topology: "resiliency",
+  configuration: "configuration",
+  security: "security",
+  lifecycle: "lifecycle",
+  operations: "operations",
+  logs: "operations"
+};
+
+export function areaToFindingCategory(area: FindingAreaFilter): Finding["category"] {
+  return areaCategoryMap[area];
+}
+
+export function filterFindingsByArea(findings: Finding[], area: FindingAreaFilter | null | undefined): Finding[] {
+  if (!area) return findings;
+  const category = areaToFindingCategory(area);
+  return findings.filter((finding) => finding.category === category);
+}
 
 export function summarizeAreaFindings(findings: Finding[]): AreaFindingSummary {
   const bySeverity = severityKeys.reduce((acc, risk) => {

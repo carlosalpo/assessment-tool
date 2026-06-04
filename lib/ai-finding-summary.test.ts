@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { summarizeAreaFindings } from "./ai-finding-summary.ts";
+import { filterFindingsByArea, summarizeAreaFindings } from "./ai-finding-summary.ts";
 import type { Finding } from "./types.ts";
 
 test("summarizeAreaFindings returns zero counts for empty input", () => {
@@ -44,6 +44,20 @@ test("summarizeAreaFindings counts severity, finding type and pending validation
     visibility_gap: 1
   });
   assert.equal(summary.pendingValidation, 3);
+});
+
+test("filterFindingsByArea filters by mapped assessment area category", () => {
+  const findings = [
+    finding({ id: "topology", category: "resiliency" }),
+    finding({ id: "security", category: "security" }),
+    finding({ id: "operations", category: "operations" }),
+    finding({ id: "configuration", category: "configuration" })
+  ];
+
+  assert.deepEqual(filterFindingsByArea(findings, "topology").map((item) => item.id), ["topology"]);
+  assert.deepEqual(filterFindingsByArea(findings, "logs").map((item) => item.id), ["operations"]);
+  assert.deepEqual(filterFindingsByArea(findings, "lifecycle").map((item) => item.id), []);
+  assert.deepEqual(filterFindingsByArea(findings, null).map((item) => item.id), findings.map((item) => item.id));
 });
 
 function finding(patch: Partial<Finding> = {}): Finding {

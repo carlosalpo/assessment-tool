@@ -38,6 +38,7 @@ import {
   Upload,
   UserPlus,
   Users,
+  MoreHorizontal,
   X,
   ZoomIn,
   ZoomOut
@@ -71,7 +72,12 @@ import {
   executiveSummaryFindings,
   type AIAnalysisState
 } from "@/lib/ai-analysis";
-import { summarizeAreaFindings, type AreaFindingSummary } from "@/lib/ai-finding-summary";
+import {
+  areaToFindingCategory,
+  filterFindingsByArea,
+  summarizeAreaFindings,
+  type AreaFindingSummary
+} from "@/lib/ai-finding-summary";
 import { humanizeScopeStatus } from "@/lib/ai-status-labels";
 import {
   aiScopeDisplayOrder,
@@ -7696,6 +7702,7 @@ function AiEvaluationTab({
   const isAdmin = Boolean(currentUser && canManageUsers(currentUser));
   const [expandedAreaDetails, setExpandedAreaDetails] = useState<Partial<Record<EvaluationArea, boolean>>>({});
   const [showFullBreakdown, setShowFullBreakdown] = useState(false);
+  const [scopeFindingFilter, setScopeFindingFilter] = useState<EvaluationArea | null>(null);
   const pipelineStages = buildPipelineView(aiAnalysisStatus, latestJob).filter((stage) => shouldShowPipelineStage(stage, record, aiAnalysisStatus, latestJob));
 
   return (
@@ -7755,6 +7762,7 @@ function AiEvaluationTab({
             const findingSummary = summarizeAreaFindings(areaFindings);
             const scopeDisplay = aiScopeDisplayOrder.find((scope) => scope.id === scopeId);
             const detailOpen = Boolean(expandedAreaDetails[area.id]);
+            const findingsFilterActive = scopeFindingFilter === area.id;
             return (
               <div key={area.id} className="rounded-md border border-border p-3">
                 <div className="flex items-start justify-between gap-3">
@@ -7775,14 +7783,24 @@ function AiEvaluationTab({
                   {scopeJob ? `${scopeJob.progress}% · ${scopeJob.currentPhase ?? "Procesando fases"}` : `${run.progress}% · ${scopeStatus?.updatedAt ? `${run.message} · Ultima evaluacion ${formatDate(scopeStatus.updatedAt)}` : run.message}`}
                 </p>
                 <CompactFindingSummary summary={findingSummary} />
-                <button
-                  type="button"
-                  className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
-                  onClick={() => setExpandedAreaDetails((current) => ({ ...current, [area.id]: !current[area.id] }))}
-                >
-                  {detailOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                  Ver detalle
-                </button>
+                <div className="mt-2 flex flex-wrap gap-3">
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+                    onClick={() => setExpandedAreaDetails((current) => ({ ...current, [area.id]: !current[area.id] }))}
+                  >
+                    {detailOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                    Ver detalle
+                  </button>
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+                    onClick={() => setScopeFindingFilter((current) => current === area.id ? null : area.id)}
+                  >
+                    <Search size={14} />
+                    {findingsFilterActive ? "Ocultar filtro" : "Ver hallazgos"}
+                  </button>
+                </div>
                 {detailOpen && scopeDisplay && (
                   <ScopeDetailPanel
                     scope={scopeDisplay}
@@ -7793,18 +7811,25 @@ function AiEvaluationTab({
                   />
                 )}
                 <div className="mt-3 flex flex-wrap gap-2">
-                  <Button variant="secondary" size="sm" onClick={() => onRunEvaluation(area.id)} disabled={isScopeRunning || hasRunningAnalysis}>
+                  <Button size="sm" onClick={() => onRunEvaluation(area.id)} disabled={isScopeRunning || hasRunningAnalysis}>
                     <PlayCircle size={14} />
                     Evaluar
                   </Button>
-                  <Button variant="secondary" size="sm" onClick={() => onRunEvaluation(area.id, { forceReevaluate: true })} disabled={isScopeRunning || hasRunningAnalysis}>
-                    <RotateCcw size={14} />
-                    Forzar
-                  </Button>
-                  <Button variant="ghost" size="sm" onClick={() => onResetEvaluation(area.id)} disabled={!canResetArea || run.status === "running"}>
-                    <RotateCcw size={14} />
-                    Reset
-                  </Button>
+                  <CardOverflowMenu
+                    label={`Acciones de ${area.label}`}
+                    actions={[
+                      {
+                        label: "Forzar re-evaluación",
+                        onSelect: () => onRunEvaluation(area.id, { forceReevaluate: true }),
+                        disabled: isScopeRunning || hasRunningAnalysis
+                      },
+                      {
+                        label: "Reset",
+                        onSelect: () => onResetEvaluation(area.id),
+                        disabled: !canResetArea || run.status === "running"
+                      }
+                    ]}
+                  />
                 </div>
               </div>
             );
@@ -7821,7 +7846,73 @@ function AiEvaluationTab({
         </PanelBody>
       </Panel>
       {isAdmin && currentUser && <AIDebugAdminPanel record={record} currentUser={currentUser} />}
-      <AIReviewPanel record={record} onUpdateFinding={onUpdateFinding} />
+      <AIReviewPanel
+        record={record}
+        scopeFindingFilter={scopeFindingFilter}
+        onClearScopeFindingFilter={() => setScopeFindingFilter(null)}
+        onUpdateFinding={onUpdateFinding}
+      />
+    </div>
+  );
+}
+
+function CardOverflowMenu({
+  label,
+  actions
+}: {
+  label: string;
+  actions: Array<{ label: string; onSelect: () => void; disabled?: boolean }>;
+}) {
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function handlePointerDown(event: PointerEvent) {
+      if (!menuRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  return (
+    <div ref={menuRef} className="relative">
+      <Button
+        variant="secondary"
+        size="icon"
+        aria-label={label}
+        aria-expanded={open}
+        aria-haspopup="menu"
+        onClick={() => setOpen((current) => !current)}
+      >
+        <MoreHorizontal size={16} />
+      </Button>
+      {open && (
+        <div className="absolute right-0 z-20 mt-1 min-w-44 rounded-md border border-border bg-white p-1 shadow-lg" role="menu">
+          {actions.map((action) => (
+            <button
+              key={action.label}
+              type="button"
+              role="menuitem"
+              disabled={action.disabled}
+              className="flex w-full items-center rounded px-3 py-2 text-left text-xs font-medium text-foreground hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
+              onClick={() => {
+                setOpen(false);
+                action.onSelect();
+              }}
+            >
+              {action.label}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -8326,11 +8417,23 @@ function DebugJsonBlock({
   );
 }
 
-function AIReviewPanel({ record, onUpdateFinding }: { record: AssessmentRecord; onUpdateFinding: (id: string, patch: Partial<Finding>) => void }) {
+function AIReviewPanel({
+  record,
+  scopeFindingFilter,
+  onClearScopeFindingFilter,
+  onUpdateFinding
+}: {
+  record: AssessmentRecord;
+  scopeFindingFilter: EvaluationArea | null;
+  onClearScopeFindingFilter: () => void;
+  onUpdateFinding: (id: string, patch: Partial<Finding>) => void;
+}) {
   const [statusFilter, setStatusFilter] = useState<"all" | Finding["status"]>("all");
   const aiFindingsById = new Map(record.parsed.findings.filter((finding) => finding.aiMetadata).map((finding) => [finding.id, finding]));
-  const aiFindings = Array.from(aiFindingsById.values()).filter((finding) => statusFilter === "all" || finding.status === statusFilter);
+  const areaFilteredFindings = filterFindingsByArea(Array.from(aiFindingsById.values()), scopeFindingFilter);
+  const aiFindings = areaFilteredFindings.filter((finding) => statusFilter === "all" || finding.status === statusFilter);
   const acceptedCount = aiFindings.filter((finding) => finding.status === "accepted" || finding.status === "edited" || finding.status === "validated").length;
+  const filterLabel = scopeFindingFilter ? evaluationAreaLabel(scopeFindingFilter) : null;
 
   return (
     <Panel>
@@ -8358,6 +8461,15 @@ function AIReviewPanel({ record, onUpdateFinding }: { record: AssessmentRecord; 
         </select>
       </PanelHeader>
       <PanelBody className="space-y-4">
+        {scopeFindingFilter && filterLabel && (
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <Badge tone="info">Filtrando: {filterLabel}</Badge>
+            <Button variant="ghost" size="sm" onClick={onClearScopeFindingFilter}>
+              <X size={14} />
+              Limpiar filtro
+            </Button>
+          </div>
+        )}
         {record.aiAnalysis.limitations.length > 0 && (
           <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-950 dark:border-amber-500/50 dark:bg-amber-950/30 dark:text-amber-100">
             <p className="font-semibold">Limitaciones de analisis</p>
@@ -8414,6 +8526,19 @@ function PerformanceAnalysisRunCard({
   const performanceFindings = record.parsed.findings.filter((finding) => finding.serviceOffer === "Performance Analysis");
   const findingSummary = summarizeAreaFindings(performanceFindings);
   const processIsPrimary = record.performance.metrics.length === 0;
+  const performancePrimaryAction = processIsPrimary
+    ? {
+        label: "Procesar evidencia",
+        icon: <PlayCircle size={14} />,
+        onClick: onProcessPerformance,
+        disabled: record.performance.evidenceFiles.length === 0
+      }
+    : {
+        label: "Evaluar con AI",
+        icon: <Bot size={14} />,
+        onClick: onRunPerformanceAi,
+        disabled: record.performance.findings.length === 0
+      };
   return (
     <div className="rounded-md border border-border p-3">
       <div className="flex items-start justify-between gap-3">
@@ -8435,18 +8560,20 @@ function PerformanceAnalysisRunCard({
       </p>
       <CompactFindingSummary summary={findingSummary} />
       <div className="mt-3 flex flex-wrap gap-2">
-        <Button variant={processIsPrimary ? "primary" : "secondary"} size="sm" onClick={onProcessPerformance} disabled={record.performance.evidenceFiles.length === 0}>
-          <PlayCircle size={14} />
-          Procesar evidencia
+        <Button size="sm" onClick={performancePrimaryAction.onClick} disabled={performancePrimaryAction.disabled}>
+          {performancePrimaryAction.icon}
+          {performancePrimaryAction.label}
         </Button>
-        <Button variant="secondary" size="sm" onClick={onRunPerformanceAi} disabled={record.performance.findings.length === 0}>
-          <Bot size={14} />
-          Evaluar con AI
-        </Button>
-        <Button variant="ghost" size="sm" onClick={onResetPerformance} disabled={record.performance.evidenceFiles.length === 0 && record.performance.metrics.length === 0 && record.performance.findings.length === 0}>
-          <RotateCcw size={14} />
-          Reset
-        </Button>
+        <CardOverflowMenu
+          label="Acciones de Performance"
+          actions={[
+            {
+              label: "Reset",
+              onSelect: onResetPerformance,
+              disabled: record.performance.evidenceFiles.length === 0 && record.performance.metrics.length === 0 && record.performance.findings.length === 0
+            }
+          ]}
+        />
       </div>
     </div>
   );
@@ -11792,15 +11919,7 @@ function hasEvidenceForArea(record: AssessmentRecord, area: EvaluationArea) {
 }
 
 function areaToCategory(area: EvaluationArea): Finding["category"] {
-  const map: Record<EvaluationArea, Finding["category"]> = {
-    topology: "resiliency",
-    configuration: "configuration",
-    security: "security",
-    lifecycle: "lifecycle",
-    operations: "operations",
-    logs: "operations"
-  };
-  return map[area];
+  return areaToFindingCategory(area);
 }
 
 const riskSeverities = [
