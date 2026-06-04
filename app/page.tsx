@@ -8410,6 +8410,10 @@ function PerformanceAnalysisRunCard({
   onResetPerformance: () => void;
 }) {
   const progress = Math.max(record.performance.assessment.dataCoverageScore, record.performance.metrics.length > 0 ? 70 : 0);
+  const performanceStatusLabel = humanizeScopeStatus(record.performance.assessment.status);
+  const performanceFindings = record.parsed.findings.filter((finding) => finding.serviceOffer === "Performance Analysis");
+  const findingSummary = summarizeAreaFindings(performanceFindings);
+  const processIsPrimary = record.performance.metrics.length === 0;
   return (
     <div className="rounded-md border border-border p-3">
       <div className="flex items-start justify-between gap-3">
@@ -8417,9 +8421,11 @@ function PerformanceAnalysisRunCard({
           <p className="text-sm font-semibold">Performance Analysis</p>
           <p className="mt-1 text-xs text-muted-foreground">Procesa evidencia de rendimiento, genera metricas, hallazgos con evidencia y contexto para AI.</p>
         </div>
-        <Badge tone={record.performance.assessment.status === "processed" || record.performance.assessment.status === "ai_reviewed" ? "success" : "warning"}>
-          {record.performance.assessment.status}
-        </Badge>
+        <span title={performanceStatusLabel.tooltip}>
+          <Badge tone={scopeStatusTone(record.performance.assessment.status)}>
+            {performanceStatusLabel.label}
+          </Badge>
+        </span>
       </div>
       <div className="mt-3 h-2 rounded-full bg-muted">
         <div className="h-2 rounded-full bg-primary" style={{ width: `${progress}%` }} />
@@ -8427,14 +8433,15 @@ function PerformanceAnalysisRunCard({
       <p className="mt-2 text-xs text-muted-foreground">
         {record.performance.metrics.length} metricas · {record.performance.findings.length} hallazgos · confianza {record.performance.assessment.confidenceScore}%
       </p>
+      <CompactFindingSummary summary={findingSummary} />
       <div className="mt-3 flex flex-wrap gap-2">
-        <Button variant="secondary" size="sm" onClick={onProcessPerformance} disabled={record.performance.evidenceFiles.length === 0}>
+        <Button variant={processIsPrimary ? "primary" : "secondary"} size="sm" onClick={onProcessPerformance} disabled={record.performance.evidenceFiles.length === 0}>
           <PlayCircle size={14} />
-          Evaluar
+          Procesar evidencia
         </Button>
         <Button variant="secondary" size="sm" onClick={onRunPerformanceAi} disabled={record.performance.findings.length === 0}>
           <Bot size={14} />
-          AI review
+          Evaluar con AI
         </Button>
         <Button variant="ghost" size="sm" onClick={onResetPerformance} disabled={record.performance.evidenceFiles.length === 0 && record.performance.metrics.length === 0 && record.performance.findings.length === 0}>
           <RotateCcw size={14} />
@@ -11568,8 +11575,8 @@ function hasRunningAIJob(status?: AIAssessmentAnalysisStatus) {
 
 function scopeStatusTone(status: string | undefined): React.ComponentProps<typeof Badge>["tone"] {
   if (status === "ok") return "success";
-  if (status === "completed" || status === "complete") return "success";
-  if (status === "running" || status === "queued" || status === "pending") return "warning";
+  if (status === "completed" || status === "complete" || status === "processed" || status === "ai_reviewed" || status === "validated") return "success";
+  if (status === "running" || status === "queued" || status === "pending" || status === "draft" || status === "evidence_loaded" || status === "processing") return "warning";
   if (status === "error" || status === "timeout" || status === "failed" || status === "blocked" || status === "cancelled") return "danger";
   if (status === "skipped" || status === "partially_completed") return "info";
   return "neutral";

@@ -8,6 +8,18 @@ const scopeStatusLabels: Record<string, HumanizedScopeStatus> = {
     label: "Pendiente",
     tooltip: "Aún no evaluado."
   },
+  draft: {
+    label: "Borrador",
+    tooltip: "Aún no hay evidencia procesada."
+  },
+  evidence_loaded: {
+    label: "Evidencia cargada",
+    tooltip: "Evidencia cargada; pendiente de procesar métricas."
+  },
+  processing: {
+    label: "Procesando",
+    tooltip: "Extrayendo métricas de la evidencia."
+  },
   queued: {
     label: "En cola",
     tooltip: "En espera de ejecución."
@@ -23,6 +35,18 @@ const scopeStatusLabels: Record<string, HumanizedScopeStatus> = {
   complete: {
     label: "Completado",
     tooltip: "Evaluado con la evidencia disponible."
+  },
+  processed: {
+    label: "Procesado",
+    tooltip: "Métricas extraídas; listo para evaluación AI."
+  },
+  ai_reviewed: {
+    label: "Revisado por IA",
+    tooltip: "Evaluado por IA; pendiente de validación del arquitecto."
+  },
+  validated: {
+    label: "Validado",
+    tooltip: "Revisado y validado por el arquitecto."
   },
   skipped: {
     label: "Reutilizado",

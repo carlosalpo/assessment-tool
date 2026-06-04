@@ -4,10 +4,16 @@ import { humanizeScopeStatus } from "./ai-status-labels.ts";
 
 const expectedStatuses = new Map([
   ["pending", "Pendiente"],
+  ["draft", "Borrador"],
+  ["evidence_loaded", "Evidencia cargada"],
+  ["processing", "Procesando"],
   ["queued", "En cola"],
   ["running", "En curso"],
   ["completed", "Completado"],
   ["complete", "Completado"],
+  ["processed", "Procesado"],
+  ["ai_reviewed", "Revisado por IA"],
+  ["validated", "Validado"],
   ["skipped", "Reutilizado"],
   ["skipped_existing_result", "Reutilizado"],
   ["partially_completed", "Parcial"],
