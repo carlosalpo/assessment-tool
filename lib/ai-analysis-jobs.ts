@@ -926,6 +926,9 @@ export function buildScopeSystemPrompt(scopeId: AIAnalysisScopeId) {
   if (usesPatternQuery(scopeId) && patternForScope(scopeId) === "entity") {
     lines.splice(lines.length - 1, 0, "Razona por equipo/grupo contra el estandar/control esperado. Para cada hallazgo completa `entity_target` (equipo o grupo), `expected_state`, `observed_state` y `standard_or_control`. No infieras estado sin fact/evidencia; usa visibility_gap/validation_required si falta.");
   }
+  if (usesPatternQuery(scopeId) && patternForScope(scopeId) === "graph") {
+    lines.splice(lines.length - 1, 0, "Razona de forma relacional sobre el grafo de topologia (vecinos CDP/LLDP, port-channel, vPC/stack/HA). Para cada hallazgo completa `affected_relationships` (pares 'devA:intf <-> devB:intf'), `topology_basis` y `coverage_note`. No afirmes SPOF ni single-homed sin evidencia topologica relacionada; si falta CDP/LLDP usa visibility_gap.");
+  }
   return lines.join("\n");
 }
 

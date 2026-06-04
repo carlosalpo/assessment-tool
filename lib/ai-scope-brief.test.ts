@@ -116,7 +116,7 @@ test("hashScopeInput changes when AI_SCOPE_BRIEF changes the effective prompt ve
   }
 });
 
-test("buildScopeSystemPrompt keeps the base prompt unless an entity pattern query is wired", () => {
+test("buildScopeSystemPrompt keeps the base prompt unless an entity or graph pattern query is wired", () => {
   withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined }, () => {
     assert.equal(buildScopeSystemPrompt("security"), baseSystemPrompt());
   });
@@ -128,19 +128,27 @@ test("buildScopeSystemPrompt keeps the base prompt unless an entity pattern quer
     assert.match(entityPrompt, /No inventes equipos, rutas, conexiones ni vulnerabilidades/);
     assert.match(entityPrompt, /Usa solo el AIScopePacket provisto/);
     assert.match(entityPrompt, /evidencia_refs existentes/);
-    assert.equal(buildScopeSystemPrompt("topology"), baseSystemPrompt());
+    assert.equal(buildScopeSystemPrompt("evidence"), baseSystemPrompt());
+    const graphPrompt = buildScopeSystemPrompt("topology");
+    assert.notEqual(graphPrompt, baseSystemPrompt());
+    assert.match(graphPrompt, /Razona de forma relacional sobre el grafo de topologia/);
+    assert.match(graphPrompt, /affected_relationships/);
+    assert.match(graphPrompt, /No afirmes SPOF ni single-homed sin evidencia topologica relacionada/);
+    assert.match(graphPrompt, /No inventes equipos, rutas, conexiones ni vulnerabilidades/);
   });
 });
 
-test("hashScopeInput changes only for wired entity scopes when AI_PATTERN_QUERIES is enabled", () => {
+test("hashScopeInput changes only for wired entity and graph scopes when AI_PATTERN_QUERIES is enabled", () => {
   const record = minimalRecord("assess_pattern_hash");
 
   withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined }, () => {
     const securityOff = hashScopeInput(record, "security");
     const topologyOff = hashScopeInput(record, "topology");
+    const evidenceOff = hashScopeInput(record, "evidence");
     withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: "1" }, () => {
       assert.notEqual(hashScopeInput(record, "security"), securityOff);
-      assert.equal(hashScopeInput(record, "topology"), topologyOff);
+      assert.notEqual(hashScopeInput(record, "topology"), topologyOff);
+      assert.equal(hashScopeInput(record, "evidence"), evidenceOff);
     });
   });
 });

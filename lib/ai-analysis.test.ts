@@ -340,6 +340,73 @@ test("validateScopeAnalysisResult accepts evidence-bound security findings", () 
   assert.equal(result.rejectedFindings.length, 0);
 });
 
+test("validateScopeAnalysisResult accepts graph findings with graph extension fields", () => {
+  const packet = buildAIScopePacket({ record: baseInput(), scopeId: "topology" });
+  const topologyRef = packet.evidencePack.find((item) => item.relationId) ?? packet.evidencePack[0];
+  const result = validateScopeAnalysisResult({
+    findings: [{
+      finding_id: "topology_neighbor_coverage",
+      scope: "topology",
+      title: "Cobertura topologica limitada entre core y distribucion",
+      finding_type: "probable_issue",
+      severity: "medium",
+      confidence: "medium",
+      evidence_refs: [topologyRef.id],
+      related_fact_ids: [],
+      related_metric_ids: [],
+      related_correlation_ids: [],
+      evidence: [{ source_type: "cli", source_name: topologyRef.id, hostname: topologyRef.deviceId ?? null, command: topologyRef.command ?? null, excerpt: topologyRef.excerpt }],
+      technical_rationale: "La evidencia CDP/LLDP disponible muestra una relacion limitada que requiere validacion de redundancia.",
+      business_impact: "Puede limitar la visibilidad de dependencia fisica.",
+      recommendation: "Validar vecinos y redundancia declarada.",
+      remediation_steps: ["Revisar CDP/LLDP y diagrama fisico"],
+      validation_questions: [],
+      related_devices: ["core-01", "dist-01"],
+      related_sites: ["HQ"],
+      dependencies: [],
+      affected_relationships: ["core-01:Te1/0/1 <-> dist-01:Te1/0/1"],
+      topology_basis: "Evidencia de vecinos CDP/LLDP.",
+      coverage_note: "Cobertura parcial basada en evidencia disponible."
+    }]
+  }, packet);
+  assert.equal(result.validFindings.length, 1);
+  assert.equal(result.rejectedFindings.length, 0);
+});
+
+test("validateScopeAnalysisResult still rejects topology SPOF without topology evidence", () => {
+  const packet = buildAIScopePacket({ record: baseInput(), scopeId: "topology" });
+  const nonTopologyRef = packet.evidencePack.find((item) => !item.relationId) ?? packet.evidencePack[0];
+  const result = validateScopeAnalysisResult({
+    findings: [{
+      finding_id: "topology_spof_without_topology_evidence",
+      scope: "topology",
+      title: "Equipo critico single-homed sin redundancia",
+      finding_type: "probable_issue",
+      severity: "high",
+      confidence: "medium",
+      evidence_refs: [nonTopologyRef.id],
+      related_fact_ids: [],
+      related_metric_ids: [],
+      related_correlation_ids: [],
+      evidence: [{ source_type: "inventory", source_name: nonTopologyRef.id, hostname: nonTopologyRef.deviceId ?? null, command: nonTopologyRef.command ?? null, excerpt: nonTopologyRef.excerpt }],
+      technical_rationale: "El texto afirma single-homed sin apuntar a una relacion topologica.",
+      business_impact: "Puede ser un punto unico de falla.",
+      recommendation: "Validar fisicamente redundancia.",
+      remediation_steps: ["Levantar vecinos CDP/LLDP"],
+      validation_questions: [],
+      related_devices: ["dist-01"],
+      related_sites: ["HQ"],
+      dependencies: [],
+      affected_relationships: [],
+      topology_basis: "Inventario solamente.",
+      coverage_note: "Sin evidencia topologica relacionada."
+    }]
+  }, packet);
+  assert.equal(result.validFindings.length, 0);
+  assert.equal(result.rejectedFindings.length, 1);
+  assert.match(result.rejectedFindings[0].reason, /SPOF o single-homed requiere evidencia topologica/);
+});
+
 test("validateScopeAnalysisResult rejects high security findings backed only by inventory evidence", () => {
   const packet = buildAIScopePacket({ record: baseInput(), scopeId: "security" });
   const inventoryRef = packet.evidencePack.find((item) => !item.configFactId) ?? packet.evidencePack[0];
