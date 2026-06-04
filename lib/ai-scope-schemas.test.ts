@@ -69,7 +69,7 @@ test("patternForScope returns expected representative patterns", () => {
   assert.equal(patternForScope("roadmap"), "synthesis");
 });
 
-test("usesPatternQuery wires entity and graph scopes in INC-3b only when flag is enabled", () => {
+test("usesPatternQuery wires map patterns but not synthesis scopes when flag is enabled", () => {
   const original = process.env.AI_PATTERN_QUERIES;
   try {
     delete process.env.AI_PATTERN_QUERIES;
@@ -82,7 +82,8 @@ test("usesPatternQuery wires entity and graph scopes in INC-3b only when flag is
     assert.equal(usesPatternQuery("performance"), true);
     assert.equal(usesPatternQuery("topology"), true);
     assert.equal(usesPatternQuery("high_availability"), true);
-    assert.equal(usesPatternQuery("evidence"), false);
+    assert.equal(usesPatternQuery("evidence"), true);
+    assert.equal(usesPatternQuery("operations"), true);
     assert.equal(usesPatternQuery("roadmap"), false);
   } finally {
     if (original === undefined) {

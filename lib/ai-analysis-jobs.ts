@@ -929,6 +929,9 @@ export function buildScopeSystemPrompt(scopeId: AIAnalysisScopeId) {
   if (usesPatternQuery(scopeId) && patternForScope(scopeId) === "graph") {
     lines.splice(lines.length - 1, 0, "Razona de forma relacional sobre el grafo de topologia (vecinos CDP/LLDP, port-channel, vPC/stack/HA). Para cada hallazgo completa `affected_relationships` (pares 'devA:intf <-> devB:intf'), `topology_basis` y `coverage_note`. No afirmes SPOF ni single-homed sin evidencia topologica relacionada; si falta CDP/LLDP usa visibility_gap.");
   }
+  if (usesPatternQuery(scopeId) && patternForScope(scopeId) === "aggregation") {
+    lines.splice(lines.length - 1, 0, "Razona por agregacion temporal/recurrencia o por ausencia (gap). Para cada hallazgo completa `aggregation_basis` (ventana/recurrencia o ausencia detectada), `occurrence_count` (entero), `time_window` y `correlated_entity`. No marques 'recurrente' con una sola evidencia: requiere >=2 evidencias o una ventana temporal; si es evento aislado usa probable_issue/validation_required, y si falta monitoreo/documentacion usa visibility_gap.");
+  }
   return lines.join("\n");
 }
 

@@ -407,6 +407,75 @@ test("validateScopeAnalysisResult still rejects topology SPOF without topology e
   assert.match(result.rejectedFindings[0].reason, /SPOF o single-homed requiere evidencia topologica/);
 });
 
+test("validateScopeAnalysisResult accepts aggregation findings with aggregation extension fields", () => {
+  const packet = buildAIScopePacket({ record: baseInput(), scopeId: "evidence" });
+  const refs = packet.evidencePack.slice(0, 2);
+  const result = validateScopeAnalysisResult({
+    findings: [{
+      finding_id: "evidence_recurrent_protocol_events",
+      scope: "evidence",
+      title: "Eventos recurrentes de inestabilidad de protocolo",
+      finding_type: "probable_issue",
+      severity: "medium",
+      confidence: "medium",
+      evidence_refs: refs.map((ref) => ref.id),
+      related_fact_ids: [],
+      related_metric_ids: [],
+      related_correlation_ids: [],
+      evidence: refs.map((ref) => ({ source_type: "cli", source_name: ref.id, hostname: ref.deviceId ?? null, command: ref.command ?? null, excerpt: ref.excerpt })),
+      technical_rationale: "La recurrencia esta soportada por multiples evidencias del paquete.",
+      business_impact: "Puede indicar inestabilidad operacional.",
+      recommendation: "Correlacionar eventos por ventana y dispositivo.",
+      remediation_steps: ["Revisar logs y vecinos afectados"],
+      validation_questions: [],
+      related_devices: ["core-01"],
+      related_sites: ["HQ"],
+      dependencies: [],
+      aggregation_basis: "Multiples eventos observados en la evidencia disponible.",
+      occurrence_count: 2,
+      time_window: "snapshot",
+      correlated_entity: "core-01"
+    }]
+  }, packet);
+  assert.equal(result.validFindings.length, 1);
+  assert.equal(result.rejectedFindings.length, 0);
+});
+
+test("validateScopeAnalysisResult still rejects recurrent evidence findings with fewer than two refs", () => {
+  const packet = buildAIScopePacket({ record: baseInput(), scopeId: "evidence" });
+  const ref = packet.evidencePack[0];
+  const result = validateScopeAnalysisResult({
+    findings: [{
+      finding_id: "evidence_recurrent_single_ref",
+      scope: "evidence",
+      title: "Evento recurrente de error con una sola evidencia",
+      finding_type: "probable_issue",
+      severity: "medium",
+      confidence: "medium",
+      evidence_refs: [ref.id],
+      related_fact_ids: [],
+      related_metric_ids: [],
+      related_correlation_ids: [],
+      evidence: [{ source_type: "cli", source_name: ref.id, hostname: ref.deviceId ?? null, command: ref.command ?? null, excerpt: ref.excerpt }],
+      technical_rationale: "Afirma evento recurrente aunque solo hay una evidencia.",
+      business_impact: "Riesgo no soportado por recurrencia.",
+      recommendation: "Validar mas logs.",
+      remediation_steps: [],
+      validation_questions: [],
+      related_devices: ["core-01"],
+      related_sites: ["HQ"],
+      dependencies: [],
+      aggregation_basis: "Una sola evidencia.",
+      occurrence_count: 1,
+      time_window: "snapshot",
+      correlated_entity: "core-01"
+    }]
+  }, packet);
+  assert.equal(result.validFindings.length, 0);
+  assert.equal(result.rejectedFindings.length, 1);
+  assert.match(result.rejectedFindings[0].reason, /Recurrencia en logs\/eventos requiere multiples evidencias/);
+});
+
 test("validateScopeAnalysisResult rejects high security findings backed only by inventory evidence", () => {
   const packet = buildAIScopePacket({ record: baseInput(), scopeId: "security" });
   const inventoryRef = packet.evidencePack.find((item) => !item.configFactId) ?? packet.evidencePack[0];

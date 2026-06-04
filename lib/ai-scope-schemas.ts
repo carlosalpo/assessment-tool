@@ -4,7 +4,7 @@ type JsonSchema = Record<string, any>;
 
 export type ScopeQueryPattern = "graph" | "entity" | "aggregation" | "synthesis";
 
-const WIRED_PATTERN_QUERIES = new Set<ScopeQueryPattern>(["entity", "graph"]);
+const WIRED_PATTERN_QUERIES = new Set<ScopeQueryPattern>(["entity", "graph", "aggregation"]);
 
 export const scopePattern: Record<AIScopeId, ScopeQueryPattern> = {
   inventory: "entity",

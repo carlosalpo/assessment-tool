@@ -116,7 +116,7 @@ test("hashScopeInput changes when AI_SCOPE_BRIEF changes the effective prompt ve
   }
 });
 
-test("buildScopeSystemPrompt keeps the base prompt unless an entity or graph pattern query is wired", () => {
+test("buildScopeSystemPrompt keeps the base prompt unless a map pattern query is wired", () => {
   withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined }, () => {
     assert.equal(buildScopeSystemPrompt("security"), baseSystemPrompt());
   });
@@ -128,27 +128,36 @@ test("buildScopeSystemPrompt keeps the base prompt unless an entity or graph pat
     assert.match(entityPrompt, /No inventes equipos, rutas, conexiones ni vulnerabilidades/);
     assert.match(entityPrompt, /Usa solo el AIScopePacket provisto/);
     assert.match(entityPrompt, /evidencia_refs existentes/);
-    assert.equal(buildScopeSystemPrompt("evidence"), baseSystemPrompt());
+    assert.equal(buildScopeSystemPrompt("roadmap"), baseSystemPrompt());
     const graphPrompt = buildScopeSystemPrompt("topology");
     assert.notEqual(graphPrompt, baseSystemPrompt());
     assert.match(graphPrompt, /Razona de forma relacional sobre el grafo de topologia/);
     assert.match(graphPrompt, /affected_relationships/);
     assert.match(graphPrompt, /No afirmes SPOF ni single-homed sin evidencia topologica relacionada/);
     assert.match(graphPrompt, /No inventes equipos, rutas, conexiones ni vulnerabilidades/);
+    const aggregationPrompt = buildScopeSystemPrompt("evidence");
+    assert.notEqual(aggregationPrompt, baseSystemPrompt());
+    assert.match(aggregationPrompt, /Razona por agregacion temporal\/recurrencia o por ausencia/);
+    assert.match(aggregationPrompt, /aggregation_basis/);
+    assert.match(aggregationPrompt, /occurrence_count/);
+    assert.match(aggregationPrompt, /No marques 'recurrente' con una sola evidencia/);
+    assert.match(aggregationPrompt, /No inventes equipos, rutas, conexiones ni vulnerabilidades/);
   });
 });
 
-test("hashScopeInput changes only for wired entity and graph scopes when AI_PATTERN_QUERIES is enabled", () => {
+test("hashScopeInput changes for entity graph and aggregation but not synthesis scopes when AI_PATTERN_QUERIES is enabled", () => {
   const record = minimalRecord("assess_pattern_hash");
 
   withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined }, () => {
     const securityOff = hashScopeInput(record, "security");
     const topologyOff = hashScopeInput(record, "topology");
     const evidenceOff = hashScopeInput(record, "evidence");
+    const roadmapOff = hashScopeInput(record, "roadmap");
     withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: "1" }, () => {
       assert.notEqual(hashScopeInput(record, "security"), securityOff);
       assert.notEqual(hashScopeInput(record, "topology"), topologyOff);
-      assert.equal(hashScopeInput(record, "evidence"), evidenceOff);
+      assert.notEqual(hashScopeInput(record, "evidence"), evidenceOff);
+      assert.equal(hashScopeInput(record, "roadmap"), roadmapOff);
     });
   });
 });
