@@ -13,6 +13,7 @@
     "db:studio": "prisma studio",
     "test:ops": "node --test --experimental-strip-types lib/operational-assessment.test.ts",
     "test:ai": "node --test --experimental-strip-types lib/ai-analysis.test.ts",
+    "test:eval": "node --test --experimental-strip-types eval/eval.test.ts",
     "test:navigation": "node --test --experimental-strip-types lib/assessment-navigation.test.ts",
     "test:templates": "node --test --experimental-strip-types lib/document-templates.test.ts lib/performance-analysis.test.ts lib/performance-visualization-service.test.ts lib/ai-analysis.test.ts",
     "worker:parse": "python3 worker/python/parse_cisco.py"

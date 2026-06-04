@@ -1,0 +1,29 @@
+{
+  "phase": "scope_analysis",
+  "scopeId": "performance",
+  "findings": [
+    {
+      "finding_id": "perf_snapshot_trend_confirmed",
+      "scope": "performance",
+      "title": "Tendencia historica de saturacion confirmada",
+      "finding_type": "confirmed_finding",
+      "severity": "high",
+      "confidence": "high",
+      "evidence_refs": ["core-spof.log: utilization 92% on Gi1/0/48"],
+      "related_fact_ids": [],
+      "related_metric_ids": ["pm_spof_util"],
+      "related_correlation_ids": [],
+      "evidence": [{ "source_type": "performance", "source_name": "core-spof.log", "hostname": "core-spof", "command": "show interfaces", "excerpt": "utilization 92% snapshot" }],
+      "technical_rationale": "Describe tendencia historica desde metrica snapshot.",
+      "business_impact": "No debe filtrarse.",
+      "recommendation": "No debe filtrarse.",
+      "remediation_steps": [],
+      "validation_questions": [],
+      "related_devices": ["core-spof"],
+      "related_sites": [],
+      "dependencies": []
+    }
+  ],
+  "recommendations": [],
+  "limitations": []
+}

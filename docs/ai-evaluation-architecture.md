@@ -222,6 +222,7 @@ Glosario:
 Roadmap de implementacion:
 
 - Plan detallado de rollout por incrementos: [`docs/ai-evaluation-implementation-plan.md`](ai-evaluation-implementation-plan.md).
+- Harness offline de hallazgos esperados: [`eval/README.md`](../eval/README.md).
 - Fase 3: push escalonados.
 - Fase 4: evaluacion de hallazgos esperados.
 - Fase 5: debug admin de interacciones OpenAI.

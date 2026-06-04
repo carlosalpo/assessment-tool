@@ -1,0 +1,64 @@
+{
+  "fixtureId": "topology-spof",
+  "scopeId": "topology",
+  "mustFind": [
+    {
+      "scopeId": "topology",
+      "finding_type": "probable_issue",
+      "severityAtLeast": "high",
+      "keywords": ["single-homed"],
+      "devices": ["access-01"]
+    },
+    {
+      "scopeId": "topology",
+      "finding_type": "probable_issue",
+      "severityAtLeast": "high",
+      "keywords": ["baja cobertura"],
+      "devices": ["core-spof", "access-01"]
+    },
+    {
+      "scopeId": "topology",
+      "finding_type": "correlation_suspicion",
+      "severityAtLeast": "high",
+      "keywords": ["una sola relacion"],
+      "devices": ["core-spof"]
+    },
+    {
+      "scopeId": "topology",
+      "finding_type": "correlation_suspicion",
+      "severityAtLeast": "high",
+      "keywords": ["una sola relacion"],
+      "devices": ["access-01"]
+    },
+    {
+      "scopeId": "topology",
+      "finding_type": "correlation_suspicion",
+      "severityAtLeast": "high",
+      "keywords": ["ospf"],
+      "devices": ["core-spof"]
+    },
+    {
+      "scopeId": "topology",
+      "finding_type": "correlation_suspicion",
+      "severityAtLeast": "high",
+      "keywords": ["neighbor"],
+      "devices": ["core-spof"]
+    },
+    {
+      "scopeId": "topology",
+      "finding_type": "correlation_suspicion",
+      "severityAtLeast": "high",
+      "keywords": ["exstart"],
+      "devices": ["core-spof"]
+    }
+  ],
+  "mustNotFind": [
+    {
+      "scopeId": "topology",
+      "finding_type": "probable_issue",
+      "severityAtLeast": "high",
+      "keywords": ["spof", "sin topologia"],
+      "devices": ["access-01"]
+    }
+  ]
+}

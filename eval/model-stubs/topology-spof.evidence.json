@@ -1,0 +1,53 @@
+{
+  "phase": "scope_analysis",
+  "scopeId": "evidence",
+  "findings": [
+    {
+      "finding_id": "evt_recurrent_ospf",
+      "scope": "evidence",
+      "title": "Evento recurrente OSPF en core-spof",
+      "finding_type": "probable_issue",
+      "severity": "medium",
+      "confidence": "medium",
+      "evidence_refs": [
+        "core-spof.log: %OSPF",
+        "core-spof.log: Neighbor Down"
+      ],
+      "related_fact_ids": [],
+      "related_metric_ids": [],
+      "related_correlation_ids": [],
+      "evidence": [{ "source_type": "cli", "source_name": "core-spof.log", "hostname": "core-spof", "command": "show logging", "excerpt": "OSPF neighbor down repeated" }],
+      "technical_rationale": "Evento recurrente OSPF con multiples evidencias.",
+      "business_impact": "Puede indicar inestabilidad de control plane.",
+      "recommendation": "Validar causa de flaps OSPF.",
+      "remediation_steps": ["Revisar logs y fisico"],
+      "validation_questions": [],
+      "related_devices": ["core-spof"],
+      "related_sites": ["HQ"],
+      "dependencies": []
+    },
+    {
+      "finding_id": "evt_single_recurrent",
+      "scope": "evidence",
+      "title": "Evento recurrente con una sola evidencia",
+      "finding_type": "probable_issue",
+      "severity": "medium",
+      "confidence": "medium",
+      "evidence_refs": ["core-spof.log: CANNOT_BUNDLE"],
+      "related_fact_ids": [],
+      "related_metric_ids": [],
+      "related_correlation_ids": [],
+      "evidence": [{ "source_type": "cli", "source_name": "core-spof.log", "hostname": "core-spof", "command": "show logging", "excerpt": "CANNOT_BUNDLE" }],
+      "technical_rationale": "Recurrente con una sola evidencia.",
+      "business_impact": "No debe filtrarse.",
+      "recommendation": "No debe filtrarse.",
+      "remediation_steps": [],
+      "validation_questions": [],
+      "related_devices": ["core-spof"],
+      "related_sites": [],
+      "dependencies": []
+    }
+  ],
+  "recommendations": [],
+  "limitations": []
+}

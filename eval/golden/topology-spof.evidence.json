@@ -1,0 +1,57 @@
+{
+  "fixtureId": "topology-spof",
+  "scopeId": "evidence",
+  "mustFind": [
+    {
+      "scopeId": "evidence",
+      "finding_type": "probable_issue",
+      "severityAtLeast": "medium",
+      "keywords": ["recurrente", "ospf"],
+      "devices": ["core-spof"]
+    },
+    {
+      "scopeId": "evidence",
+      "finding_type": "correlation_suspicion",
+      "severityAtLeast": "high",
+      "keywords": ["ospf"],
+      "devices": ["core-spof"]
+    },
+    {
+      "scopeId": "evidence",
+      "finding_type": "correlation_suspicion",
+      "severityAtLeast": "high",
+      "keywords": ["neighbor"],
+      "devices": ["core-spof"]
+    },
+    {
+      "scopeId": "evidence",
+      "finding_type": "correlation_suspicion",
+      "severityAtLeast": "high",
+      "keywords": ["exstart"],
+      "devices": ["core-spof"]
+    },
+    {
+      "scopeId": "evidence",
+      "finding_type": "correlation_suspicion",
+      "severityAtLeast": "high",
+      "keywords": ["metricas", "performance"],
+      "devices": ["access-01"]
+    },
+    {
+      "scopeId": "evidence",
+      "finding_type": "correlation_suspicion",
+      "severityAtLeast": "medium",
+      "keywords": ["historico", "snapshot"],
+      "devices": ["access-01"]
+    }
+  ],
+  "mustNotFind": [
+    {
+      "scopeId": "evidence",
+      "finding_type": "probable_issue",
+      "severityAtLeast": "medium",
+      "keywords": ["recurrente", "una sola evidencia"],
+      "devices": ["core-spof"]
+    }
+  ]
+}

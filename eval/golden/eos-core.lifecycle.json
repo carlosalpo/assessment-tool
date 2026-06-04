@@ -1,0 +1,22 @@
+{
+  "fixtureId": "eos-core",
+  "scopeId": "lifecycle",
+  "mustFind": [
+    {
+      "scopeId": "lifecycle",
+      "finding_type": "confirmed_finding",
+      "severityAtLeast": "high",
+      "keywords": ["eox", "support"],
+      "devices": ["core-eos"]
+    }
+  ],
+  "mustNotFind": [
+    {
+      "scopeId": "lifecycle",
+      "finding_type": "confirmed_finding",
+      "severityAtLeast": "high",
+      "keywords": ["obsoleto", "sin fuente"],
+      "devices": ["core-eos"]
+    }
+  ]
+}

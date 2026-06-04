@@ -1,0 +1,14 @@
+{
+  "fixtureId": "topology-spof",
+  "scopeId": "performance",
+  "mustFind": [],
+  "mustNotFind": [
+    {
+      "scopeId": "performance",
+      "finding_type": "confirmed_finding",
+      "severityAtLeast": "high",
+      "keywords": ["tendencia", "historica"],
+      "devices": ["core-spof"]
+    }
+  ]
+}

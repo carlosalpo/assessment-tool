@@ -1,0 +1,50 @@
+{
+  "phase": "scope_analysis",
+  "scopeId": "lifecycle",
+  "findings": [
+    {
+      "finding_id": "life_ws_c6509_e_eox",
+      "scope": "lifecycle",
+      "title": "EoX confirmado para WS-C6509-E",
+      "finding_type": "confirmed_finding",
+      "severity": "high",
+      "confidence": "high",
+      "evidence_refs": ["show inventory PID WS-C6509-E serial SN-core-eos"],
+      "related_fact_ids": [],
+      "related_metric_ids": [],
+      "related_correlation_ids": [],
+      "evidence": [{ "source_type": "inventory", "source_name": "Cisco EoX", "hostname": "core-eos", "command": "show inventory", "excerpt": "PID WS-C6509-E serial SN-core-eos" }],
+      "technical_rationale": "El modelo WS-C6509-E tiene fuente EoX y last date of support registrada.",
+      "business_impact": "Riesgo de soporte limitado para equipo core critico.",
+      "recommendation": "Planificar renovacion.",
+      "remediation_steps": ["Validar cobertura", "Planificar reemplazo"],
+      "validation_questions": [],
+      "related_devices": ["core-eos"],
+      "related_sites": ["HQ"],
+      "dependencies": []
+    },
+    {
+      "finding_id": "life_obsolete_without_source",
+      "scope": "lifecycle",
+      "title": "Equipo obsoleto sin fuente",
+      "finding_type": "confirmed_finding",
+      "severity": "high",
+      "confidence": "medium",
+      "evidence_refs": ["core-eos.log"],
+      "related_fact_ids": [],
+      "related_metric_ids": [],
+      "related_correlation_ids": [],
+      "evidence": [{ "source_type": "inventory", "source_name": "core-eos.log", "hostname": "core-eos", "command": null, "excerpt": "core-eos.log" }],
+      "technical_rationale": "Obsoleto sin fuente Cisco.",
+      "business_impact": "Sin fuente.",
+      "recommendation": "No debe filtrarse.",
+      "remediation_steps": [],
+      "validation_questions": [],
+      "related_devices": ["core-eos"],
+      "related_sites": [],
+      "dependencies": []
+    }
+  ],
+  "recommendations": [],
+  "limitations": []
+}

@@ -1,0 +1,50 @@
+{
+  "fixtureId": "insecure-mgmt",
+  "scopeId": "security",
+  "mustFind": [
+    {
+      "scopeId": "security",
+      "finding_type": "confirmed_finding",
+      "severityAtLeast": "high",
+      "keywords": ["snmp", "public"],
+      "devices": ["edge-mgmt"]
+    },
+    {
+      "scopeId": "security",
+      "finding_type": "confirmed_finding",
+      "severityAtLeast": "high",
+      "keywords": ["telnet"],
+      "devices": ["edge-mgmt"]
+    },
+    {
+      "scopeId": "security",
+      "finding_type": "correlation_suspicion",
+      "severityAtLeast": "high",
+      "keywords": ["snmp"],
+      "devices": ["edge-mgmt"]
+    },
+    {
+      "scopeId": "security",
+      "finding_type": "correlation_suspicion",
+      "severityAtLeast": "high",
+      "keywords": ["telnet"],
+      "devices": ["edge-mgmt"]
+    }
+  ],
+  "mustNotFind": [
+    {
+      "scopeId": "security",
+      "finding_type": "confirmed_finding",
+      "severityAtLeast": "high",
+      "keywords": ["inventado"],
+      "devices": ["edge-mgmt"]
+    },
+    {
+      "scopeId": "security",
+      "finding_type": "confirmed_finding",
+      "severityAtLeast": "high",
+      "keywords": ["sin evidencia"],
+      "devices": ["edge-mgmt"]
+    }
+  ]
+}

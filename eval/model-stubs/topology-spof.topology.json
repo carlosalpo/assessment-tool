@@ -1,0 +1,50 @@
+{
+  "phase": "scope_analysis",
+  "scopeId": "topology",
+  "findings": [
+    {
+      "finding_id": "top_access_single_homed",
+      "scope": "topology",
+      "title": "Access-01 single-homed hacia core-spof",
+      "finding_type": "probable_issue",
+      "severity": "high",
+      "confidence": "medium",
+      "evidence_refs": ["Device ID: access-01 Interface: Gi1/0/48 Port ID: Gi1/0/1"],
+      "related_fact_ids": [],
+      "related_metric_ids": [],
+      "related_correlation_ids": [],
+      "evidence": [{ "source_type": "cli", "source_name": "core-spof.log", "hostname": "core-spof", "command": "show cdp neighbors detail", "excerpt": "Device ID: access-01 Interface: Gi1/0/48 Port ID: Gi1/0/1" }],
+      "technical_rationale": "Access-01 se observa single-homed con una sola relacion CDP.",
+      "business_impact": "Un fallo del enlace o core afecta acceso.",
+      "recommendation": "Validar redundancia fisica/logica.",
+      "remediation_steps": ["Validar segundo uplink"],
+      "validation_questions": [],
+      "related_devices": ["access-01", "core-spof"],
+      "related_sites": ["HQ"],
+      "dependencies": []
+    },
+    {
+      "finding_id": "top_spof_without_topology",
+      "scope": "topology",
+      "title": "SPOF sin topologia",
+      "finding_type": "probable_issue",
+      "severity": "high",
+      "confidence": "medium",
+      "evidence_refs": ["core-spof.log: %EC-5-CANNOT_BUNDLE2: Gi1/0/47 is not compatible with Gi1/0/48"],
+      "related_fact_ids": [],
+      "related_metric_ids": [],
+      "related_correlation_ids": [],
+      "evidence": [{ "source_type": "cli", "source_name": "core-spof.log", "hostname": "core-spof", "command": "show logging", "excerpt": "%EC-5-CANNOT_BUNDLE2" }],
+      "technical_rationale": "Afirma SPOF sin evidencia topologica.",
+      "business_impact": "Sin topologia.",
+      "recommendation": "No debe filtrarse.",
+      "remediation_steps": [],
+      "validation_questions": [],
+      "related_devices": ["access-01"],
+      "related_sites": [],
+      "dependencies": []
+    }
+  ],
+  "recommendations": [],
+  "limitations": []
+}
