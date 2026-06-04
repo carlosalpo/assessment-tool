@@ -11,6 +11,7 @@ import {
   buildAssessmentKnowledgeGraph,
   buildScopeBrief,
   createAIAnalysisAudit,
+  fullEvidenceCatalogForPacket,
   getPromptVersion,
   isEvidenceTieringEnabled,
   isDomainPartitionEnabled,
@@ -123,7 +124,7 @@ export type SynthesisDigest = {
   catalog: Record<string, string[]>;
 };
 
-const engineVersion = "ai-analysis-engine-v2";
+const engineVersion = "ai-analysis-engine-v3";
 const maxChunkChars = 14000;
 const defaultOpenAIAnalysisModel = "gpt-5.2";
 const crossScopeCorrelationScopeId = "cross_scope_correlation";
@@ -657,16 +658,13 @@ async function runPhase(input: {
   if (input.phase === "validation") {
     const analysis = input.previousArtifacts.find((artifact) => artifact.phase === "scope_analysis") ?? {};
     const findings = Array.isArray(analysis.findings) ? analysis.findings : [];
+    const evidenceValidation = filterFindingsForValidationPhase(findings);
     return {
       phase: input.phase,
-      validatedFindings: findings.filter((finding: any) => Array.isArray(finding.evidence) && finding.evidence.length > 0),
+      validatedFindings: evidenceValidation.validatedFindings,
       rejectedFindings: [
         ...(Array.isArray(analysis.rejectedFindings) ? analysis.rejectedFindings : []),
-        ...findings.filter((finding: any) => !Array.isArray(finding.evidence) || finding.evidence.length === 0).map((finding: any) => ({
-          finding_id: finding.finding_id ?? "unknown",
-          title: finding.title ?? "Hallazgo sin titulo",
-          reason: "Sin evidencia trazable."
-        }))
+        ...evidenceValidation.rejectedFindings
       ],
       rule: "Todo hallazgo debe tener evidencia trazable y referencias permitidas por la estrategia del ambito."
     };
@@ -1392,8 +1390,30 @@ function synthesisScopePlaceholder(scopeId: AIAnalysisScopeId) {
   };
 }
 
-function deterministicFindingsToScopeAnalysisFindings(findings: any[], packet: ReturnType<typeof buildAIScopePacket>) {
-  const evidenceById = new Map(packet.evidencePack.map((ref) => [ref.id, ref]));
+export function filterFindingsForValidationPhase(findings: any[]) {
+  const validatedFindings: any[] = [];
+  const rejectedFindings: Array<{ finding_id: string; title: string; reason: string }> = [];
+  for (const finding of Array.isArray(findings) ? findings : []) {
+    if (hasEvidenceOrAllowedGapType(finding)) {
+      validatedFindings.push(finding);
+    } else {
+      rejectedFindings.push({
+        finding_id: String(finding?.finding_id ?? "unknown"),
+        title: String(finding?.title ?? "Hallazgo sin titulo"),
+        reason: "Sin evidencia trazable."
+      });
+    }
+  }
+  return { validatedFindings, rejectedFindings };
+}
+
+function hasEvidenceOrAllowedGapType(finding: any) {
+  if (Array.isArray(finding?.evidence) && finding.evidence.length > 0) return true;
+  return finding?.finding_type === "visibility_gap" || finding?.finding_type === "validation_required";
+}
+
+export function deterministicFindingsToScopeAnalysisFindings(findings: any[], packet: ReturnType<typeof buildAIScopePacket>) {
+  const evidenceById = new Map(fullEvidenceCatalogForPacket(packet).map((ref) => [ref.id, ref]));
   return findings
     .filter((finding) => finding?.id || finding?.finding_id)
     .map((finding) => {
@@ -1531,7 +1551,7 @@ export function buildScopeSystemPrompt(scopeId: AIAnalysisScopeId) {
     "Eres un arquitecto senior Cisco ejecutando una fase incremental de assessment.",
     "No inventes equipos, rutas, conexiones ni vulnerabilidades.",
     "Usa solo el AIScopePacket provisto. No uses conocimiento externo para completar datos faltantes.",
-    "Todo hallazgo debe tener evidencia_refs existentes en AIScopePacket.evidencePack o debe clasificarse como visibility_gap/validation_required.",
+    "Todo hallazgo debe tener evidence_refs existentes en AIScopePacket.fullEvidenceRefIds o debe clasificarse como visibility_gap/validation_required.",
     "Respeta la estrategia, tipos de hallazgo y reglas de validacion especificas del ambito.",
     "Si la evidencia es insuficiente, usa validation_required o visibility_gap en vez de inferir.",
     `Prompt version: ${promptVersion}. Engine version: ${engineVersion}.`

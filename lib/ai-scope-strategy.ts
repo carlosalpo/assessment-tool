@@ -97,6 +97,7 @@ export type AIScopePacket = {
     missingEvidence: AssessmentAIContext["missingEvidence"];
   };
   evidencePack: EvidenceReference[];
+  fullEvidenceRefIds: string[];
   outputContract: {
     schemaName: string;
     requiredEvidenceRefs: boolean;
@@ -178,6 +179,7 @@ const largeAssessmentMaxInputTokens = 32000;
 const domainPartitionDeviceThreshold = 20;
 const domainPartitionDeviceCap = 40;
 const maxDomainPartitions = 6;
+const fullEvidenceCatalogByPacket = new WeakMap<AIScopePacket, EvidenceReference[]>();
 
 const scopeStrategies: Partial<Record<AIScopeId, AIScopeStrategy>> = {
   topology: {
@@ -413,6 +415,7 @@ export function buildAIScopePacket(input: {
       missingEvidence
     },
     evidencePack: selectedEvidence,
+    fullEvidenceRefIds: graph.nodes.evidenceRefs.map((ref) => ref.id),
     outputContract: {
       schemaName: "scope_analysis_result",
       requiredEvidenceRefs: true,
@@ -426,7 +429,7 @@ export function buildAIScopePacket(input: {
     }
   };
 
-  return applyContextBudget(initialPacket);
+  return applyContextBudget(attachFullEvidenceCatalog(initialPacket, graph.nodes.evidenceRefs));
 }
 
 export function resolveMaxInputTokens(record: any, explicit?: number) {
@@ -496,9 +499,13 @@ export function createAIAnalysisAudit(input: {
   };
 }
 
+export function fullEvidenceCatalogForPacket(packet: AIScopePacket): EvidenceReference[] {
+  return fullEvidenceCatalogByPacket.get(packet) ?? packet.evidencePack;
+}
+
 export function validateScopeAnalysisResult(parsed: any, packet: AIScopePacket): ScopeValidationResult {
   const strategy = getAIScopeStrategy(packet.scopeId);
-  const evidenceCatalog = new Set(packet.evidencePack.map((ref) => ref.id));
+  const evidenceCatalog = new Set((packet.fullEvidenceRefIds?.length ? packet.fullEvidenceRefIds : packet.evidencePack.map((ref) => ref.id)));
   const configFactCatalog = new Set(packet.graphSlice.configFacts.map((fact) => fact.id));
   const stateFactCatalog = new Set(packet.graphSlice.stateFacts.map((fact) => fact.id));
   const metricCatalog = new Set(packet.graphSlice.performanceMetrics.map((metric) => metric.id));
@@ -615,12 +622,18 @@ function buildGraphEdges(context: AssessmentAIContext, interfaces: AssessmentKno
   return edges;
 }
 
+function attachFullEvidenceCatalog<T extends AIScopePacket>(packet: T, catalog: EvidenceReference[]): T {
+  fullEvidenceCatalogByPacket.set(packet, catalog);
+  return packet;
+}
+
 function applyContextBudget(packet: AIScopePacket): AIScopePacket {
   if (isEvidenceTieringEnabled()) return applyTieredContextBudget(packet);
   return applyLegacyContextBudget(packet);
 }
 
 function applyLegacyContextBudget(packet: AIScopePacket): AIScopePacket {
+  const fullEvidenceCatalog = fullEvidenceCatalogForPacket(packet);
   let next = { ...packet, evidencePack: rankEvidence(packet).map(compactEvidenceRef) };
   let estimated = estimateTokens(next);
   let excludedEvidenceRefs = 0;
@@ -648,7 +661,7 @@ function applyLegacyContextBudget(packet: AIScopePacket): AIScopePacket {
     };
     estimated = estimateTokens(next);
   }
-  return {
+  return attachFullEvidenceCatalog({
     ...next,
     budget: {
       ...next.budget,
@@ -656,10 +669,11 @@ function applyLegacyContextBudget(packet: AIScopePacket): AIScopePacket {
       trimmed: excludedEvidenceRefs > 0 || estimated > packet.budget.maxInputTokens,
       excludedEvidenceRefs
     }
-  };
+  }, fullEvidenceCatalog);
 }
 
 function applyTieredContextBudget(packet: AIScopePacket): AIScopePacket {
+  const fullEvidenceCatalog = fullEvidenceCatalogForPacket(packet);
   const rankedEvidence = rankEvidence(packet);
   const fullEvidence = rankedEvidence.slice(0, EVIDENCE_TOP_K).map((ref) => tierEvidenceRef(ref, "full"));
   let compactEvidence = rankedEvidence.slice(EVIDENCE_TOP_K).map((ref) => tierEvidenceRef(ref, "compact"));
@@ -679,7 +693,7 @@ function applyTieredContextBudget(packet: AIScopePacket): AIScopePacket {
     estimated = estimateTokens(next);
   }
 
-  return {
+  return attachFullEvidenceCatalog({
     ...next,
     budget: {
       ...next.budget,
@@ -687,7 +701,7 @@ function applyTieredContextBudget(packet: AIScopePacket): AIScopePacket {
       trimmed: excludedEvidenceRefs > 0 || estimated > packet.budget.maxInputTokens,
       excludedEvidenceRefs
     }
-  };
+  }, fullEvidenceCatalog);
 }
 
 function trimGraphAndMemory(packet: AIScopePacket): AIScopePacket {

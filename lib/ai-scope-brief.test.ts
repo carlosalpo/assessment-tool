@@ -137,7 +137,7 @@ test("buildScopeSystemPrompt keeps the base prompt unless a map pattern query is
     assert.match(entityPrompt, /entity_target/);
     assert.match(entityPrompt, /No inventes equipos, rutas, conexiones ni vulnerabilidades/);
     assert.match(entityPrompt, /Usa solo el AIScopePacket provisto/);
-    assert.match(entityPrompt, /evidencia_refs existentes/);
+    assert.match(entityPrompt, /evidence_refs existentes/);
     assert.equal(buildScopeSystemPrompt("roadmap"), baseSystemPrompt());
     const graphPrompt = buildScopeSystemPrompt("topology");
     assert.notEqual(graphPrompt, baseSystemPrompt());
@@ -509,10 +509,10 @@ function baseSystemPrompt() {
     "Eres un arquitecto senior Cisco ejecutando una fase incremental de assessment.",
     "No inventes equipos, rutas, conexiones ni vulnerabilidades.",
     "Usa solo el AIScopePacket provisto. No uses conocimiento externo para completar datos faltantes.",
-    "Todo hallazgo debe tener evidencia_refs existentes en AIScopePacket.evidencePack o debe clasificarse como visibility_gap/validation_required.",
+    "Todo hallazgo debe tener evidence_refs existentes en AIScopePacket.fullEvidenceRefIds o debe clasificarse como visibility_gap/validation_required.",
     "Respeta la estrategia, tipos de hallazgo y reglas de validacion especificas del ambito.",
     "Si la evidencia es insuficiente, usa validation_required o visibility_gap en vez de inferir.",
-    "Prompt version: assessment-ai-prompts-v1. Engine version: ai-analysis-engine-v2."
+    "Prompt version: assessment-ai-prompts-v1. Engine version: ai-analysis-engine-v3."
   ].join("\n");
 }
 

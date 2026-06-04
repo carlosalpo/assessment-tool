@@ -18,6 +18,10 @@ import {
   tierEvidenceRef,
   validateScopeAnalysisResult
 } from "./ai-scope-strategy.ts";
+import {
+  deterministicFindingsToScopeAnalysisFindings,
+  filterFindingsForValidationPhase
+} from "./ai-analysis-jobs.ts";
 
 const baseInput = (): AssessmentAIContextInput => ({
   id: "assess_ai",
@@ -356,6 +360,41 @@ test("validateScopeAnalysisResult rejects invented evidence, facts and correlati
   assert.match(result.rejectedFindings[0].reason, /desconocidos/);
 });
 
+test("validateScopeAnalysisResult accepts real evidence refs excluded from the trimmed evidence pack", () => {
+  const input = inputWithLongSecurityEvidence(36);
+  const packet = buildAIScopePacket({ record: input, scopeId: "configuration", maxInputTokens: 1 });
+  const sentEvidenceIds = new Set(packet.evidencePack.map((ref) => ref.id));
+  const excludedEvidenceId = packet.fullEvidenceRefIds.find((id) => !sentEvidenceIds.has(id));
+  assert.ok(excludedEvidenceId);
+
+  const result = validateScopeAnalysisResult({
+    findings: [{
+      finding_id: "cfg_real_trimmed_ref",
+      scope: "configuration",
+      title: "Desviacion de configuracion con evidencia recortada",
+      finding_type: "probable_issue",
+      severity: "medium",
+      confidence: "medium",
+      evidence_refs: [excludedEvidenceId],
+      related_fact_ids: [],
+      related_metric_ids: [],
+      related_correlation_ids: [],
+      evidence: [{ source_type: "cli", source_name: excludedEvidenceId, hostname: "sec-35", command: "show running-config", excerpt: "Evidencia real recortada del prompt." }],
+      technical_rationale: "La referencia existe en el assessment aunque no sobrevivio al evidencePack recortado.",
+      business_impact: "Puede indicar desviacion de configuracion.",
+      recommendation: "Validar configuracion del equipo citado.",
+      remediation_steps: [],
+      validation_questions: [],
+      related_devices: ["sec-35"],
+      related_sites: [],
+      dependencies: []
+    }]
+  }, packet);
+
+  assert.equal(result.validFindings.length, 1);
+  assert.equal(result.rejectedFindings.length, 0);
+});
+
 test("validateScopeAnalysisResult accepts evidence-bound security findings", () => {
   const packet = buildAIScopePacket({ record: baseInput(), scopeId: "security" });
   const fact = packet.graphSlice.configFacts.find((item) => item.factType === "insecure_snmp")!;
@@ -554,6 +593,55 @@ test("validateScopeAnalysisResult rejects high security findings backed only by 
   }, packet);
   assert.equal(result.validFindings.length, 0);
   assert.match(result.rejectedFindings[0].reason, /Seguridad high\/critical/);
+});
+
+test("deterministicFindingsToScopeAnalysisFindings resolves deterministic evidence from the full catalog", () => {
+  const packet = buildAIScopePacket({ record: inputWithLongSecurityEvidence(36), scopeId: "security", maxInputTokens: 1 });
+  const sentEvidenceIds = new Set(packet.evidencePack.map((ref) => ref.id));
+  const excludedEvidenceId = packet.fullEvidenceRefIds.find((id) => !sentEvidenceIds.has(id));
+  assert.ok(excludedEvidenceId);
+
+  const findings = deterministicFindingsToScopeAnalysisFindings([{
+    id: "det_trimmed_evidence",
+    title: "Hallazgo deterministico con evidencia recortada",
+    severity: "high",
+    confidence: 90,
+    affectedAssets: ["sec-35"],
+    evidenceRefs: [excludedEvidenceId]
+  }], packet);
+
+  assert.equal(findings.length, 1);
+  assert.deepEqual(findings[0].evidence_refs, [excludedEvidenceId]);
+  assert.equal(findings[0].finding_type, "probable_issue");
+  assert.equal(findings[0].evidence.length, 1);
+  assert.equal(findings[0].evidence[0].source_name.length > 0, true);
+});
+
+test("validation phase keeps gap findings without evidence and rejects non-gap findings without evidence", () => {
+  const result = filterFindingsForValidationPhase([
+    {
+      finding_id: "gap_no_evidence",
+      title: "Falta evidencia CDP/LLDP",
+      finding_type: "visibility_gap",
+      evidence: []
+    },
+    {
+      finding_id: "validation_no_evidence",
+      title: "Validacion requerida por evidencia incompleta",
+      finding_type: "validation_required",
+      evidence: []
+    },
+    {
+      finding_id: "probable_without_evidence",
+      title: "Probable issue sin evidencia",
+      finding_type: "probable_issue",
+      evidence: []
+    }
+  ]);
+
+  assert.deepEqual(result.validatedFindings.map((finding) => finding.finding_id), ["gap_no_evidence", "validation_no_evidence"]);
+  assert.deepEqual(result.rejectedFindings.map((finding) => finding.finding_id), ["probable_without_evidence"]);
+  assert.match(result.rejectedFindings[0].reason, /Sin evidencia trazable/);
 });
 
 function asset(hostname: string, ip: string, model: string, role: string, priority: "low" | "medium" | "high" | "critical") {
