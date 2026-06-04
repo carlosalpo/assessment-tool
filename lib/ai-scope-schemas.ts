@@ -61,6 +61,47 @@ export function scopeAnalysisResultSchemaForPattern(pattern: ScopeQueryPattern):
   };
 }
 
+export function reduceResultSchema(): JsonSchema {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["phase", "findings", "recommendations", "limitations"],
+    properties: {
+      phase: { type: "string" },
+      findings: {
+        type: "array",
+        items: reduceFindingSchema()
+      },
+      recommendations: { type: "array", items: { type: "string" } },
+      limitations: { type: "array", items: { type: "string" } }
+    }
+  };
+}
+
+function reduceFindingSchema(): JsonSchema {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: [...baseFindingRequiredProperties(), "source_finding_ids", "composite_rationale"],
+    properties: {
+      ...baseFindingProperties(),
+      source_finding_ids: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["scope", "finding_id"],
+          properties: {
+            scope: { type: "string" },
+            finding_id: { type: "string" }
+          }
+        }
+      },
+      composite_rationale: { type: "string" }
+    }
+  };
+}
+
 function findingSchemaForPattern(pattern: Exclude<ScopeQueryPattern, "synthesis">): JsonSchema {
   const extension = findingExtensionForPattern(pattern);
   return {

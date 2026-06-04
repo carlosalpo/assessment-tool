@@ -6,7 +6,14 @@ import {
   getPromptVersion,
   summarizePriorScopeResults
 } from "./ai-scope-strategy.ts";
-import { buildScopeSystemPrompt, hashScopeInput, mergeScopePartitionResults } from "./ai-analysis-jobs.ts";
+import {
+  buildReduceDigest,
+  buildScopeSystemPrompt,
+  hashScopeInput,
+  isReduceStageEnabled,
+  mergeScopePartitionResults,
+  validateReduceResult
+} from "./ai-analysis-jobs.ts";
 
 test("buildScopeBrief caps top findings, sorts by severity and confidence, and extracts questions", () => {
   const brief = buildScopeBrief([
@@ -227,6 +234,107 @@ test("mergeScopePartitionResults dedupes findings and is stable when inputs are 
   assert.equal(merged.findings.find((finding: any) => finding.title === "SNMP inseguro")?.finding_id, "high-dup");
 });
 
+test("isReduceStageEnabled toggles only with AI_REDUCE_STAGE=1", () => {
+  withEnv({ AI_REDUCE_STAGE: undefined }, () => {
+    assert.equal(isReduceStageEnabled(), false);
+  });
+  withEnv({ AI_REDUCE_STAGE: "" }, () => {
+    assert.equal(isReduceStageEnabled(), false);
+  });
+  withEnv({ AI_REDUCE_STAGE: "1" }, () => {
+    assert.equal(isReduceStageEnabled(), true);
+  });
+});
+
+test("buildReduceDigest builds a stable scoped finding catalog and caps by severity", () => {
+  const digest = buildReduceDigest([
+    reduceScopeResult("security", [
+      ...Array.from({ length: 10 }, (_item, index) => scopeFinding({
+        finding_id: `sec-${index}`,
+        title: `Security ${index}`,
+        severity: index === 9 ? "critical" : index % 2 === 0 ? "high" : "low",
+        confidence: "medium",
+        related_devices: [`core-${index}`]
+      }))
+    ]),
+    reduceScopeResult("topology", [
+      scopeFinding({ finding_id: "topo-1", title: "Single homed", severity: "high", related_devices: ["core-9"] })
+    ]),
+    reduceScopeResult("roadmap", [
+      scopeFinding({ finding_id: "roadmap-1", title: "Ignored synthesis", severity: "critical" })
+    ]),
+    reduceScopeResult("cross_scope_correlation", [
+      scopeFinding({ finding_id: "reduce-1", title: "Ignored reduce", severity: "critical" })
+    ])
+  ]);
+
+  assert.equal(digest.digestVersion, "ai-reduce-digest-v1");
+  assert.deepEqual(Object.keys(digest.catalog).sort(), ["security", "topology"]);
+  assert.equal(digest.catalog.security.length, 8);
+  assert.equal(digest.catalog.security[0], "sec-9");
+  assert.deepEqual(digest.catalog.topology, ["topo-1"]);
+  assert.equal(digest.findings.some((finding) => finding.scope === "roadmap"), false);
+});
+
+test("validateReduceResult enforces real sources from at least two scopes and known devices", () => {
+  const digest = buildReduceDigest([
+    reduceScopeResult("security", [
+      scopeFinding({ finding_id: "sec-1", title: "SNMP insecure", related_devices: ["core-01"] })
+    ]),
+    reduceScopeResult("topology", [
+      scopeFinding({ finding_id: "topo-1", title: "Single homed", related_devices: ["core-01"] })
+    ])
+  ]);
+
+  const accepted = validateReduceResult({
+    findings: [
+      compositeFinding({
+        finding_id: "cmp-1",
+        related_devices: ["core-01"],
+        source_finding_ids: [
+          { scope: "security", finding_id: "sec-1" },
+          { scope: "topology", finding_id: "topo-1" }
+        ]
+      })
+    ]
+  }, digest);
+  assert.equal(accepted.validFindings.length, 1);
+  assert.equal(accepted.rejected.length, 0);
+
+  const invalid = validateReduceResult({
+    findings: [
+      compositeFinding({
+        finding_id: "missing-source",
+        source_finding_ids: [
+          { scope: "security", finding_id: "sec-missing" },
+          { scope: "topology", finding_id: "topo-1" }
+        ]
+      }),
+      compositeFinding({
+        finding_id: "one-scope",
+        source_finding_ids: [
+          { scope: "security", finding_id: "sec-1" },
+          { scope: "security", finding_id: "sec-1" }
+        ]
+      }),
+      compositeFinding({
+        finding_id: "unknown-device",
+        related_devices: ["core-99"],
+        source_finding_ids: [
+          { scope: "security", finding_id: "sec-1" },
+          { scope: "topology", finding_id: "topo-1" }
+        ]
+      })
+    ]
+  }, digest);
+
+  assert.equal(invalid.validFindings.length, 0);
+  assert.equal(invalid.rejected.length, 3);
+  assert.match(invalid.rejected[0].reason, /inexistentes/);
+  assert.match(invalid.rejected[1].reason, /2 scopes distintos/);
+  assert.match(invalid.rejected[2].reason, /related_devices/);
+});
+
 function finding(id: string, severity: string, confidence: string, findingType: string, validationQuestions: string[]) {
   return {
     finding_id: id,
@@ -263,6 +371,31 @@ function scopeFinding(patch: Record<string, unknown>) {
     related_sites: [],
     dependencies: [],
     ...patch
+  };
+}
+
+function compositeFinding(patch: Record<string, unknown>) {
+  return {
+    ...scopeFinding({
+      finding_id: "composite",
+      scope: "cross_scope_correlation",
+      title: "Riesgo compuesto",
+      related_devices: ["core-01"],
+      source_finding_ids: [],
+      composite_rationale: "Correlaciona hallazgos de multiples scopes.",
+      ...patch
+    })
+  };
+}
+
+function reduceScopeResult(scopeId: string, findingsJson: any[]) {
+  return {
+    assessmentId: "assess_reduce",
+    scopeId,
+    status: "completed",
+    findingsJson,
+    recommendationsJson: [],
+    resultJson: {}
   };
 }
 

@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   baseFindingSchema,
   patternForScope,
+  reduceResultSchema,
   scopeAnalysisResultSchemaForPattern,
   scopePattern,
   usesPatternQuery,
@@ -116,6 +117,15 @@ for (const pattern of ["graph", "entity", "aggregation"] as const) {
 
 test("synthesis schema is intentionally deferred to INC-7", () => {
   assert.throws(() => scopeAnalysisResultSchemaForPattern("synthesis"), /INC-7/);
+});
+
+test("reduce result schema is strict-valid and includes composite fields", () => {
+  const schema = reduceResultSchema();
+  assertStrictSchema(schema, "reduce result");
+  const findingSchema = schema.properties.findings.items;
+  const expectedFields = [...baseFindingFields, "source_finding_ids", "composite_rationale"];
+  assert.deepEqual(Object.keys(findingSchema.properties).sort(), expectedFields.sort());
+  assert.deepEqual(findingSchema.required.sort(), expectedFields.sort());
 });
 
 function assertStrictSchema(schema: any, path: string) {

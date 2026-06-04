@@ -21,6 +21,7 @@ import {
 } from "./ai-scope-strategy.ts";
 import {
   patternForScope,
+  reduceResultSchema,
   scopeAnalysisResultSchemaForPattern,
   usesPatternQuery
 } from "./ai-scope-schemas.ts";
@@ -98,9 +99,26 @@ type RunAIAnalysisJobOptions = {
   apiKey?: string;
 };
 
+export type ReduceDigestFinding = {
+  scope: string;
+  finding_id: string;
+  title: string;
+  severity: string;
+  finding_type: string;
+  related_devices: string[];
+};
+
+export type ReduceDigest = {
+  digestVersion: string;
+  findings: ReduceDigestFinding[];
+  catalog: Record<string, string[]>;
+};
+
 const engineVersion = "ai-analysis-engine-v2";
 const maxChunkChars = 14000;
 const defaultOpenAIAnalysisModel = "gpt-5.2";
+const crossScopeCorrelationScopeId = "cross_scope_correlation";
+const reduceFindingsPerScopeLimit = 8;
 
 export const aiAnalysisScopes: Array<{ id: AIAnalysisScopeId; label: string; description: string }> = [
   { id: "inventory", label: "Inventario", description: "Inventario, identidad, modelos, seriales y roles." },
@@ -445,6 +463,20 @@ export async function runAIAnalysisJob(jobId: string, options?: RunAIAnalysisJob
     }
   }
 
+  if (isReduceStageEnabled() && job.mode === "full") {
+    try {
+      await runReduceStage({
+        jobId,
+        assessmentId: job.assessmentId,
+        apiKey,
+        forceReevaluate: job.forceReevaluate,
+        debugCapture
+      });
+    } catch (error) {
+      console.warn("Reduce AI stage failed without failing the job.", error);
+    }
+  }
+
   const finalStatus: AIAnalysisJobStatus = failedScopes > 0 ? "partially_completed" : "completed";
   await prisma.aiAnalysisJob.update({
     where: { id: jobId },
@@ -632,6 +664,202 @@ async function runPhase(input: {
   };
 }
 
+async function runReduceStage(input: {
+  jobId: string;
+  assessmentId: string;
+  apiKey: string;
+  forceReevaluate: boolean;
+  debugCapture: boolean;
+}) {
+  const scopeResults = await prisma.aiScopeResult.findMany({
+    where: {
+      assessmentId: input.assessmentId,
+      status: "completed"
+    },
+    orderBy: { scopeId: "asc" }
+  });
+  const digest = buildReduceDigest(scopeResults);
+  const sourceScopes = new Set(digest.findings.map((finding) => finding.scope));
+  if (sourceScopes.size < 2) return;
+
+  const inputHash = hashReduceDigest(digest);
+  const existingResult = await prisma.aiScopeResult.findUnique({
+    where: { assessmentId_scopeId: { assessmentId: input.assessmentId, scopeId: crossScopeCorrelationScopeId } }
+  });
+  if (
+    !input.forceReevaluate &&
+    existingResult?.status === "completed" &&
+    existingResult.inputHash === inputHash
+  ) {
+    return;
+  }
+  if (!input.apiKey) throw new Error("OpenAI API key no esta configurada para la etapa Reduce.");
+
+  await prisma.aiAnalysisJob.update({
+    where: { id: input.jobId },
+    data: { currentPhase: `${crossScopeCorrelationScopeId}:reduce` }
+  });
+
+  const model = openAIReduceModel();
+  const requestBody = {
+    model,
+    input: [
+      {
+        role: "system",
+        content: [{
+          type: "input_text",
+          text: buildReduceSystemPrompt()
+        }]
+      },
+      {
+        role: "user",
+        content: [{
+          type: "input_text",
+          text: JSON.stringify({
+            task: "Correlaciona hallazgos validados de scopes distintos y produce solo hallazgos compuestos cross-dominio.",
+            requiredBehavior: [
+              "Cada hallazgo compuesto debe citar source_finding_ids existentes en el digest.",
+              "Cada hallazgo compuesto debe combinar al menos 2 scopes distintos.",
+              "No inventes equipos ni finding_id; si no hay correlacion transversal suficiente, devuelve findings vacio."
+            ],
+            reduceDigest: digest
+          })
+        }]
+      }
+    ],
+    text: {
+      format: {
+        type: "json_schema",
+        name: "reduce_result",
+        strict: true,
+        schema: reduceResultSchema()
+      }
+    }
+  };
+  const startedAt = Date.now();
+  let capturedFailure = false;
+  try {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${input.apiKey}`
+      },
+      body: JSON.stringify(requestBody)
+    });
+    const payload = await response.json().catch(() => null);
+    const latencyMs = Date.now() - startedAt;
+    const usage = extractOpenAIUsage(payload);
+    if (!response.ok) {
+      await captureReduceInteraction(input, {
+        model,
+        inputHash,
+        requestBody,
+        payload,
+        httpStatus: response.status,
+        status: "error",
+        latencyMs,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens
+      });
+      capturedFailure = true;
+      throw new Error(payload?.error?.message ?? "Error llamando OpenAI Responses API en Reduce.");
+    }
+
+    const parsed = JSON.parse(extractResponseText(payload) || "{\"phase\":\"reduce\",\"findings\":[],\"recommendations\":[],\"limitations\":[]}");
+    const validation = validateReduceResult(parsed, digest);
+    await captureReduceInteraction(input, {
+      model,
+      inputHash,
+      requestBody,
+      payload,
+      httpStatus: response.status,
+      status: "ok",
+      latencyMs,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      rejectedFindings: validation.rejected
+    });
+
+    const resultJson = {
+      ...parsed,
+      phase: "reduce",
+      scopeId: crossScopeCorrelationScopeId,
+      findings: validation.validFindings,
+      rejectedFindings: validation.rejected,
+      digestSummary: {
+        sourceScopes: Array.from(sourceScopes).sort(),
+        sourceFindingCount: digest.findings.length
+      }
+    };
+    const recommendations = Array.isArray(parsed.recommendations) ? parsed.recommendations : [];
+    await prisma.aiAnalysisArtifact.create({
+      data: {
+        assessmentId: input.assessmentId,
+        jobId: input.jobId,
+        scopeId: crossScopeCorrelationScopeId,
+        artifactType: "reduce",
+        sourceReference: `${crossScopeCorrelationScopeId}:reduce`,
+        contentJson: resultJson as Prisma.InputJsonValue,
+        tokenCountEstimate: estimateTokens(resultJson)
+      }
+    });
+    await prisma.aiAnalysisUsage.create({
+      data: {
+        jobId: input.jobId,
+        scopeId: crossScopeCorrelationScopeId,
+        phaseName: "reduce",
+        model,
+        inputTokens: usage.inputTokens ?? estimateTokens(digest),
+        outputTokens: usage.outputTokens ?? estimateTokens(resultJson),
+        totalTokens: (usage.inputTokens ?? estimateTokens(digest)) + (usage.outputTokens ?? estimateTokens(resultJson))
+      }
+    });
+    await prisma.aiScopeResult.upsert({
+      where: { assessmentId_scopeId: { assessmentId: input.assessmentId, scopeId: crossScopeCorrelationScopeId } },
+      create: {
+        assessmentId: input.assessmentId,
+        scopeId: crossScopeCorrelationScopeId,
+        status: "completed",
+        inputHash,
+        promptVersion: getPromptVersion(),
+        engineVersion,
+        resultJson: resultJson as Prisma.InputJsonValue,
+        executiveSummary: validation.validFindings.length > 0
+          ? `Reduce transversal: ${validation.validFindings.length} hallazgos compuestos cross-dominio.`
+          : "Reduce transversal: sin hallazgos compuestos soportados por multiples scopes.",
+        findingsJson: validation.validFindings as Prisma.InputJsonValue,
+        recommendationsJson: recommendations as Prisma.InputJsonValue
+      },
+      update: {
+        status: "completed",
+        inputHash,
+        promptVersion: getPromptVersion(),
+        engineVersion,
+        resultJson: resultJson as Prisma.InputJsonValue,
+        executiveSummary: validation.validFindings.length > 0
+          ? `Reduce transversal: ${validation.validFindings.length} hallazgos compuestos cross-dominio.`
+          : "Reduce transversal: sin hallazgos compuestos soportados por multiples scopes.",
+        findingsJson: validation.validFindings as Prisma.InputJsonValue,
+        recommendationsJson: recommendations as Prisma.InputJsonValue
+      }
+    });
+  } catch (error) {
+    if (!capturedFailure) {
+      await captureReduceInteraction(input, {
+        model,
+        inputHash,
+        requestBody,
+        payload: { error: error instanceof Error ? error.message : "OpenAI no respondio durante Reduce." },
+        httpStatus: null,
+        status: "error",
+        latencyMs: Date.now() - startedAt
+      });
+    }
+    throw error;
+  }
+}
+
 async function callOpenAIForScopeAnalysis(
   scopeId: AIAnalysisScopeId,
   scopePacket: ReturnType<typeof buildAIScopePacket>,
@@ -816,6 +1044,44 @@ async function captureOpenAIInteraction(
   });
 }
 
+async function captureReduceInteraction(
+  debug: { jobId: string; assessmentId: string; debugCapture: boolean },
+  input: {
+    model: string;
+    inputHash: string;
+    requestBody: unknown;
+    payload: unknown;
+    httpStatus: number | null;
+    status: "ok" | "error" | "timeout";
+    latencyMs: number;
+    inputTokens?: number | null;
+    outputTokens?: number | null;
+    rejectedFindings?: unknown;
+  }
+) {
+  if (!debug.debugCapture) return;
+  await createAiInteractionLogSafely({
+    jobId: debug.jobId,
+    assessmentId: debug.assessmentId,
+    scopeId: crossScopeCorrelationScopeId,
+    phaseName: "reduce",
+    model: input.model,
+    promptVersion: getPromptVersion(),
+    engineVersion,
+    httpStatus: input.httpStatus,
+    status: input.status,
+    latencyMs: input.latencyMs,
+    inputTokensEst: estimateTokens({ inputHash: input.inputHash, requestBody: input.requestBody }),
+    inputTokens: input.inputTokens,
+    outputTokens: input.outputTokens,
+    budgetTrimmed: false,
+    excludedEvidenceRefs: 0,
+    requestJson: input.requestBody,
+    responseJson: input.payload,
+    rejectedFindings: input.rejectedFindings
+  });
+}
+
 function deterministicScopeAnalysisFallback(scopeId: AIAnalysisScopeId, findings: any[], reason: string) {
   return {
     phase: "scope_analysis",
@@ -901,6 +1167,14 @@ function openAIAnalysisModel() {
   return process.env.OPENAI_ANALYSIS_MODEL || process.env.OPENAI_MODEL || defaultOpenAIAnalysisModel;
 }
 
+export function isReduceStageEnabled() {
+  return process.env.AI_REDUCE_STAGE === "1";
+}
+
+function openAIReduceModel() {
+  return process.env.OPENAI_REDUCE_MODEL || openAIAnalysisModel();
+}
+
 function compactPreviousArtifacts(previousArtifacts: any[]) {
   return previousArtifacts.map((artifact) => ({
     phase: artifact.phase,
@@ -966,6 +1240,16 @@ export function buildScopeSystemPrompt(scopeId: AIAnalysisScopeId) {
     lines.splice(lines.length - 1, 0, "Razona por agregacion temporal/recurrencia o por ausencia (gap). Para cada hallazgo completa `aggregation_basis` (ventana/recurrencia o ausencia detectada), `occurrence_count` (entero), `time_window` y `correlated_entity`. No marques 'recurrente' con una sola evidencia: requiere >=2 evidencias o una ventana temporal; si es evento aislado usa probable_issue/validation_required, y si falta monitoreo/documentacion usa visibility_gap.");
   }
   return lines.join("\n");
+}
+
+function buildReduceSystemPrompt() {
+  return [
+    "Eres un arquitecto senior Cisco ejecutando la etapa Reduce transversal de un assessment.",
+    "Usa solo el reduceDigest provisto; no inventes finding_id, scopes, equipos ni evidencia.",
+    "Produce hallazgos compuestos solo cuando fuentes reales de al menos 2 scopes distintos soporten una correlacion cross-dominio.",
+    "Cada finding debe completar source_finding_ids con IDs existentes y composite_rationale con la correlacion transversal.",
+    "Si la correlacion no esta soportada, devuelve findings vacio y explica la limitacion."
+  ].join("\n");
 }
 
 function scopeAnalysisResultSchema() {
@@ -1207,6 +1491,94 @@ function mergeScopeFindings(aiFindings: any[], deterministicFindings: any[]) {
   return Array.from(byId.values());
 }
 
+export function buildReduceDigest(scopeResults: any[]): ReduceDigest {
+  const digestFindings: ReduceDigestFinding[] = [];
+  const catalog: Record<string, string[]> = {};
+  const mapResults = [...(Array.isArray(scopeResults) ? scopeResults : [])]
+    .filter((result: any) => shouldIncludeInReduceDigest(result))
+    .sort((left: any, right: any) => String(left.scopeId).localeCompare(String(right.scopeId)));
+
+  for (const result of mapResults) {
+    const scope = String(result.scopeId);
+    const findings = (Array.isArray(result.findingsJson) ? result.findingsJson : [])
+      .filter((finding: any) => finding?.finding_id)
+      .sort((left: any, right: any) =>
+        severityScore(right?.severity) - severityScore(left?.severity) ||
+        confidenceScore(right?.confidence) - confidenceScore(left?.confidence) ||
+        String(left?.finding_id).localeCompare(String(right?.finding_id))
+      )
+      .slice(0, reduceFindingsPerScopeLimit)
+      .map((finding: any) => ({
+        scope,
+        finding_id: String(finding.finding_id),
+        title: String(finding.title ?? ""),
+        severity: String(finding.severity ?? "medium"),
+        finding_type: String(finding.finding_type ?? "probable_issue"),
+        related_devices: normalizeStringList(finding.related_devices)
+      }));
+    catalog[scope] = findings.map((finding: ReduceDigestFinding) => finding.finding_id);
+    digestFindings.push(...findings);
+  }
+
+  return {
+    digestVersion: "ai-reduce-digest-v1",
+    findings: digestFindings,
+    catalog
+  };
+}
+
+export function validateReduceResult(parsed: any, digest: ReduceDigest) {
+  const sourceByKey = new Map(digest.findings.map((finding) => [`${finding.scope}:${finding.finding_id}`, finding]));
+  const validFindings: any[] = [];
+  const rejected: Array<{ finding_id: string; title: string; reason: string }> = [];
+
+  for (const finding of Array.isArray(parsed?.findings) ? parsed.findings : []) {
+    const reasons: string[] = [];
+    const sources = Array.isArray(finding?.source_finding_ids) ? finding.source_finding_ids : [];
+    const sourceKeys = sources.map((source: any) => `${String(source?.scope ?? "")}:${String(source?.finding_id ?? "")}`);
+    const missingSources = sourceKeys.filter((key: string) => !sourceByKey.has(key));
+    const sourceScopes = new Set(sources.map((source: any) => String(source?.scope ?? "")).filter(Boolean));
+
+    if (sources.length < 2 || sourceScopes.size < 2) {
+      reasons.push("Hallazgo compuesto requiere source_finding_ids de al menos 2 scopes distintos.");
+    }
+    if (missingSources.length > 0) {
+      reasons.push(`source_finding_ids inexistentes: ${missingSources.join(", ")}.`);
+    }
+
+    const citedDevices = new Set(
+      sourceKeys.flatMap((key: string) => sourceByKey.get(key)?.related_devices ?? []).map(normalizeSignatureText)
+    );
+    const unknownDevices = normalizeStringList(finding?.related_devices)
+      .filter((device) => !citedDevices.has(normalizeSignatureText(device)));
+    if (unknownDevices.length > 0) {
+      reasons.push(`related_devices no existen en las fuentes citadas: ${unknownDevices.join(", ")}.`);
+    }
+
+    if (reasons.length > 0) {
+      rejected.push({
+        finding_id: String(finding?.finding_id ?? "unknown"),
+        title: String(finding?.title ?? "Hallazgo compuesto sin titulo"),
+        reason: reasons.join(" ")
+      });
+    } else {
+      validFindings.push(finding);
+    }
+  }
+
+  return { validFindings, rejected };
+}
+
+function shouldIncludeInReduceDigest(result: any) {
+  const scopeId = String(result?.scopeId ?? "");
+  return result?.status === "completed" &&
+    scopeId !== crossScopeCorrelationScopeId &&
+    scopeId !== "roadmap" &&
+    scopeId !== "executive_summary" &&
+    Array.isArray(result?.findingsJson) &&
+    result.findingsJson.length > 0;
+}
+
 export function mergeScopePartitionResults(scopeId: AIAnalysisScopeId, results: any[], partitions: ScopePartition[]) {
   const sortedPartitions = [...partitions].sort((left, right) => left.id.localeCompare(right.id));
   const partitionIds = sortedPartitions.map((partition) => partition.id);
@@ -1401,6 +1773,16 @@ export function hashScopeInput(record: any, scopeId: AIAnalysisScopeId) {
       assessment: context.assessment,
       sourceCounts: context.sourceCounts,
       evidenceText: context.evidenceText
+    }))
+    .digest("hex");
+}
+
+function hashReduceDigest(digest: ReduceDigest) {
+  return createHash("sha256")
+    .update(stableStringify({
+      promptVersion: getPromptVersion(),
+      engineVersion,
+      digest
     }))
     .digest("hex");
 }
