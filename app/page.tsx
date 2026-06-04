@@ -71,8 +71,18 @@ import {
   executiveSummaryFindings,
   type AIAnalysisState
 } from "@/lib/ai-analysis";
-import { summarizeAreaFindings } from "@/lib/ai-finding-summary";
+import { summarizeAreaFindings, type AreaFindingSummary } from "@/lib/ai-finding-summary";
 import { humanizeScopeStatus } from "@/lib/ai-status-labels";
+import {
+  aiScopeDisplayOrder,
+  aiScopePhaseDisplay,
+  crossScopeCorrelationDisplay,
+  flagForStage,
+  type AIStageFlag,
+  type AIScopeDisplayGroup,
+  type AIScopeDisplayMetadata,
+  type AIScopeOrStageDisplayId
+} from "@/lib/ai-scope-ui";
 import {
   buildOperationalAIContext,
   createDefaultOperationalAssessment,
@@ -372,7 +382,7 @@ type AIAssessmentAnalysisResults = {
   assessmentId: string;
   results: Array<{
     id: string;
-    scopeId: AIAnalysisScopeId;
+    scopeId: string;
     status: string;
     inputHash: string;
     executiveSummary?: string | null;
@@ -580,6 +590,8 @@ const findingTypeSummaryLabel: Record<string, string> = {
   validation_required: "Validación",
   sin_tipo: "Sin tipo"
 };
+
+const scopeDisplayGroupOrder: AIScopeDisplayGroup[] = ["Fundamentos", "Riesgo", "Dominios", "Operación", "Síntesis"];
 
 const statusLabel: Record<Assessment["status"], string> = {
   draft: "Draft",
@@ -948,7 +960,7 @@ export default function HomePage() {
       const response = await fetch(`/api/ai-analysis/assessments/${recordId}/results`, { cache: "no-store" });
       const payload = await response.json().catch(() => null) as AIAssessmentAnalysisResults | null;
       if (!response.ok || !payload) return;
-      const jobScopeIds = new Set(latestJob.steps.map((step) => step.scopeId));
+      const jobScopeIds = new Set<string>(latestJob.steps.map((step) => step.scopeId));
       const importedResults = payload.results.filter((result) => latestJob.mode === "full" || jobScopeIds.has(result.scopeId));
       const findings = persistentAIResultsToFindings(importedResults, recordId);
       const resultSummary = importedResults.map((result) => result.executiveSummary).filter(Boolean).join(" · ");
@@ -7681,6 +7693,8 @@ function AiEvaluationTab({
   const performanceEnabled = record.scope.performanceAnalysis.enabled;
   const latestJob = aiAnalysisStatus?.jobs[0];
   const isAdmin = Boolean(currentUser && canManageUsers(currentUser));
+  const [expandedAreaDetails, setExpandedAreaDetails] = useState<Partial<Record<EvaluationArea, boolean>>>({});
+  const [showFullBreakdown, setShowFullBreakdown] = useState(false);
 
   return (
     <div className="space-y-4">
@@ -7702,9 +7716,20 @@ function AiEvaluationTab({
               <PlayCircle size={16} />
               Evaluacion completa
             </Button>
+            <Button variant="ghost" onClick={() => setShowFullBreakdown((current) => !current)}>
+              {showFullBreakdown ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+              Desglose completo
+            </Button>
           </div>
         </PanelHeader>
         <PanelBody className="space-y-3">
+          {showFullBreakdown && (
+            <FullEvaluationScopeBreakdown
+              record={record}
+              aiAnalysisStatus={aiAnalysisStatus}
+              latestJob={latestJob}
+            />
+          )}
           {latestJob && (
             <AIAnalysisJobStatusPanel
               job={latestJob}
@@ -7725,15 +7750,8 @@ function AiEvaluationTab({
             const displayedStatus = scopeStatus?.status ?? run.status;
             const displayedStatusLabel = humanizeScopeStatus(displayedStatus);
             const findingSummary = summarizeAreaFindings(areaFindings);
-            const severitySummary = riskSummaryOrder
-              .map((risk) => ({ risk, count: findingSummary.bySeverity[risk] }))
-              .filter((item) => item.count > 0);
-            const findingTypeSummary = findingTypeSummaryOrder
-              .map((type) => ({ type, count: findingSummary.byFindingType[type] ?? 0 }))
-              .concat(Object.entries(findingSummary.byFindingType)
-                .filter(([type]) => !findingTypeSummaryOrder.includes(type))
-                .map(([type, count]) => ({ type, count })))
-              .filter((item) => item.count > 0);
+            const scopeDisplay = aiScopeDisplayOrder.find((scope) => scope.id === scopeId);
+            const detailOpen = Boolean(expandedAreaDetails[area.id]);
             return (
               <div key={area.id} className="rounded-md border border-border p-3">
                 <div className="flex items-start justify-between gap-3">
@@ -7753,30 +7771,24 @@ function AiEvaluationTab({
                 <p className="mt-2 text-xs text-muted-foreground">
                   {scopeJob ? `${scopeJob.progress}% · ${scopeJob.currentPhase ?? "Procesando fases"}` : `${run.progress}% · ${scopeStatus?.updatedAt ? `${run.message} · Ultima evaluacion ${formatDate(scopeStatus.updatedAt)}` : run.message}`}
                 </p>
-                <div className="mt-2 space-y-1 text-xs">
-                  {findingSummary.total === 0 ? (
-                    <p className="text-muted-foreground">Sin hallazgos</p>
-                  ) : (
-                    <>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-medium text-foreground">{findingSummary.total} {findingSummary.total === 1 ? "hallazgo" : "hallazgos"}</span>
-                        {severitySummary.map((item) => (
-                          <Badge key={item.risk} tone={riskTone[item.risk]}>
-                            {riskSummaryLabel[item.risk]} {item.count}
-                          </Badge>
-                        ))}
-                        {findingSummary.pendingValidation > 0 && (
-                          <Badge tone="warning">{findingSummary.pendingValidation} por validar</Badge>
-                        )}
-                      </div>
-                      {findingTypeSummary.length > 0 && (
-                        <p className="text-muted-foreground">
-                          Tipos: {findingTypeSummary.map((item) => `${findingTypeSummaryLabel[item.type] ?? item.type}: ${item.count}`).join(" · ")}
-                        </p>
-                      )}
-                    </>
-                  )}
-                </div>
+                <CompactFindingSummary summary={findingSummary} />
+                <button
+                  type="button"
+                  className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+                  onClick={() => setExpandedAreaDetails((current) => ({ ...current, [area.id]: !current[area.id] }))}
+                >
+                  {detailOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                  Ver detalle
+                </button>
+                {detailOpen && scopeDisplay && (
+                  <ScopeDetailPanel
+                    scope={scopeDisplay}
+                    summary={findingSummary}
+                    status={displayedStatus}
+                    steps={aiAnalysisStatus?.jobs.flatMap((job) => job.steps).filter((step) => step.scopeId === scopeId) ?? []}
+                    currentPhase={latestJob?.currentPhase ?? null}
+                  />
+                )}
                 <div className="mt-3 flex flex-wrap gap-2">
                   <Button variant="secondary" size="sm" onClick={() => onRunEvaluation(area.id)} disabled={isScopeRunning || hasRunningAnalysis}>
                     <PlayCircle size={14} />
@@ -7807,6 +7819,148 @@ function AiEvaluationTab({
       </Panel>
       {isAdmin && currentUser && <AIDebugAdminPanel record={record} currentUser={currentUser} />}
       <AIReviewPanel record={record} onUpdateFinding={onUpdateFinding} />
+    </div>
+  );
+}
+
+function FullEvaluationScopeBreakdown({
+  record,
+  aiAnalysisStatus,
+  latestJob
+}: {
+  record: AssessmentRecord;
+  aiAnalysisStatus?: AIAssessmentAnalysisStatus;
+  latestJob?: AIAnalysisJobSnapshot;
+}) {
+  const visibleScopes = [...aiScopeDisplayOrder, crossScopeCorrelationDisplay].filter((scope) => {
+    const findings = findingsForScopeDisplay(record.parsed.findings, scope);
+    return shouldShowScopeDisplay(scope, aiAnalysisStatus, latestJob, findings);
+  });
+  const groupedScopes = scopeDisplayGroupOrder
+    .map((group) => ({
+      group,
+      scopes: visibleScopes.filter((scope) => scope.group === group)
+    }))
+    .filter((group) => group.scopes.length > 0);
+
+  return (
+    <div className="rounded-md border border-border bg-muted/20 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="text-sm font-semibold">Desglose de evaluación completa</p>
+          <p className="text-xs text-muted-foreground">Scopes del motor persistente agrupados por dominio de análisis.</p>
+        </div>
+        <Badge tone="neutral">{visibleScopes.length} scopes</Badge>
+      </div>
+      <div className="mt-3 space-y-3">
+        {groupedScopes.map((group) => (
+          <div key={group.group} className="space-y-2">
+            <p className="text-xs font-semibold uppercase text-muted-foreground">{group.group}</p>
+            <div className="grid gap-2 md:grid-cols-2">
+              {group.scopes.map((scope) => {
+                const findings = findingsForScopeDisplay(record.parsed.findings, scope);
+                const summary = summarizeAreaFindings(findings);
+                const status = statusForScopeDisplay(scope.id, aiAnalysisStatus, latestJob);
+                const statusLabel = humanizeScopeStatus(status);
+                return (
+                  <div key={scope.id} className="rounded border border-border bg-background/60 p-2 text-xs">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <p className="font-medium text-foreground">{scope.label}</p>
+                        <p className="text-muted-foreground">{scope.id}</p>
+                      </div>
+                      <span title={statusLabel.tooltip}>
+                        <Badge tone={scopeStatusTone(status)}>{statusLabel.label}</Badge>
+                      </span>
+                    </div>
+                    <CompactFindingSummary summary={summary} compact />
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ScopeDetailPanel({
+  scope,
+  summary,
+  status,
+  steps,
+  currentPhase
+}: {
+  scope: AIScopeDisplayMetadata;
+  summary: AreaFindingSummary;
+  status: string;
+  steps: AIAnalysisJobSnapshot["steps"];
+  currentPhase: string | null;
+}) {
+  const statusLabel = humanizeScopeStatus(status);
+
+  return (
+    <div className="mt-2 rounded-md border border-border bg-muted/20 p-2 text-xs">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium text-foreground">Scope {scope.id}</span>
+        <span title={statusLabel.tooltip}>
+          <Badge tone={scopeStatusTone(status)}>{statusLabel.label}</Badge>
+        </span>
+      </div>
+      <CompactFindingSummary summary={summary} compact />
+      <div className="mt-2 grid gap-1 sm:grid-cols-2">
+        {aiScopePhaseDisplay.map((phase) => {
+          const step = steps.find((item) => item.phaseName === phase.id);
+          const phaseStatus = currentPhase === `${scope.id}:${phase.id}` ? "running" : step?.status ?? "pending";
+          const phaseStatusLabel = humanizeScopeStatus(phaseStatus);
+          return (
+            <div key={phase.id} className="flex items-center justify-between gap-2 rounded border border-border bg-background/60 px-2 py-1">
+              <span className="text-muted-foreground">{phase.label}</span>
+              <span title={phaseStatusLabel.tooltip}>
+                <Badge tone={scopeStatusTone(phaseStatus)}>{phaseStatusLabel.label}</Badge>
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function CompactFindingSummary({ summary, compact = false }: { summary: AreaFindingSummary; compact?: boolean }) {
+  const severitySummary = riskSummaryOrder
+    .map((risk) => ({ risk, count: summary.bySeverity[risk] }))
+    .filter((item) => item.count > 0);
+  const findingTypeSummary = findingTypeSummaryOrder
+    .map((type) => ({ type, count: summary.byFindingType[type] ?? 0 }))
+    .concat(Object.entries(summary.byFindingType)
+      .filter(([type]) => !findingTypeSummaryOrder.includes(type))
+      .map(([type, count]) => ({ type, count })))
+    .filter((item) => item.count > 0);
+
+  if (summary.total === 0) {
+    return <p className={cn("text-xs text-muted-foreground", compact ? "mt-1" : "mt-2")}>Sin hallazgos</p>;
+  }
+
+  return (
+    <div className={cn("space-y-1 text-xs", compact ? "mt-1" : "mt-2")}>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium text-foreground">{summary.total} {summary.total === 1 ? "hallazgo" : "hallazgos"}</span>
+        {severitySummary.map((item) => (
+          <Badge key={item.risk} tone={riskTone[item.risk]}>
+            {riskSummaryLabel[item.risk]} {item.count}
+          </Badge>
+        ))}
+        {summary.pendingValidation > 0 && (
+          <Badge tone="warning">{summary.pendingValidation} por validar</Badge>
+        )}
+      </div>
+      {findingTypeSummary.length > 0 && (
+        <p className="text-muted-foreground">
+          Tipos: {findingTypeSummary.map((item) => `${findingTypeSummaryLabel[item.type] ?? item.type}: ${item.count}`).join(" · ")}
+        </p>
+      )}
     </div>
   );
 }
@@ -11276,8 +11430,8 @@ function evaluationAreaToAIScope(area: EvaluationArea): AIAnalysisScopeId {
   return map[area];
 }
 
-function scopeLabel(scopeId: AIAnalysisScopeId) {
-  const labels: Record<AIAnalysisScopeId, string> = {
+function scopeLabel(scopeId: string) {
+  const labels: Record<string, string> = {
     inventory: "Inventario",
     configuration: "Configuracion",
     lifecycle: "Lifecycle",
@@ -11296,6 +11450,63 @@ function scopeLabel(scopeId: AIAnalysisScopeId) {
     executive_summary: "Resumen ejecutivo"
   };
   return labels[scopeId] ?? scopeId;
+}
+
+function findingsForScopeDisplay(findings: Finding[], scope: AIScopeDisplayMetadata) {
+  const serviceOffers = new Set([
+    `${scope.label} Analysis`,
+    `${scope.id} Analysis`
+  ]);
+  if (aiScopeDisplayOrder.some((item) => item.id === scope.id)) {
+    serviceOffers.add(`${scopeLabel(scope.id as AIAnalysisScopeId)} Analysis`);
+  }
+  return findings.filter((finding) => finding.aiMetadata && serviceOffers.has(finding.serviceOffer));
+}
+
+function shouldShowScopeDisplay(
+  scope: AIScopeDisplayMetadata,
+  aiAnalysisStatus: AIAssessmentAnalysisStatus | undefined,
+  latestJob: AIAnalysisJobSnapshot | undefined,
+  findings: Finding[]
+) {
+  const flag = flagForStage(scope.id);
+  if (!flag) return true;
+  return isUIStageFlagEnabled(flag) || hasScopeDisplayActivity(scope.id, aiAnalysisStatus, latestJob, findings);
+}
+
+function hasScopeDisplayActivity(
+  scopeId: AIScopeOrStageDisplayId,
+  aiAnalysisStatus: AIAssessmentAnalysisStatus | undefined,
+  latestJob: AIAnalysisJobSnapshot | undefined,
+  findings: Finding[]
+) {
+  if (findings.length > 0) return true;
+  if (latestJob?.currentPhase?.startsWith(`${scopeId}:`)) return true;
+  const scopeStatus = aiAnalysisStatus?.scopes.find((scope) => scope.id === scopeId);
+  if (scopeStatus && (scopeStatus.status !== "pending" || scopeStatus.inputHash || scopeStatus.updatedAt)) return true;
+  return Boolean(aiAnalysisStatus?.jobs.some((job) =>
+    job.steps.some((step) => step.scopeId === scopeId && (step.status !== "pending" || step.inputHash || step.completedAt))
+  ));
+}
+
+function statusForScopeDisplay(
+  scopeId: AIScopeOrStageDisplayId,
+  aiAnalysisStatus: AIAssessmentAnalysisStatus | undefined,
+  latestJob: AIAnalysisJobSnapshot | undefined
+) {
+  if (latestJob?.currentPhase?.startsWith(`${scopeId}:`) && isActiveAIJobStatus(latestJob.status)) return "running";
+  const scopeStatus = aiAnalysisStatus?.scopes.find((scope) => scope.id === scopeId);
+  if (scopeStatus?.status) return scopeStatus.status;
+  const latestStep = aiAnalysisStatus?.jobs
+    .flatMap((job) => job.steps)
+    .filter((step) => step.scopeId === scopeId)
+    .sort((left, right) => String(right.completedAt ?? right.startedAt ?? "").localeCompare(String(left.completedAt ?? left.startedAt ?? "")))[0];
+  return latestStep?.status ?? "pending";
+}
+
+function isUIStageFlagEnabled(flag: AIStageFlag) {
+  if (flag === "AI_REDUCE_STAGE") return process.env.NEXT_PUBLIC_AI_REDUCE_STAGE === "1" || process.env.AI_REDUCE_STAGE === "1";
+  return process.env.NEXT_PUBLIC_AI_SYNTHESIS_STAGE === "1" || process.env.AI_SYNTHESIS_STAGE === "1";
 }
 
 function isActiveAIJobStatus(status: string) {
@@ -11423,7 +11634,7 @@ function isPersistentAICredentialPlaceholder(finding: any) {
   return title.includes("OPENAI_API_KEY") || evidence.some((item: any) => String(item?.excerpt ?? "").includes("no llamo OpenAI"));
 }
 
-function persistentAIFindingToFinding(finding: any, scopeId: AIAnalysisScopeId, assessmentId: string): Finding {
+function persistentAIFindingToFinding(finding: any, scopeId: string, assessmentId: string): Finding {
   const evidenceItems = Array.isArray(finding?.evidence) ? finding.evidence : [];
   const evidence = evidenceItems.map((item: any) => {
     const source = [item?.source_name, item?.hostname, item?.command].filter(Boolean).join(" · ");
@@ -11469,7 +11680,7 @@ function markPersistentAIRuns(runs: EvaluationRun[], job: AIAnalysisJobSnapshot,
   }), runs);
 }
 
-function scopeToFindingCategory(scopeId: AIAnalysisScopeId): Finding["category"] {
+function scopeToFindingCategory(scopeId: string): Finding["category"] {
   if (scopeId === "lifecycle") return "lifecycle";
   if (scopeId === "security" || scopeId === "perimeter") return "security";
   if (scopeId === "topology" || scopeId === "high_availability") return "resiliency";
@@ -11478,7 +11689,7 @@ function scopeToFindingCategory(scopeId: AIAnalysisScopeId): Finding["category"]
   return "operations";
 }
 
-function scopeToAIFindingDomain(scopeId: AIAnalysisScopeId): NonNullable<Finding["aiMetadata"]>["domain"] {
+function scopeToAIFindingDomain(scopeId: string): NonNullable<Finding["aiMetadata"]>["domain"] {
   if (scopeId === "datacenter") return "datacenter";
   if (scopeId === "security" || scopeId === "perimeter") return "security";
   if (scopeId === "performance") return "performance";
