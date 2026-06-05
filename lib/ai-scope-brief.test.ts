@@ -100,6 +100,7 @@ test("getPromptVersion switches only when AI_SCOPE_BRIEF is enabled", () => {
 
 test("hashScopeInput changes when AI_SCOPE_BRIEF changes the effective prompt version", () => {
   const original = process.env.AI_SCOPE_BRIEF;
+  const originalPerDevice = process.env.AI_PER_DEVICE;
   const record = {
     id: "assess_hash",
     client: { id: "client_hash", name: "HashCo", industry: "Network", owner: "Arquitectura", createdAt: "2026-06-01" },
@@ -112,6 +113,7 @@ test("hashScopeInput changes when AI_SCOPE_BRIEF changes the effective prompt ve
   };
 
   try {
+    delete process.env.AI_PER_DEVICE;
     delete process.env.AI_SCOPE_BRIEF;
     const offHash = hashScopeInput(record, "security");
     process.env.AI_SCOPE_BRIEF = "1";
@@ -123,14 +125,19 @@ test("hashScopeInput changes when AI_SCOPE_BRIEF changes the effective prompt ve
     } else {
       process.env.AI_SCOPE_BRIEF = original;
     }
+    if (originalPerDevice === undefined) {
+      delete process.env.AI_PER_DEVICE;
+    } else {
+      process.env.AI_PER_DEVICE = originalPerDevice;
+    }
   }
 });
 
 test("buildScopeSystemPrompt keeps the base prompt unless a map pattern query is wired", () => {
-  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined }, () => {
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_PER_DEVICE: undefined }, () => {
     assert.equal(buildScopeSystemPrompt("security"), baseSystemPrompt());
   });
-  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: "1" }, () => {
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: "1", AI_PER_DEVICE: undefined }, () => {
     const entityPrompt = buildScopeSystemPrompt("security");
     assert.notEqual(entityPrompt, baseSystemPrompt());
     assert.match(entityPrompt, /Razona por equipo\/grupo contra el estandar\/control esperado/);
@@ -155,15 +162,29 @@ test("buildScopeSystemPrompt keeps the base prompt unless a map pattern query is
   });
 });
 
+test("buildScopeSystemPrompt adds per-device instructions only for ai-per-device scopes when enabled", () => {
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_PER_DEVICE: undefined }, () => {
+    assert.equal(buildScopeSystemPrompt("security"), baseSystemPrompt());
+  });
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_PER_DEVICE: "1" }, () => {
+    const securityPrompt = buildScopeSystemPrompt("security");
+    assert.notEqual(securityPrompt, baseSystemPrompt());
+    assert.match(securityPrompt, /Modo por equipo/);
+    assert.match(securityPrompt, /Genera hallazgos POR EQUIPO/);
+    assert.match(securityPrompt, /related_devices/);
+    assert.equal(buildScopeSystemPrompt("topology"), baseSystemPrompt());
+  });
+});
+
 test("hashScopeInput changes for entity graph and aggregation but not synthesis scopes when AI_PATTERN_QUERIES is enabled", () => {
   const record = minimalRecord("assess_pattern_hash");
 
-  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined }, () => {
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_PER_DEVICE: undefined }, () => {
     const securityOff = hashScopeInput(record, "security");
     const topologyOff = hashScopeInput(record, "topology");
     const evidenceOff = hashScopeInput(record, "evidence");
     const roadmapOff = hashScopeInput(record, "roadmap");
-    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: "1" }, () => {
+    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: "1", AI_PER_DEVICE: undefined }, () => {
       assert.notEqual(hashScopeInput(record, "security"), securityOff);
       assert.notEqual(hashScopeInput(record, "topology"), topologyOff);
       assert.notEqual(hashScopeInput(record, "evidence"), evidenceOff);
@@ -172,15 +193,32 @@ test("hashScopeInput changes for entity graph and aggregation but not synthesis 
   });
 });
 
+test("hashScopeInput changes for ai-per-device scopes only when AI_PER_DEVICE is enabled", () => {
+  const record = minimalRecord("assess_per_device_hash");
+
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: undefined }, () => {
+    const securityOff = hashScopeInput(record, "security");
+    const topologyOff = hashScopeInput(record, "topology");
+    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: "1" }, () => {
+      assert.notEqual(hashScopeInput(record, "security"), securityOff);
+      assert.equal(hashScopeInput(record, "topology"), topologyOff);
+    });
+    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: "" }, () => {
+      assert.equal(hashScopeInput(record, "security"), securityOff);
+      assert.equal(hashScopeInput(record, "topology"), topologyOff);
+    });
+  });
+});
+
 test("hashScopeInput changes when AI_EVIDENCE_TIERING is enabled", () => {
   const record = minimalRecord("assess_evidence_tiering_hash");
 
-  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined }, () => {
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_PER_DEVICE: undefined }, () => {
     const offHash = hashScopeInput(record, "security");
-    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: "1" }, () => {
+    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: "1", AI_PER_DEVICE: undefined }, () => {
       assert.notEqual(hashScopeInput(record, "security"), offHash);
     });
-    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: "" }, () => {
+    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: "", AI_PER_DEVICE: undefined }, () => {
       assert.equal(hashScopeInput(record, "security"), offHash);
     });
   });
@@ -189,12 +227,12 @@ test("hashScopeInput changes when AI_EVIDENCE_TIERING is enabled", () => {
 test("hashScopeInput changes when AI_DOMAIN_PARTITION is enabled", () => {
   const record = minimalRecord("assess_domain_partition_hash");
 
-  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined }, () => {
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: undefined }, () => {
     const offHash = hashScopeInput(record, "security");
-    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: "1" }, () => {
+    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: "1", AI_PER_DEVICE: undefined }, () => {
       assert.notEqual(hashScopeInput(record, "security"), offHash);
     });
-    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: "" }, () => {
+    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: "", AI_PER_DEVICE: undefined }, () => {
       assert.equal(hashScopeInput(record, "security"), offHash);
     });
   });

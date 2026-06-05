@@ -7,7 +7,9 @@ import type {
   OperationalStateFact,
   TopologyRelationshipFact
 } from "./ai-analysis.ts";
+import type { AIScopeId } from "./ai-scope-strategy.ts";
 
+const batchOverheadTokens = 900;
 const maxNeighbors = 12;
 const maxProtocolFacts = 16;
 const maxConfigurationFacts = 32;
@@ -45,6 +47,16 @@ export type DeviceContext = {
   evidenceReferences: EvidenceReference[];
   summary: string;
 };
+
+export type DeviceBatch = {
+  id: string;
+  deviceHostnames: string[];
+  tokenEstimate: number;
+};
+
+export function isPerDeviceEnabled() {
+  return process.env.AI_PER_DEVICE === "1";
+}
 
 export function buildDeviceContext(context: AssessmentAIContext, deviceId: string): DeviceContext {
   const device = findDevice(context, deviceId);
@@ -85,6 +97,39 @@ export function buildDeviceContext(context: AssessmentAIContext, deviceId: strin
     evidenceReferences,
     summary: summarizeDeviceContext(device, deviceId, interactions, protocolFacts)
   };
+}
+
+export function planDeviceBatches(context: AssessmentAIContext, scopeId: AIScopeId, maxInputTokens: number): DeviceBatch[] {
+  const deviceContexts = devicesForScope(context, scopeId)
+    .map((device) => buildDeviceContext(context, device.hostname))
+    .sort((left, right) => left.identity.hostname.localeCompare(right.identity.hostname));
+  const budget = Math.max(1, maxInputTokens - batchOverheadTokens);
+  const batches: DeviceBatch[] = [];
+  let current: DeviceContext[] = [];
+  let currentTokens = 0;
+
+  for (const deviceContext of deviceContexts) {
+    const estimate = estimateDeviceContextTokens(deviceContext);
+    if (current.length > 0 && currentTokens + estimate > budget) {
+      batches.push(deviceBatch(batches.length + 1, current, currentTokens + batchOverheadTokens));
+      current = [];
+      currentTokens = 0;
+    }
+    current.push(deviceContext);
+    currentTokens += estimate;
+    if (estimate > budget) {
+      batches.push(deviceBatch(batches.length + 1, current, currentTokens + batchOverheadTokens));
+      current = [];
+      currentTokens = 0;
+    }
+  }
+
+  if (current.length > 0) batches.push(deviceBatch(batches.length + 1, current, currentTokens + batchOverheadTokens));
+  return batches;
+}
+
+export function estimateDeviceContextTokens(deviceContext: DeviceContext) {
+  return estimateTokens(deviceContext);
 }
 
 function findDevice(context: AssessmentAIContext, deviceId: string) {
@@ -138,6 +183,36 @@ function collectEvidenceReferences(
     .slice(0, maxEvidenceReferences);
 }
 
+function devicesForScope(context: AssessmentAIContext, scopeId: AIScopeId) {
+  const devicesByHost = new Map(context.devices.map((device) => [normalize(device.hostname), device]));
+  const relevant = new Set<string>();
+  const add = (deviceId: string | undefined) => {
+    if (deviceId && devicesByHost.has(normalize(deviceId))) relevant.add(normalize(deviceId));
+  };
+
+  if (scopeId === "performance") context.performanceMetrics.forEach((metric) => add(metric.deviceId));
+  if (scopeId === "evidence") context.operationalStateFacts.forEach((fact) => add(fact.deviceId));
+  if (scopeId === "security") {
+    context.configurationFacts
+      .filter((fact) => fact.category === "security" || fact.category === "management")
+      .forEach((fact) => add(fact.deviceId));
+  }
+  if (scopeId === "configuration") context.configurationFacts.forEach((fact) => add(fact.deviceId));
+
+  const candidates = relevant.size > 0
+    ? context.devices.filter((device) => relevant.has(normalize(device.hostname)))
+    : context.devices;
+  return candidates.filter((device) => normalize(device.hostname));
+}
+
+function deviceBatch(index: number, devices: DeviceContext[], tokenEstimate: number): DeviceBatch {
+  return {
+    id: `device_batch_${String(index).padStart(2, "0")}`,
+    deviceHostnames: devices.map((device) => device.identity.hostname),
+    tokenEstimate
+  };
+}
+
 function summarizeDeviceContext(device: AIContextDevice | undefined, deviceId: string, interactions: DeviceInteraction[], protocolFacts: ConfigurationFact[]) {
   if (!device) return `${deviceId}: equipo no encontrado en el contexto AI.`;
   const neighborText = interactions.length > 0
@@ -151,4 +226,8 @@ function summarizeDeviceContext(device: AIContextDevice | undefined, deviceId: s
 
 function normalize(value: string) {
   return value.trim().toLowerCase();
+}
+
+function estimateTokens(value: unknown) {
+  return Math.ceil(JSON.stringify(value).length / 4);
 }

@@ -27,6 +27,8 @@ import {
   synthesisResultSchema,
   usesPatternQuery
 } from "./ai-scope-schemas.ts";
+import { buildAssessmentAIContext } from "./ai-analysis.ts";
+import { isPerDeviceEnabled, planDeviceBatches } from "./ai-device-context.ts";
 import { engineForScope } from "./ai-scope-engine.ts";
 import { mapLegacyRemediation } from "./types.ts";
 
@@ -635,6 +637,9 @@ async function runPhase(input: RunPhaseInput) {
         return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model);
       case "ai-per-device":
         // DOM-B: per-device packing.
+        if (isPerDeviceEnabled()) {
+          return runPerDeviceScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model);
+        }
         return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model);
       case "deterministic-narrate":
         // DOM-D: deterministic.
@@ -715,6 +720,44 @@ async function runCurrentScopeAIAnalysis(
   }
 
   return mergeScopePartitionResults(input.scopeId, partitionResults, partitions);
+}
+
+async function runPerDeviceScopeAIAnalysis(
+  input: RunPhaseInput,
+  scopePacket: ReturnType<typeof buildAIScopePacket>,
+  priorScopeResults: Awaited<ReturnType<typeof loadPriorScopeResults>>,
+  explicitMaxInputTokens: number | undefined,
+  model: string
+) {
+  const context = buildAssessmentAIContext(input.record);
+  const batches = planDeviceBatches(context, input.scopeId, scopePacket.budget.maxInputTokens);
+  if (batches.length === 0) {
+    return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model);
+  }
+
+  const partitionResults = [];
+  for (const batch of batches) {
+    const batchPacket = buildAIScopePacket({
+      record: input.record,
+      scopeId: input.scopeId,
+      priorScopeResults,
+      maxInputTokens: explicitMaxInputTokens,
+      partitionDevices: batch.deviceHostnames
+    });
+    const partitionResult = await callOpenAIForScopeAnalysis(input.scopeId, batchPacket, input.previousArtifacts, input.apiKey, model, {
+      jobId: input.jobId,
+      assessmentId: input.assessmentId,
+      debugCapture: input.debugCapture
+    });
+    partitionResults.push({
+      ...partitionResult,
+      partitionId: batch.id,
+      partitionDevices: batch.deviceHostnames,
+      tokenEstimate: batch.tokenEstimate
+    });
+  }
+
+  return mergeScopePartitionResults(input.scopeId, partitionResults, batches);
 }
 
 async function runReduceStage(input: {
@@ -1629,6 +1672,9 @@ export function buildScopeSystemPrompt(scopeId: AIAnalysisScopeId) {
   if (usesPatternQuery(scopeId) && patternForScope(scopeId) === "aggregation") {
     lines.splice(lines.length - 1, 0, "Razona por agregacion temporal/recurrencia o por ausencia (gap). Para cada hallazgo completa `aggregation_basis` (ventana/recurrencia o ausencia detectada), `occurrence_count` (entero), `time_window` y `correlated_entity`. No marques 'recurrente' con una sola evidencia: requiere >=2 evidencias o una ventana temporal; si es evento aislado usa probable_issue/validation_required, y si falta monitoreo/documentacion usa visibility_gap.");
   }
+  if (isPerDeviceEnabled() && engineForScope(scopeId) === "ai-per-device") {
+    lines.splice(lines.length - 1, 0, "Modo por equipo: el contexto incluye varios equipos con su rol, vecinos y protocolos. Genera hallazgos POR EQUIPO; cada hallazgo indica en `related_devices` el equipo especifico. No mezcles equipos en un mismo hallazgo salvo interaccion explicita entre ellos.");
+  }
   return lines.join("\n");
 }
 
@@ -2297,6 +2343,7 @@ export function hashScopeInput(record: any, scopeId: AIAnalysisScopeId) {
       ...(usesPatternQuery(scopeId) ? { patternQuery: true } : {}),
       ...(isEvidenceTieringEnabled() ? { evidenceTiering: true } : {}),
       ...(isDomainPartitionEnabled() ? { domainPartition: true } : {}),
+      ...(isPerDeviceEnabled() && engineForScope(scopeId) === "ai-per-device" ? { perDevice: true } : {}),
       engineVersion,
       client: context.client,
       assessment: context.assessment,

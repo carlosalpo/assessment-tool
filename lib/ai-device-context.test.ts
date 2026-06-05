@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildAssessmentAIContext, type AssessmentAIContextInput } from "./ai-analysis.ts";
-import { buildDeviceContext } from "./ai-device-context.ts";
+import { buildDeviceContext, estimateDeviceContextTokens, planDeviceBatches } from "./ai-device-context.ts";
 import { createDefaultPerformanceState, type PerformanceMetric } from "./performance-analysis.ts";
 
 test("buildDeviceContext assembles identity, interactions and own facts for one device", () => {
@@ -51,6 +51,55 @@ test("buildDeviceContext returns an empty coherent context for an unknown device
   assert.deepEqual(deviceContext.performanceMetrics, []);
   assert.deepEqual(deviceContext.evidenceReferences, []);
   assert.match(deviceContext.summary, /missing-01: equipo no encontrado/);
+});
+
+test("planDeviceBatches greedily packs whole device contexts in deterministic order", () => {
+  const context = buildAssessmentAIContext(fixtureInput());
+  const giantDevice = {
+    ...context.devices[0],
+    id: "dev_giant",
+    hostname: "giant-01",
+    role: "distribution",
+    evidenceRefs: ["giant-ref"]
+  };
+  const giantRef = {
+    id: "giant-ref",
+    sourceFile: "giant-01.log",
+    deviceId: "giant-01",
+    excerpt: "giant ".repeat(9000)
+  };
+  const expandedContext = {
+    ...context,
+    devices: [...context.devices, giantDevice],
+    configurationFacts: [
+      ...context.configurationFacts,
+      {
+        id: "cfg_giant_telnet",
+        deviceId: "giant-01",
+        category: "management" as const,
+        factType: "telnet_enabled",
+        description: "Remote management transport includes Telnet.",
+        normalizedValue: "transport input telnet ssh",
+        evidenceRef: "giant-ref",
+        riskRelevance: "high" as const
+      }
+    ],
+    evidenceReferences: [...context.evidenceReferences, giantRef]
+  };
+  const normalBudgets = context.devices.map((device) => estimateDeviceContextTokens(buildDeviceContext(expandedContext, device.hostname)));
+  const maxInputTokens = Math.max(...normalBudgets) + 1200;
+
+  const batches = planDeviceBatches(expandedContext, "security", maxInputTokens);
+  const hostnames = batches.flatMap((batch) => batch.deviceHostnames);
+  const giantBatch = batches.find((batch) => batch.deviceHostnames.includes("giant-01"));
+
+  assert.deepEqual(hostnames, [...hostnames].sort((left, right) => left.localeCompare(right)));
+  assert.deepEqual(new Set(hostnames), new Set(["core-01", "dist-01", "giant-01"]));
+  assert.equal(hostnames.length, new Set(hostnames).size);
+  assert.deepEqual(giantBatch?.deviceHostnames, ["giant-01"]);
+  for (const batch of batches.filter((item) => !item.deviceHostnames.includes("giant-01"))) {
+    assert.ok(batch.tokenEstimate <= maxInputTokens);
+  }
 });
 
 function fixtureInput(): AssessmentAIContextInput {
