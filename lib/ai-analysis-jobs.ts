@@ -27,6 +27,7 @@ import {
   synthesisResultSchema,
   usesPatternQuery
 } from "./ai-scope-schemas.ts";
+import { engineForScope } from "./ai-scope-engine.ts";
 import { mapLegacyRemediation } from "./types.ts";
 
 export type AIAnalysisJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "partially_completed";
@@ -517,7 +518,7 @@ export async function runAIAnalysisJob(jobId: string, options?: RunAIAnalysisJob
   });
 }
 
-async function runPhase(input: {
+type RunPhaseInput = {
   jobId: string;
   assessmentId: string;
   record: any;
@@ -526,7 +527,9 @@ async function runPhase(input: {
   previousArtifacts: any[];
   apiKey: string;
   debugCapture: boolean;
-}) {
+};
+
+async function runPhase(input: RunPhaseInput) {
   const scope = aiAnalysisScopes.find((item) => item.id === input.scopeId);
   const baseContext = buildScopeContext(input.record, input.scopeId);
   const priorScopeResults = await loadPriorScopeResults(input.record?.id, input.scopeId);
@@ -620,41 +623,23 @@ async function runPhase(input: {
   }
 
   if (input.phase === "scope_analysis") {
-    if (isSynthesisStageEnabled() && patternForScope(input.scopeId) === "synthesis") {
-      return synthesisScopePlaceholder(input.scopeId);
+    const engine = engineForScope(input.scopeId);
+    switch (engine) {
+      case "synthesis":
+        if (isSynthesisStageEnabled() && patternForScope(input.scopeId) === "synthesis") {
+          return synthesisScopePlaceholder(input.scopeId);
+        }
+        return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model);
+      case "ai-design":
+        // DOM-C: design rubric.
+        return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model);
+      case "ai-per-device":
+        // DOM-B: per-device packing.
+        return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model);
+      case "deterministic-narrate":
+        // DOM-D: deterministic.
+        return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model);
     }
-
-    const partitions = planScopePartitions(input.record, input.scopeId, scopePacket);
-    if (partitions.length <= 1) {
-      return callOpenAIForScopeAnalysis(input.scopeId, scopePacket, input.previousArtifacts, input.apiKey, model, {
-        jobId: input.jobId,
-        assessmentId: input.assessmentId,
-        debugCapture: input.debugCapture
-      });
-    }
-
-    const partitionResults = [];
-    for (const partition of [...partitions].sort((left, right) => left.id.localeCompare(right.id))) {
-      const partitionPacket = buildAIScopePacket({
-        record: input.record,
-        scopeId: input.scopeId,
-        priorScopeResults,
-        maxInputTokens: explicitMaxInputTokens,
-        partitionDevices: partition.deviceHostnames
-      });
-      const partitionResult = await callOpenAIForScopeAnalysis(input.scopeId, partitionPacket, input.previousArtifacts, input.apiKey, model, {
-        jobId: input.jobId,
-        assessmentId: input.assessmentId,
-        debugCapture: input.debugCapture
-      });
-      partitionResults.push({
-        ...partitionResult,
-        partitionId: partition.id,
-        partitionDevices: partition.deviceHostnames
-      });
-    }
-
-    return mergeScopePartitionResults(input.scopeId, partitionResults, partitions);
   }
 
   if (input.phase === "validation") {
@@ -690,6 +675,46 @@ async function runPhase(input: {
       deviceCount: baseContext.sourceCounts.devices
     }
   };
+}
+
+async function runCurrentScopeAIAnalysis(
+  input: RunPhaseInput,
+  scopePacket: ReturnType<typeof buildAIScopePacket>,
+  priorScopeResults: Awaited<ReturnType<typeof loadPriorScopeResults>>,
+  explicitMaxInputTokens: number | undefined,
+  model: string
+) {
+  const partitions = planScopePartitions(input.record, input.scopeId, scopePacket);
+  if (partitions.length <= 1) {
+    return callOpenAIForScopeAnalysis(input.scopeId, scopePacket, input.previousArtifacts, input.apiKey, model, {
+      jobId: input.jobId,
+      assessmentId: input.assessmentId,
+      debugCapture: input.debugCapture
+    });
+  }
+
+  const partitionResults = [];
+  for (const partition of [...partitions].sort((left, right) => left.id.localeCompare(right.id))) {
+    const partitionPacket = buildAIScopePacket({
+      record: input.record,
+      scopeId: input.scopeId,
+      priorScopeResults,
+      maxInputTokens: explicitMaxInputTokens,
+      partitionDevices: partition.deviceHostnames
+    });
+    const partitionResult = await callOpenAIForScopeAnalysis(input.scopeId, partitionPacket, input.previousArtifacts, input.apiKey, model, {
+      jobId: input.jobId,
+      assessmentId: input.assessmentId,
+      debugCapture: input.debugCapture
+    });
+    partitionResults.push({
+      ...partitionResult,
+      partitionId: partition.id,
+      partitionDevices: partition.deviceHostnames
+    });
+  }
+
+  return mergeScopePartitionResults(input.scopeId, partitionResults, partitions);
 }
 
 async function runReduceStage(input: {
