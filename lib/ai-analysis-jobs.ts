@@ -124,7 +124,7 @@ export type SynthesisDigest = {
   catalog: Record<string, string[]>;
 };
 
-const engineVersion = "ai-analysis-engine-v3";
+const engineVersion = "ai-analysis-engine-v4";
 const maxChunkChars = 14000;
 const defaultOpenAIAnalysisModel = "gpt-5.2";
 const crossScopeCorrelationScopeId = "cross_scope_correlation";
@@ -1414,11 +1414,36 @@ function hasEvidenceOrAllowedGapType(finding: any) {
 
 export function deterministicFindingsToScopeAnalysisFindings(findings: any[], packet: ReturnType<typeof buildAIScopePacket>) {
   const evidenceById = new Map(fullEvidenceCatalogForPacket(packet).map((ref) => [ref.id, ref]));
+  const fullFactIds = new Set([...(packet.fullConfigFactIds ?? []), ...(packet.fullStateFactIds ?? [])]);
+  const fullMetricIds = new Set(packet.fullMetricIds ?? []);
+  const fullCorrelationIds = new Set(packet.fullCorrelationIds ?? []);
   return findings
     .filter((finding) => finding?.id || finding?.finding_id)
     .map((finding) => {
       if (finding.finding_id && Array.isArray(finding.evidence)) return finding;
       const evidenceRefs = Array.isArray(finding.evidenceRefs) ? finding.evidenceRefs.filter((ref: string) => evidenceById.has(ref)).slice(0, 8) : [];
+      const evidenceDerivedFactIds = evidenceRefs.flatMap((refId: string) => {
+        const ref = evidenceById.get(refId);
+        return [ref?.configFactId, ref?.stateFactId].filter(Boolean) as string[];
+      });
+      const evidenceDerivedMetricIds = evidenceRefs.flatMap((refId: string) => {
+        const metricId = evidenceById.get(refId)?.metricId;
+        return metricId ? [metricId] : [];
+      });
+      const relatedFactIds = uniqueStrings([
+        ...normalizeStringArray(finding.related_fact_ids),
+        ...normalizeStringArray(finding.relatedFactIds),
+        ...evidenceDerivedFactIds
+      ]).filter((id) => fullFactIds.has(id)).slice(0, 12);
+      const relatedMetricIds = uniqueStrings([
+        ...normalizeStringArray(finding.related_metric_ids),
+        ...normalizeStringArray(finding.relatedMetricIds),
+        ...evidenceDerivedMetricIds
+      ]).filter((id) => fullMetricIds.has(id)).slice(0, 12);
+      const relatedCorrelationIds = uniqueStrings([
+        ...normalizeStringArray(finding.related_correlation_ids),
+        ...normalizeStringArray(finding.relatedCorrelationIds)
+      ]).filter((id) => fullCorrelationIds.has(id)).slice(0, 12);
       return {
         finding_id: String(finding.id ?? "deterministic_finding"),
         scope: packet.scopeId,
@@ -1427,9 +1452,9 @@ export function deterministicFindingsToScopeAnalysisFindings(findings: any[], pa
         severity: normalizeScopeSeverity(finding.severity),
         confidence: normalizeScopeConfidence(finding.confidence),
         evidence_refs: evidenceRefs,
-        related_fact_ids: [],
-        related_metric_ids: [],
-        related_correlation_ids: [],
+        related_fact_ids: relatedFactIds,
+        related_metric_ids: relatedMetricIds,
+        related_correlation_ids: relatedCorrelationIds,
         evidence: evidenceRefs.map((refId: string) => {
           const ref = evidenceById.get(refId);
           return {
@@ -1450,6 +1475,15 @@ export function deterministicFindingsToScopeAnalysisFindings(findings: any[], pa
         dependencies: ["Evidencia del assessment"]
       };
     });
+}
+
+function normalizeStringArray(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => String(item).trim()).filter(Boolean);
+}
+
+function uniqueStrings(values: string[]) {
+  return Array.from(new Set(values));
 }
 
 function normalizeScopeSeverity(value: unknown) {

@@ -12,6 +12,7 @@ import {
   buildAIScopePacket,
   buildAssessmentKnowledgeGraph,
   EVIDENCE_TOP_K,
+  fullEvidenceCatalogForPacket,
   getAIScopeStrategy,
   planScopePartitions,
   resolveMaxInputTokens,
@@ -330,6 +331,20 @@ test("buildAIScopePacket partitionDevices restricts devices facts relationships 
   assert.equal(packet.evidencePack.some((ref) => ref.deviceId === "dist-01" || ref.deviceId === "core-02"), false);
 });
 
+test("buildAIScopePacket keeps full reference catalogs independent from trimmed graph slice", () => {
+  const input = baseInput();
+  const graph = buildAssessmentKnowledgeGraph(input);
+  const packet = buildAIScopePacket({ record: input, scopeId: "configuration", partitionDevices: ["dist-01"], maxInputTokens: 1 });
+
+  assert.deepEqual(new Set(packet.fullEvidenceRefIds), new Set(graph.nodes.evidenceRefs.map((ref) => ref.id)));
+  assert.deepEqual(new Set(packet.fullConfigFactIds), new Set(graph.nodes.configFacts.map((fact) => fact.id)));
+  assert.deepEqual(new Set(packet.fullStateFactIds), new Set(graph.nodes.stateFacts.map((fact) => fact.id)));
+  assert.deepEqual(new Set(packet.fullMetricIds), new Set(graph.nodes.performanceMetrics.map((metric) => metric.id)));
+  assert.deepEqual(new Set(packet.fullCorrelationIds), new Set(graph.nodes.correlations.map((candidate) => candidate.id)));
+  assert.ok(packet.fullMetricIds.some((id) => !packet.graphSlice.performanceMetrics.some((metric) => metric.id === id)));
+  assert.ok(packet.fullCorrelationIds.some((id) => !packet.memory.openCorrelationCandidates.some((candidate) => candidate.id === id)));
+});
+
 test("validateScopeAnalysisResult rejects invented evidence, facts and correlations", () => {
   const packet = buildAIScopePacket({ record: baseInput(), scopeId: "security" });
   const result = validateScopeAnalysisResult({
@@ -342,7 +357,7 @@ test("validateScopeAnalysisResult rejects invented evidence, facts and correlati
       confidence: "high",
       evidence_refs: ["invented-ref"],
       related_fact_ids: ["cfg_invented"],
-      related_metric_ids: [],
+      related_metric_ids: ["pm_invented"],
       related_correlation_ids: ["corr_invented"],
       evidence: [{ source_type: "cli", source_name: "invented", hostname: "core-01", command: "show running-config", excerpt: "invented" }],
       technical_rationale: "Inventado",
@@ -386,6 +401,49 @@ test("validateScopeAnalysisResult accepts real evidence refs excluded from the t
       remediation_steps: [],
       validation_questions: [],
       related_devices: ["sec-35"],
+      related_sites: [],
+      dependencies: []
+    }]
+  }, packet);
+
+  assert.equal(result.validFindings.length, 1);
+  assert.equal(result.rejectedFindings.length, 0);
+});
+
+test("validateScopeAnalysisResult accepts real facts metrics and correlations excluded from the trimmed packet", () => {
+  const input = baseInput();
+  const graph = buildAssessmentKnowledgeGraph(input);
+  const fact = graph.nodes.configFacts.find((item) => item.deviceId === "core-01" && item.factType === "insecure_snmp")!;
+  const metric = graph.nodes.performanceMetrics.find((item) => item.id === "pm_crc")!;
+  const correlation = graph.nodes.correlations.find((item) => item.involvedMetrics.includes("pm_crc"))!;
+  const packet = buildAIScopePacket({ record: input, scopeId: "configuration", partitionDevices: ["dist-01"], maxInputTokens: 1 });
+
+  assert.equal(packet.graphSlice.configFacts.some((item) => item.id === fact.id), false);
+  assert.equal(packet.graphSlice.performanceMetrics.some((item) => item.id === metric.id), false);
+  assert.equal(packet.memory.openCorrelationCandidates.some((item) => item.id === correlation.id), false);
+  assert.ok(packet.fullConfigFactIds.includes(fact.id));
+  assert.ok(packet.fullMetricIds.includes(metric.id));
+  assert.ok(packet.fullCorrelationIds.includes(correlation.id));
+
+  const result = validateScopeAnalysisResult({
+    findings: [{
+      finding_id: "cfg_real_trimmed_catalog_refs",
+      scope: "configuration",
+      title: "Desviacion de configuracion con referencias recortadas",
+      finding_type: "probable_issue",
+      severity: "medium",
+      confidence: "medium",
+      evidence_refs: [fact.evidenceRef],
+      related_fact_ids: [fact.id],
+      related_metric_ids: [metric.id],
+      related_correlation_ids: [correlation.id],
+      evidence: [{ source_type: "cli", source_name: fact.evidenceRef, hostname: "core-01", command: "show running-config", excerpt: "snmp-server community public RO" }],
+      technical_rationale: "Las referencias existen en el assessment completo aunque fueron recortadas de esta particion.",
+      business_impact: "Puede indicar riesgo operacional correlacionado.",
+      recommendation: "Validar la configuracion y metricas del equipo citado.",
+      remediation_steps: [],
+      validation_questions: [],
+      related_devices: ["core-01"],
       related_sites: [],
       dependencies: []
     }]
@@ -598,8 +656,8 @@ test("validateScopeAnalysisResult rejects high security findings backed only by 
 test("deterministicFindingsToScopeAnalysisFindings resolves deterministic evidence from the full catalog", () => {
   const packet = buildAIScopePacket({ record: inputWithLongSecurityEvidence(36), scopeId: "security", maxInputTokens: 1 });
   const sentEvidenceIds = new Set(packet.evidencePack.map((ref) => ref.id));
-  const excludedEvidenceId = packet.fullEvidenceRefIds.find((id) => !sentEvidenceIds.has(id));
-  assert.ok(excludedEvidenceId);
+  const excludedEvidenceRef = fullEvidenceCatalogForPacket(packet).find((ref) => ref.configFactId && !sentEvidenceIds.has(ref.id));
+  assert.ok(excludedEvidenceRef);
 
   const findings = deterministicFindingsToScopeAnalysisFindings([{
     id: "det_trimmed_evidence",
@@ -607,14 +665,36 @@ test("deterministicFindingsToScopeAnalysisFindings resolves deterministic eviden
     severity: "high",
     confidence: 90,
     affectedAssets: ["sec-35"],
-    evidenceRefs: [excludedEvidenceId]
+    evidenceRefs: [excludedEvidenceRef.id],
+    relatedFactIds: [excludedEvidenceRef.configFactId]
   }], packet);
 
   assert.equal(findings.length, 1);
-  assert.deepEqual(findings[0].evidence_refs, [excludedEvidenceId]);
+  assert.deepEqual(findings[0].evidence_refs, [excludedEvidenceRef.id]);
+  assert.deepEqual(findings[0].related_fact_ids, [excludedEvidenceRef.configFactId]);
   assert.equal(findings[0].finding_type, "probable_issue");
   assert.equal(findings[0].evidence.length, 1);
   assert.equal(findings[0].evidence[0].source_name.length > 0, true);
+});
+
+test("deterministicFindingsToScopeAnalysisFindings preserves metric references from the full catalog", () => {
+  const packet = buildAIScopePacket({ record: baseInput(), scopeId: "configuration", partitionDevices: ["dist-01"], maxInputTokens: 1 });
+  const metricRef = fullEvidenceCatalogForPacket(packet).find((ref) => ref.metricId === "pm_crc");
+  assert.ok(metricRef);
+  assert.equal(packet.evidencePack.some((ref) => ref.id === metricRef.id), false);
+
+  const findings = deterministicFindingsToScopeAnalysisFindings([{
+    id: "det_trimmed_metric",
+    title: "Hallazgo deterministico con metrica recortada",
+    severity: "medium",
+    confidence: 80,
+    affectedAssets: ["core-01"],
+    evidenceRefs: [metricRef.id]
+  }], packet);
+
+  assert.deepEqual(findings[0].evidence_refs, [metricRef.id]);
+  assert.deepEqual(findings[0].related_metric_ids, ["pm_crc"]);
+  assert.equal(findings[0].evidence[0].source_type, "performance");
 });
 
 test("validation phase keeps gap findings without evidence and rejects non-gap findings without evidence", () => {

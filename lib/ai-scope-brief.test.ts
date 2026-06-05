@@ -512,7 +512,7 @@ function baseSystemPrompt() {
     "Todo hallazgo debe tener evidence_refs existentes en AIScopePacket.fullEvidenceRefIds o debe clasificarse como visibility_gap/validation_required.",
     "Respeta la estrategia, tipos de hallazgo y reglas de validacion especificas del ambito.",
     "Si la evidencia es insuficiente, usa validation_required o visibility_gap en vez de inferir.",
-    "Prompt version: assessment-ai-prompts-v1. Engine version: ai-analysis-engine-v3."
+    "Prompt version: assessment-ai-prompts-v1. Engine version: ai-analysis-engine-v4."
   ].join("\n");
 }
 

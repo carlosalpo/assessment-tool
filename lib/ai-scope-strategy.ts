@@ -98,6 +98,10 @@ export type AIScopePacket = {
   };
   evidencePack: EvidenceReference[];
   fullEvidenceRefIds: string[];
+  fullConfigFactIds: string[];
+  fullStateFactIds: string[];
+  fullMetricIds: string[];
+  fullCorrelationIds: string[];
   outputContract: {
     schemaName: string;
     requiredEvidenceRefs: boolean;
@@ -416,6 +420,10 @@ export function buildAIScopePacket(input: {
     },
     evidencePack: selectedEvidence,
     fullEvidenceRefIds: graph.nodes.evidenceRefs.map((ref) => ref.id),
+    fullConfigFactIds: graph.nodes.configFacts.map((fact) => fact.id),
+    fullStateFactIds: graph.nodes.stateFacts.map((fact) => fact.id),
+    fullMetricIds: graph.nodes.performanceMetrics.map((metric) => metric.id),
+    fullCorrelationIds: graph.nodes.correlations.map((candidate) => candidate.id),
     outputContract: {
       schemaName: "scope_analysis_result",
       requiredEvidenceRefs: true,
@@ -505,11 +513,12 @@ export function fullEvidenceCatalogForPacket(packet: AIScopePacket): EvidenceRef
 
 export function validateScopeAnalysisResult(parsed: any, packet: AIScopePacket): ScopeValidationResult {
   const strategy = getAIScopeStrategy(packet.scopeId);
+  const fullEvidenceCatalog = fullEvidenceCatalogForPacket(packet);
   const evidenceCatalog = new Set((packet.fullEvidenceRefIds?.length ? packet.fullEvidenceRefIds : packet.evidencePack.map((ref) => ref.id)));
-  const configFactCatalog = new Set(packet.graphSlice.configFacts.map((fact) => fact.id));
-  const stateFactCatalog = new Set(packet.graphSlice.stateFacts.map((fact) => fact.id));
-  const metricCatalog = new Set(packet.graphSlice.performanceMetrics.map((metric) => metric.id));
-  const correlationCatalog = new Set(packet.memory.openCorrelationCandidates.map((candidate) => candidate.id));
+  const configFactCatalog = new Set((packet.fullConfigFactIds?.length ? packet.fullConfigFactIds : packet.graphSlice.configFacts.map((fact) => fact.id)));
+  const stateFactCatalog = new Set((packet.fullStateFactIds?.length ? packet.fullStateFactIds : packet.graphSlice.stateFacts.map((fact) => fact.id)));
+  const metricCatalog = new Set((packet.fullMetricIds?.length ? packet.fullMetricIds : packet.graphSlice.performanceMetrics.map((metric) => metric.id)));
+  const correlationCatalog = new Set((packet.fullCorrelationIds?.length ? packet.fullCorrelationIds : packet.memory.openCorrelationCandidates.map((candidate) => candidate.id)));
   const validFindings: any[] = [];
   const rejectedFindings: ScopeValidationResult["rejectedFindings"] = [];
 
@@ -539,7 +548,7 @@ export function validateScopeAnalysisResult(parsed: any, packet: AIScopePacket):
     if (unknownCorrelations.length > 0) reasons.push(`related_correlation_ids desconocidos: ${unknownCorrelations.join(", ")}.`);
 
     if (packet.scopeId === "topology" && /spof|single point|punto unico|single-homed|single homed/.test(text)) {
-      const hasTopologyEvidence = evidenceRefs.some((ref) => packet.evidencePack.some((item) => item.id === ref && item.relationId));
+      const hasTopologyEvidence = evidenceRefs.some((ref) => fullEvidenceCatalog.some((item) => item.id === ref && item.relationId));
       if (!hasTopologyEvidence) reasons.push("SPOF o single-homed requiere evidencia topologica relacionada.");
     }
     if (packet.scopeId === "configuration" && relatedFactIds.length === 0 && evidenceRefs.length === 0) {
@@ -548,7 +557,7 @@ export function validateScopeAnalysisResult(parsed: any, packet: AIScopePacket):
     if (packet.scopeId === "security" && ["critical", "high"].includes(severity) && ["confirmed_finding", "probable_issue"].includes(findingType)) {
       const hasSecurityFact = relatedFactIds.some((id) => configFactCatalog.has(id));
       const hasExplicitSecurityEvidence = evidenceRefs.some((refId) => {
-        const ref = packet.evidencePack.find((item) => item.id === refId);
+        const ref = fullEvidenceCatalog.find((item) => item.id === refId);
         return ref ? isExplicitSecurityEvidence(ref) : false;
       });
       if (!hasSecurityFact && !hasExplicitSecurityEvidence) {
