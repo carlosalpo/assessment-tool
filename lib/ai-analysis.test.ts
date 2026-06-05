@@ -23,6 +23,7 @@ import {
   deterministicFindingsToScopeAnalysisFindings,
   filterFindingsForValidationPhase,
   fullAssessmentScopeOrder,
+  scopesForJob,
   synthesisAssessmentScopeOrder
 } from "./ai-analysis-jobs.ts";
 
@@ -116,6 +117,15 @@ test("full assessment scope order excludes synthesis-only roadmap and executive 
   assert.equal(fullAssessmentScopeOrder.includes("roadmap"), false);
   assert.equal(fullAssessmentScopeOrder.includes("executive_summary"), false);
   assert.deepEqual(synthesisAssessmentScopeOrder, ["roadmap", "executive_summary"]);
+});
+
+test("operations scope is blocked until Tab 11 interviews are complete", () => {
+  const input = baseInput();
+  assert.equal(scopesForJob("full", null, input).includes("operations"), false);
+  assert.throws(
+    () => scopesForJob("scope", "operations", input),
+    /Completa las entrevistas del Tab 11 primero/
+  );
 });
 
 test("buildAssessmentAIContext normalizes core assessment data", () => {

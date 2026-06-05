@@ -2978,10 +2978,20 @@ function hashSynthesisDigest(digest: SynthesisDigest, target: SynthesisTarget) {
     .digest("hex");
 }
 
-function scopesForJob(mode: AIAnalysisMode, scopeId: AIAnalysisScopeId | null, record: any) {
-  if (mode === "scope") return [scopeId ?? "evidence"];
+export function scopesForJob(mode: AIAnalysisMode, scopeId: AIAnalysisScopeId | null, record: any) {
+  const operationsReady = isOperationalAssessmentComplete(record?.operationalAssessment);
+  if (mode === "scope") {
+    const selectedScope = scopeId ?? "evidence";
+    if (selectedScope === "operations" && !operationsReady) {
+      throw new Error("Completa las entrevistas del Tab 11 primero para evaluar Operaciones.");
+    }
+    return [selectedScope];
+  }
   const performanceEnabled = Boolean(record?.scope?.performanceAnalysis?.enabled);
-  return fullAssessmentScopeOrder.filter((id) => id !== "performance" || performanceEnabled);
+  return fullAssessmentScopeOrder.filter((id) =>
+    (id !== "performance" || performanceEnabled) &&
+    (id !== "operations" || operationsReady)
+  );
 }
 
 async function updateJobProgress(jobId: string) {

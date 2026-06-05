@@ -36,6 +36,10 @@ export async function POST(request: Request) {
     if (job.status === "queued") runAIAnalysisJob(job.id, { apiKey }).catch(() => undefined);
     return NextResponse.json({ job });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "No se pudo crear el job AI." }, { status: 500 });
+    const message = error instanceof Error ? error.message : "No se pudo crear el job AI.";
+    return NextResponse.json(
+      { error: message },
+      { status: message.includes("Completa las entrevistas del Tab 11 primero") ? 400 : 500 }
+    );
   }
 }
