@@ -422,6 +422,32 @@ type AIDebugInteraction = {
   createdAt: string;
 };
 
+type DesignGuidelineSource = "assessment" | "global" | "default";
+
+type TopologyDesignGuidelineSnapshot = {
+  scopeKey: string;
+  content: string;
+  updatedBy: string | null;
+  updatedAt: string | null;
+};
+
+type ResolvedTopologyDesignGuideline = {
+  assessmentId: string;
+  content: string;
+  source: DesignGuidelineSource;
+  sourceScopeKey: string;
+  updatedBy: string | null;
+  updatedAt: string | null;
+};
+
+type TopologyDesignGuidelineResponse = {
+  scopeKey: string;
+  guideline: ResolvedTopologyDesignGuideline;
+  record: TopologyDesignGuidelineSnapshot | null;
+  ok?: boolean;
+  deleted?: number;
+};
+
 type RunEvaluationOptions = {
   forceReevaluate?: boolean;
 };
@@ -7835,6 +7861,7 @@ function AiEvaluationTab({
           </div>
         </PanelBody>
       </Panel>
+      {isAdmin && currentUser && <TopologyDesignGuidelinesAdminPanel record={record} currentUser={currentUser} />}
       {isAdmin && currentUser && <AIDebugAdminPanel record={record} currentUser={currentUser} />}
       <AIReviewPanel
         record={record}
@@ -8154,6 +8181,177 @@ function AIAnalysisJobStatusPanel({
         })}
       </div>
     </div>
+  );
+}
+
+function TopologyDesignGuidelinesAdminPanel({ record, currentUser }: { record: AssessmentRecord; currentUser: AppUser }) {
+  const isAdmin = canManageUsers(currentUser);
+  const [globalGuideline, setGlobalGuideline] = useState<TopologyDesignGuidelineResponse | null>(null);
+  const [assessmentGuideline, setAssessmentGuideline] = useState<TopologyDesignGuidelineResponse | null>(null);
+  const [globalDraft, setGlobalDraft] = useState("");
+  const [assessmentDraft, setAssessmentDraft] = useState("");
+  const [status, setStatus] = useState<{ state: "idle" | "loading" | "saving" | "deleting" | "error"; message: string }>({
+    state: "idle",
+    message: ""
+  });
+
+  const loadGuidelines = useCallback(async () => {
+    if (!isAdmin) return;
+    try {
+      const [nextGlobal, nextAssessment] = await Promise.all([
+        fetchTopologyDesignGuideline("global", currentUser),
+        fetchTopologyDesignGuideline(record.id, currentUser)
+      ]);
+      setGlobalGuideline(nextGlobal);
+      setAssessmentGuideline(nextAssessment);
+      setGlobalDraft(nextGlobal.record?.content ?? nextGlobal.guideline.content);
+      setAssessmentDraft(nextAssessment.record?.content ?? nextAssessment.guideline.content);
+      setStatus({ state: "idle", message: "" });
+    } catch (error) {
+      setStatus({ state: "error", message: error instanceof Error ? error.message : "No se pudieron cargar guidelines de diseno." });
+    }
+  }, [currentUser, isAdmin, record.id]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadGuidelines();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [loadGuidelines]);
+
+  async function saveGlobalGuideline() {
+    setStatus({ state: "saving", message: "Guardando guideline global..." });
+    try {
+      const nextGlobal = await updateTopologyDesignGuideline("global", globalDraft, currentUser);
+      const nextAssessment = await fetchTopologyDesignGuideline(record.id, currentUser);
+      setGlobalGuideline(nextGlobal);
+      setAssessmentGuideline(nextAssessment);
+      setAssessmentDraft(nextAssessment.record?.content ?? nextAssessment.guideline.content);
+      setStatus({ state: "idle", message: "Guideline global guardada." });
+    } catch (error) {
+      setStatus({ state: "error", message: error instanceof Error ? error.message : "No se pudo guardar guideline global." });
+    }
+  }
+
+  async function saveAssessmentGuideline() {
+    setStatus({ state: "saving", message: "Guardando override del assessment..." });
+    try {
+      const nextAssessment = await updateTopologyDesignGuideline(record.id, assessmentDraft, currentUser);
+      setAssessmentGuideline(nextAssessment);
+      setAssessmentDraft(nextAssessment.record?.content ?? nextAssessment.guideline.content);
+      setStatus({ state: "idle", message: "Override del assessment guardado." });
+    } catch (error) {
+      setStatus({ state: "error", message: error instanceof Error ? error.message : "No se pudo guardar override del assessment." });
+    }
+  }
+
+  async function clearAssessmentGuideline() {
+    setStatus({ state: "deleting", message: "Limpiando override del assessment..." });
+    try {
+      const nextAssessment = await deleteTopologyDesignGuideline(record.id, currentUser);
+      setAssessmentGuideline(nextAssessment);
+      setAssessmentDraft(nextAssessment.guideline.content);
+      setStatus({ state: "idle", message: "Override eliminado; el assessment vuelve a heredar." });
+    } catch (error) {
+      setStatus({ state: "error", message: error instanceof Error ? error.message : "No se pudo eliminar override del assessment." });
+    }
+  }
+
+  if (!isAdmin) return null;
+
+  const busy = status.state === "loading" || status.state === "saving" || status.state === "deleting";
+  const globalSource = globalGuideline?.record ? "Global personalizado" : "Default semilla";
+  const assessmentSource = assessmentGuideline ? designGuidelineSourceLabel(assessmentGuideline.guideline.source) : "Cargando";
+  const assessmentInheritance = assessmentGuideline?.record ? "Override activo para este assessment" : `Hereda de: ${assessmentSource}`;
+
+  return (
+    <Panel>
+      <PanelHeader className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <Network size={16} className="text-primary" />
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-sm font-semibold">Guidelines de diseno - Topologia (admin)</h2>
+              <Badge tone="neutral">{assessmentSource}</Badge>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {assessmentGuideline?.guideline.updatedAt ? `Fuente efectiva actualizada ${formatDate(assessmentGuideline.guideline.updatedAt)}` : "Usa el default global hasta que exista contenido persistido."}
+            </p>
+          </div>
+        </div>
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => {
+            setStatus({ state: "loading", message: "Cargando guidelines..." });
+            void loadGuidelines();
+          }}
+          disabled={busy}
+        >
+          <RotateCcw size={14} />
+          Refrescar
+        </Button>
+      </PanelHeader>
+      <PanelBody className="space-y-3">
+        {status.message && (
+          <div className={cn("rounded-md border px-3 py-2 text-xs", status.state === "error" ? "border-rose-500/40 bg-rose-500/10 text-rose-300" : "border-border bg-muted/40 text-muted-foreground")}>
+            {status.message}
+          </div>
+        )}
+        <div className="grid gap-3 lg:grid-cols-2">
+          <div className="rounded-md border border-border p-3">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <p className="text-sm font-semibold">Global</p>
+                <p className="text-xs text-muted-foreground">
+                  {globalSource}{globalGuideline?.record?.updatedAt ? ` · ${formatDate(globalGuideline.record.updatedAt)}` : ""}
+                </p>
+              </div>
+              <Badge tone={globalGuideline?.record ? "success" : "neutral"}>{globalGuideline?.record ? "Persistido" : "Semilla"}</Badge>
+            </div>
+            <Textarea
+              className="mt-3 min-h-72 font-mono text-xs"
+              value={globalDraft}
+              disabled={busy}
+              onChange={(event) => setGlobalDraft(event.target.value)}
+            />
+            <div className="mt-3 flex justify-end">
+              <Button size="sm" onClick={() => void saveGlobalGuideline()} disabled={busy}>
+                <Save size={14} />
+                Guardar global
+              </Button>
+            </div>
+          </div>
+          <div className="rounded-md border border-border p-3">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <p className="text-sm font-semibold">Este assessment</p>
+                <p className="text-xs text-muted-foreground">
+                  {assessmentInheritance}{assessmentGuideline?.record?.updatedAt ? ` · ${formatDate(assessmentGuideline.record.updatedAt)}` : ""}
+                </p>
+              </div>
+              <Badge tone={assessmentGuideline?.record ? "success" : "neutral"}>{assessmentGuideline?.record ? "Override activo" : "Heredado"}</Badge>
+            </div>
+            <Textarea
+              className="mt-3 min-h-72 font-mono text-xs"
+              value={assessmentDraft}
+              disabled={busy}
+              onChange={(event) => setAssessmentDraft(event.target.value)}
+            />
+            <div className="mt-3 flex flex-wrap justify-end gap-2">
+              <Button variant="ghost" size="sm" onClick={() => void clearAssessmentGuideline()} disabled={busy || !assessmentGuideline?.record}>
+                <Trash2 size={14} />
+                Volver a global
+              </Button>
+              <Button size="sm" onClick={() => void saveAssessmentGuideline()} disabled={busy}>
+                <Save size={14} />
+                Guardar override
+              </Button>
+            </div>
+          </div>
+        </div>
+      </PanelBody>
+    </Panel>
   );
 }
 
@@ -11870,6 +12068,50 @@ async function resetPersistentAIAnalysisStatus(assessmentId: string, scopeId?: A
   const payload = await response.json();
   if (!response.ok) throw new Error(payload?.error || "No se pudo limpiar estado AI.");
   return payload as AIAssessmentAnalysisStatus;
+}
+
+async function fetchTopologyDesignGuideline(scopeKey: string, currentUser: AppUser): Promise<TopologyDesignGuidelineResponse> {
+  const response = await fetch(`/api/ai-analysis/design-guidelines?scopeKey=${encodeURIComponent(scopeKey)}`, {
+    cache: "no-store",
+    headers: { "x-user-email": currentUser.email }
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload?.error || "No se pudo consultar guideline de diseno.");
+  return payload as TopologyDesignGuidelineResponse;
+}
+
+async function updateTopologyDesignGuideline(scopeKey: string, content: string, currentUser: AppUser): Promise<TopologyDesignGuidelineResponse> {
+  const response = await fetch("/api/ai-analysis/design-guidelines", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      "x-user-email": currentUser.email
+    },
+    body: JSON.stringify({
+      scopeKey,
+      content,
+      updatedBy: currentUser.email
+    })
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload?.error || "No se pudo guardar guideline de diseno.");
+  return payload as TopologyDesignGuidelineResponse;
+}
+
+async function deleteTopologyDesignGuideline(scopeKey: string, currentUser: AppUser): Promise<TopologyDesignGuidelineResponse> {
+  const response = await fetch(`/api/ai-analysis/design-guidelines?scopeKey=${encodeURIComponent(scopeKey)}`, {
+    method: "DELETE",
+    headers: { "x-user-email": currentUser.email }
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload?.error || "No se pudo eliminar guideline de diseno.");
+  return payload as TopologyDesignGuidelineResponse;
+}
+
+function designGuidelineSourceLabel(source: DesignGuidelineSource) {
+  if (source === "assessment") return "Override del assessment";
+  if (source === "global") return "Global";
+  return "Default semilla";
 }
 
 async function fetchAIDebugSetting(assessmentId: string, currentUser: AppUser): Promise<AIDebugSetting> {

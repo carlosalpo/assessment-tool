@@ -330,6 +330,13 @@ model AiDebugSetting {
   updatedAt       DateTime @updatedAt
 }
 
+model TopologyDesignGuideline {
+  scopeKey  String   @id
+  content   String   @db.Text
+  updatedBy String?
+  updatedAt DateTime @updatedAt
+}
+
 model AiInteractionLog {
   id                   String   @id @default(cuid())
   jobId                String
