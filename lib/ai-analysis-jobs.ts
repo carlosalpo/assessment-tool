@@ -132,6 +132,7 @@ export type ReduceDigestFinding = {
   title: string;
   severity: string;
   finding_type: string;
+  remediation_category: string;
   related_devices: string[];
 };
 
@@ -1277,6 +1278,7 @@ async function runReduceStage(input: {
             requiredBehavior: [
               "Cada hallazgo compuesto debe citar source_finding_ids existentes en el digest.",
               "Cada hallazgo compuesto debe combinar al menos 2 scopes distintos.",
+              "Cada hallazgo compuesto debe incluir remediation_category derivada de sus fuentes citadas.",
               "No inventes equipos ni finding_id; si no hay correlacion transversal suficiente, devuelve findings vacio."
             ],
             reduceDigest: digest
@@ -1489,6 +1491,7 @@ async function runSynthesisTarget(
               : "Genera un resumen ejecutivo usando solo hallazgos del synthesisDigest y el roadmap generado si existe.",
             requiredBehavior: [
               "Cada item o riesgo debe citar source_finding_ids existentes en el digest.",
+              "Cada item o riesgo debe incluir remediation_category derivada de sus fuentes citadas.",
               "Prioriza hallazgos compuestos cross-scope cuando existan.",
               "No inventes equipos, scopes ni finding_id."
             ],
@@ -1962,14 +1965,18 @@ export function deterministicFindingsToScopeAnalysisFindings(findings: any[], pa
         const metricId = evidenceById.get(refId)?.metricId;
         return metricId ? [metricId] : [];
       });
-      const relatedFactIds = uniqueStrings([
+      const suppliedRelatedFactIds = uniqueStrings([
         ...normalizeStringArray(finding.related_fact_ids),
-        ...normalizeStringArray(finding.relatedFactIds),
+        ...normalizeStringArray(finding.relatedFactIds)
+      ]);
+      const relatedFactIds = uniqueStrings([
+        ...suppliedRelatedFactIds,
         ...evidenceDerivedFactIds
       ]).filter((id) => fullFactIds.has(id)).slice(0, 12);
       const relatedMetricIds = uniqueStrings([
         ...normalizeStringArray(finding.related_metric_ids),
         ...normalizeStringArray(finding.relatedMetricIds),
+        ...suppliedRelatedFactIds.filter((id) => fullMetricIds.has(id)),
         ...evidenceDerivedMetricIds
       ]).filter((id) => fullMetricIds.has(id)).slice(0, 12);
       const relatedCorrelationIds = uniqueStrings([
@@ -2456,6 +2463,7 @@ export function buildReduceDigest(scopeResults: any[]): ReduceDigest {
         title: String(finding.title ?? ""),
         severity: String(finding.severity ?? "medium"),
         finding_type: String(finding.finding_type ?? "probable_issue"),
+        remediation_category: normalizeRemediationCategory(finding.remediation_category),
         related_devices: normalizeStringList(finding.related_devices)
       }));
     catalog[scope] = findings.map((finding: ReduceDigestFinding) => finding.finding_id);
@@ -2497,6 +2505,7 @@ export function validateReduceResult(parsed: any, digest: ReduceDigest) {
       reasons.push(`related_devices no existen en las fuentes citadas: ${unknownDevices.join(", ")}.`);
     }
 
+    const normalizedRemediation = normalizeRemediationCategory(finding?.remediation_category, deriveRemediationCategoryFromSources(sourceKeys, sourceByKey));
     if (reasons.length > 0) {
       rejected.push({
         finding_id: String(finding?.finding_id ?? "unknown"),
@@ -2504,7 +2513,7 @@ export function validateReduceResult(parsed: any, digest: ReduceDigest) {
         reason: reasons.join(" ")
       });
     } else {
-      validFindings.push(finding);
+      validFindings.push({ ...finding, remediation_category: normalizedRemediation });
     }
   }
 
@@ -2534,6 +2543,7 @@ export function buildSynthesisDigest(scopeResults: any[]): SynthesisDigest {
         title: String(finding.title ?? ""),
         severity: String(finding.severity ?? "medium"),
         finding_type: String(finding.finding_type ?? "probable_issue"),
+        remediation_category: normalizeRemediationCategory(finding.remediation_category),
         related_devices: normalizeStringList(finding.related_devices)
       }));
     catalog[scope] = findings.map((finding: ReduceDigestFinding) => finding.finding_id);
@@ -2548,7 +2558,7 @@ export function buildSynthesisDigest(scopeResults: any[]): SynthesisDigest {
 }
 
 export function validateSynthesisResult(parsed: any, digest: SynthesisDigest, target: SynthesisTarget) {
-  const sourceByKey = new Set(digest.findings.map((finding) => `${finding.scope}:${finding.finding_id}`));
+  const sourceByKey = new Map(digest.findings.map((finding) => [`${finding.scope}:${finding.finding_id}`, finding]));
   const entries = target === "roadmap"
     ? (Array.isArray(parsed?.items) ? parsed.items : [])
     : (Array.isArray(parsed?.top_risks) ? parsed.top_risks : []);
@@ -2562,6 +2572,7 @@ export function validateSynthesisResult(parsed: any, digest: SynthesisDigest, ta
     const reasons: string[] = [];
     if (sources.length === 0) reasons.push("Debe citar al menos un source_finding_id existente.");
     if (missingSources.length > 0) reasons.push(`source_finding_ids inexistentes: ${missingSources.join(", ")}.`);
+    const normalizedRemediation = normalizeRemediationCategory(entry?.remediation_category, deriveRemediationCategoryFromSources(sourceKeys, sourceByKey));
 
     if (reasons.length > 0) {
       rejected.push({
@@ -2570,7 +2581,7 @@ export function validateSynthesisResult(parsed: any, digest: SynthesisDigest, ta
         reason: reasons.join(" ")
       });
     } else {
-      valid.push(entry);
+      valid.push({ ...entry, remediation_category: normalizedRemediation });
     }
   }
 
@@ -2637,6 +2648,7 @@ function compactGeneratedRoadmap(roadmap: any) {
           title: item.title,
           priority: item.priority,
           severity: item.severity,
+          remediation_category: item.remediation_category,
           source_finding_ids: item.source_finding_ids
         }))
       : [],
@@ -2719,6 +2731,30 @@ function confidenceScore(value: unknown) {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   const rank: Record<string, number> = { high: 3, medium: 2, low: 1 };
   return rank[String(value ?? "").toLowerCase()] ?? 0;
+}
+
+function normalizeRemediationCategory(value: unknown, fallback = "pending_validation") {
+  const category = String(value ?? "").trim();
+  if (remediationCategoryEnum.includes(category)) return category;
+  return remediationCategoryEnum.includes(fallback) ? fallback : "pending_validation";
+}
+
+function deriveRemediationCategoryFromSources(
+  sourceKeys: string[],
+  sourceByKey: Map<string, Pick<ReduceDigestFinding, "remediation_category" | "severity">>
+) {
+  const sources = sourceKeys.map((key) => sourceByKey.get(key)).filter(Boolean) as Array<Pick<ReduceDigestFinding, "remediation_category" | "severity">>;
+  if (sources.length === 0) return "pending_validation";
+  const sorted = sources.sort((left, right) =>
+    severityScore(right.severity) - severityScore(left.severity) ||
+    remediationFrequency(right.remediation_category, sources) - remediationFrequency(left.remediation_category, sources) ||
+    String(left.remediation_category).localeCompare(String(right.remediation_category))
+  );
+  return normalizeRemediationCategory(sorted[0]?.remediation_category);
+}
+
+function remediationFrequency(category: string, sources: Array<Pick<ReduceDigestFinding, "remediation_category">>) {
+  return sources.filter((source) => source.remediation_category === category).length;
 }
 
 function normalizeSignatureText(value: unknown) {

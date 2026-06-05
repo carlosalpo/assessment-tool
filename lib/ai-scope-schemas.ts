@@ -92,7 +92,7 @@ export function synthesisResultSchema(target: "roadmap" | "executive_summary"): 
           items: {
             type: "object",
             additionalProperties: false,
-            required: ["item_id", "title", "priority", "severity", "effort", "recommendation", "source_finding_ids", "dependencies"],
+            required: ["item_id", "title", "priority", "severity", "effort", "recommendation", "remediation_category", "source_finding_ids", "dependencies"],
             properties: {
               item_id: { type: "string" },
               title: { type: "string" },
@@ -100,6 +100,7 @@ export function synthesisResultSchema(target: "roadmap" | "executive_summary"): 
               severity: { type: "string", enum: ["critical", "high", "medium", "low", "informational"] },
               effort: { type: "string" },
               recommendation: { type: "string" },
+              remediation_category: { type: "string", enum: remediationCategoryEnum },
               source_finding_ids: sourceFindingIdsSchema(),
               dependencies: { type: "array", items: { type: "string" } }
             }
@@ -123,10 +124,11 @@ export function synthesisResultSchema(target: "roadmap" | "executive_summary"): 
         items: {
           type: "object",
           additionalProperties: false,
-          required: ["title", "severity", "source_finding_ids"],
+          required: ["title", "severity", "remediation_category", "source_finding_ids"],
           properties: {
             title: { type: "string" },
             severity: { type: "string", enum: ["critical", "high", "medium", "low", "informational"] },
+            remediation_category: { type: "string", enum: remediationCategoryEnum },
             source_finding_ids: sourceFindingIdsSchema()
           }
         }

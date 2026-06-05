@@ -6,9 +6,11 @@
   },
   "scopes": {
     "security": { "minPrecision": 0.8, "minRecall": 1, "maxLeaked": 0 },
+    "configuration": { "minPrecision": 0.8, "minRecall": 1, "maxLeaked": 0 },
     "lifecycle": { "minPrecision": 0.8, "minRecall": 1, "maxLeaked": 0 },
     "topology": { "minPrecision": 0.8, "minRecall": 1, "maxLeaked": 0 },
     "evidence": { "minPrecision": 0.8, "minRecall": 1, "maxLeaked": 0 },
+    "operations": { "minPrecision": 0.8, "minRecall": 1, "maxLeaked": 0 },
     "performance": { "minPrecision": 0.8, "minRecall": 1, "maxLeaked": 0 }
   }
 }

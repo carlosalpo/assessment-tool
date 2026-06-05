@@ -408,6 +408,7 @@ test("buildReduceDigest builds a stable scoped finding catalog and caps by sever
   assert.equal(digest.catalog.security[0], "sec-9");
   assert.deepEqual(digest.catalog.topology, ["topo-1"]);
   assert.equal(digest.findings.some((finding) => finding.scope === "roadmap"), false);
+  assert.equal(digest.findings.every((finding) => typeof finding.remediation_category === "string"), true);
 });
 
 test("validateReduceResult enforces real sources from at least two scopes and known devices", () => {
@@ -424,6 +425,7 @@ test("validateReduceResult enforces real sources from at least two scopes and kn
     findings: [
       compositeFinding({
         finding_id: "cmp-1",
+        remediation_category: "invalid_legacy_category",
         related_devices: ["core-01"],
         source_finding_ids: [
           { scope: "security", finding_id: "sec-1" },
@@ -434,6 +436,7 @@ test("validateReduceResult enforces real sources from at least two scopes and kn
   }, digest);
   assert.equal(accepted.validFindings.length, 1);
   assert.equal(accepted.rejected.length, 0);
+  assert.equal(accepted.validFindings[0].remediation_category, "professional_services");
 
   const invalid = validateReduceResult({
     findings: [
@@ -502,6 +505,7 @@ test("buildSynthesisDigest includes reduce composites and excludes synthesis sco
   assert.deepEqual(digest.catalog.cross_scope_correlation, ["cmp-1"]);
   assert.equal(digest.findings.some((finding) => finding.scope === "roadmap"), false);
   assert.equal(digest.findings.some((finding) => finding.scope === "executive_summary"), false);
+  assert.equal(digest.findings.every((finding) => typeof finding.remediation_category === "string"), true);
 });
 
 test("validateSynthesisResult accepts real citations and rejects invented sources", () => {
@@ -523,16 +527,18 @@ test("validateSynthesisResult accepts real citations and rejects invented source
   assert.equal(roadmap.valid.length, 1);
   assert.equal(roadmap.rejected.length, 1);
   assert.match(roadmap.rejected[0].reason, /inexistentes/);
+  assert.equal(roadmap.valid[0].remediation_category, "professional_services");
 
   const summary = validateSynthesisResult({
     top_risks: [
-      topRisk({ title: "Compound risk", source_finding_ids: [{ scope: "security", finding_id: "sec-1" }] }),
+      topRisk({ title: "Compound risk", remediation_category: "invalid", source_finding_ids: [{ scope: "security", finding_id: "sec-1" }] }),
       topRisk({ title: "Invented risk", source_finding_ids: [] })
     ]
   }, digest, "executive_summary");
   assert.equal(summary.valid.length, 1);
   assert.equal(summary.rejected.length, 1);
   assert.match(summary.rejected[0].reason, /Debe citar/);
+  assert.equal(summary.valid[0].remediation_category, "professional_services");
 });
 
 function finding(id: string, severity: string, confidence: string, findingType: string, validationQuestions: string[]) {
@@ -565,6 +571,7 @@ function scopeFinding(patch: Record<string, unknown>) {
     technical_rationale: "Rationale",
     business_impact: "Impact",
     recommendation: "Recommendation",
+    remediation_category: "professional_services",
     remediation_steps: [],
     validation_questions: [],
     related_devices: [],
@@ -607,6 +614,7 @@ function roadmapItem(patch: Record<string, unknown>) {
     severity: "high",
     effort: "medium",
     recommendation: "Remediar",
+    remediation_category: "professional_services",
     source_finding_ids: [],
     dependencies: [],
     ...patch
@@ -617,6 +625,7 @@ function topRisk(patch: Record<string, unknown>) {
   return {
     title: "Riesgo",
     severity: "high",
+    remediation_category: "professional_services",
     source_finding_ids: [],
     ...patch
   };

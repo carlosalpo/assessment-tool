@@ -8,6 +8,13 @@
       "severityAtLeast": "high",
       "keywords": ["eox", "support"],
       "devices": ["core-eos"]
+    },
+    {
+      "scopeId": "lifecycle",
+      "finding_type": "probable_issue",
+      "severityAtLeast": "critical",
+      "keywords": ["obsoleto", "software"],
+      "devices": ["core-eos"]
     }
   ],
   "mustNotFind": [

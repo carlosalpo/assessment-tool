@@ -135,7 +135,9 @@ test("synthesis roadmap schema is strict-valid and requires source finding ids",
   assertStrictSchema(schema, "synthesis roadmap");
   const itemSchema = schema.properties.items.items;
   assert.ok(itemSchema.properties.source_finding_ids);
+  assert.ok(itemSchema.properties.remediation_category);
   assert.ok(itemSchema.required.includes("source_finding_ids"));
+  assert.ok(itemSchema.required.includes("remediation_category"));
 });
 
 test("synthesis executive summary schema is strict-valid and requires source finding ids", () => {
@@ -143,7 +145,9 @@ test("synthesis executive summary schema is strict-valid and requires source fin
   assertStrictSchema(schema, "synthesis executive summary");
   const riskSchema = schema.properties.top_risks.items;
   assert.ok(riskSchema.properties.source_finding_ids);
+  assert.ok(riskSchema.properties.remediation_category);
   assert.ok(riskSchema.required.includes("source_finding_ids"));
+  assert.ok(riskSchema.required.includes("remediation_category"));
 });
 
 function assertStrictSchema(schema: any, path: string) {

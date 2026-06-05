@@ -4,6 +4,8 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { buildAIScopePacket, validateScopeAnalysisResult, type AIScopeId } from "../lib/ai-scope-strategy.ts";
+import { buildLifecycleFindings } from "../lib/lifecycle-analysis.ts";
+import { buildOperationsFindings } from "../lib/operations-analysis.ts";
 import { evalFixtures } from "./fixtures/index.ts";
 import { aggregateMetrics, evaluateScope, type ScopeGolden } from "./metrics.ts";
 import type { ProducedFinding } from "./matching.ts";
@@ -34,7 +36,8 @@ test("offline golden harness validates expected scope findings", () => {
       const validation = validateScopeAnalysisResult(stub, packet);
       const produced = dedupeProduced([
         ...validation.validFindings,
-        ...deterministicFindingsFromPacket(packet)
+        ...deterministicFindingsFromPacket(packet),
+        ...deterministicFindingsFromRecord(golden.scopeId, fixture.record)
       ]).filter((finding) => finding.scope === golden.scopeId);
       const metrics = evaluateScope(golden, produced);
       const threshold = thresholds.scopes[golden.scopeId] ?? thresholds.aggregate;
@@ -77,6 +80,38 @@ function deterministicFindingsFromPacket(packet: ReturnType<typeof buildAIScopeP
     technical_rationale: candidate.description
   }));
   return [...deterministic, ...correlations];
+}
+
+function deterministicFindingsFromRecord(scopeId: string, record: any): ProducedFinding[] {
+  if (scopeId === "lifecycle") {
+    return buildLifecycleFindings({ devices: record?.parsed?.devices ?? [] }, record?.lifecycleEoxRecords ?? {}).map((finding) => ({
+      finding_id: finding.id,
+      scope: "lifecycle",
+      title: finding.title,
+      finding_type: finding.dates.endOfSaleDate || finding.dates.lastDateOfSupport ? "confirmed_finding" : "probable_issue",
+      severity: finding.severity,
+      evidence_refs: finding.evidenceRefs,
+      related_devices: finding.affectedAssets,
+      technical_rationale: finding.technical_rationale,
+      business_impact: finding.business_impact,
+      recommendation: finding.recommendation
+    }));
+  }
+  if (scopeId === "operations") {
+    return buildOperationsFindings(record?.operationalAssessment).map((finding) => ({
+      finding_id: finding.id,
+      scope: "operations",
+      title: `${finding.dimension}: ${finding.gap}`,
+      finding_type: "probable_issue",
+      severity: finding.severity,
+      evidence_refs: finding.evidence,
+      related_devices: [],
+      technical_rationale: finding.technical_rationale,
+      business_impact: finding.business_impact,
+      recommendation: finding.recommendation
+    }));
+  }
+  return [];
 }
 
 function dedupeProduced(findings: ProducedFinding[]) {

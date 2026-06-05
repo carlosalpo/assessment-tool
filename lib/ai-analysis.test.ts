@@ -722,7 +722,7 @@ test("deterministicFindingsToScopeAnalysisFindings resolves deterministic eviden
 });
 
 test("deterministicFindingsToScopeAnalysisFindings preserves metric references from the full catalog", () => {
-  const packet = buildAIScopePacket({ record: baseInput(), scopeId: "configuration", partitionDevices: ["dist-01"], maxInputTokens: 1 });
+  const packet = buildAIScopePacket({ record: baseInput(), scopeId: "performance", partitionDevices: ["dist-01"], maxInputTokens: 1 });
   const metricRef = fullEvidenceCatalogForPacket(packet).find((ref) => ref.metricId === "pm_crc");
   assert.ok(metricRef);
   assert.equal(packet.evidencePack.some((ref) => ref.id === metricRef.id), false);
@@ -733,12 +733,40 @@ test("deterministicFindingsToScopeAnalysisFindings preserves metric references f
     severity: "medium",
     confidence: 80,
     affectedAssets: ["core-01"],
-    evidenceRefs: [metricRef.id]
+    evidenceRefs: [metricRef.id],
+    related_fact_ids: ["pm_crc"]
   }], packet);
 
   assert.deepEqual(findings[0].evidence_refs, [metricRef.id]);
+  assert.deepEqual(findings[0].related_fact_ids, []);
   assert.deepEqual(findings[0].related_metric_ids, ["pm_crc"]);
   assert.equal(findings[0].evidence[0].source_type, "performance");
+  const validation = validateScopeAnalysisResult({ findings, recommendations: [] }, packet);
+  assert.equal(validation.validFindings.length, 1);
+  assert.equal(validation.rejectedFindings.length, 0);
+});
+
+test("buildAIScopePacket scopes deterministic performance findings to performance, not configuration", () => {
+  const input = baseInput();
+  input.parsed.findings.push({
+    id: "PF-det-leak",
+    title: "Uplink critico con crc_errors/input_errors",
+    category: "operations",
+    risk: "high",
+    confidence: 0.87,
+    status: "ai-draft",
+    affectedAssets: ["core-01"],
+    evidence: ["core-01 Te1/0/1 crc_errors 12"],
+    recommendation: "Revisar medio fisico y capacidad del uplink.",
+    remediationCategory: "operational_change",
+    serviceOffer: "Performance Analysis"
+  });
+
+  const configurationPacket = buildAIScopePacket({ record: input, scopeId: "configuration", maxInputTokens: 8000 });
+  const performancePacket = buildAIScopePacket({ record: input, scopeId: "performance", maxInputTokens: 8000 });
+
+  assert.equal(configurationPacket.memory.acceptedOrDeterministicFindings.some((finding) => finding.id === "PF-det-leak"), false);
+  assert.equal(performancePacket.memory.acceptedOrDeterministicFindings.some((finding) => finding.id === "PF-det-leak"), true);
 });
 
 test("validation phase keeps gap findings without evidence and rejects non-gap findings without evidence", () => {

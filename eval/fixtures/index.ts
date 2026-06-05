@@ -1,4 +1,10 @@
 import type { AssessmentAIContextInput } from "../../lib/ai-analysis.ts";
+import {
+  createDefaultOperationalAssessment,
+  operationalQuestionBank,
+  processOperationalAssessment,
+  type OperationalAnswer
+} from "../../lib/operational-assessment.ts";
 
 export type EvalFixture = {
   id: string;
@@ -118,7 +124,21 @@ export const evalFixtures: EvalFixture[] = [
             evidence: ["Device ID: access-01 Interface: Gi1/0/48 Port ID: Gi1/0/1"]
           }
         ],
-        findings: []
+        findings: [
+          {
+            id: "PF-eval-spof-crc",
+            title: "Uplink critico con crc_errors/input_errors",
+            category: "operations",
+            risk: "high",
+            confidence: 0.86,
+            status: "ai-draft",
+            affectedAssets: ["core-spof"],
+            evidence: ["core-spof Gi1/0/48 crc_errors 12"],
+            recommendation: "Revisar medio fisico y capacidad del uplink.",
+            remediationCategory: "operational_change",
+            serviceOffer: "Performance Analysis"
+          }
+        ]
       },
       performance: {
         ...emptyPerformance("eval_topology_spof"),
@@ -128,6 +148,66 @@ export const evalFixtures: EvalFixture[] = [
         ]
       },
       operationalAssessment: undefined,
+      lifecycleEoxRecords: {},
+      lifecycleConsultedProductIds: []
+    }
+  },
+  {
+    id: "per-device-security",
+    label: "Per-device security findings",
+    record: {
+      id: "eval_per_device_security",
+      client: client("eval_client_per_device"),
+      assessment: assessment("eval_per_device_security", "Per Device Security Eval"),
+      scope: { performanceAnalysis: { enabled: true, mode: "snapshot" } },
+      targetInventory: [
+        asset("sec-core", "10.40.40.1", "C9500-48Y4C", "core", "critical"),
+        asset("sec-dist", "10.40.41.1", "C9300-48P", "distribution", "high")
+      ],
+      evidenceFiles: [
+        evidence("sec-core.log", [
+          "hostname sec-core",
+          "snmp-server community public RO"
+        ].join("\n")),
+        evidence("sec-dist.log", [
+          "hostname sec-dist",
+          "line vty 0 15",
+          " transport input telnet ssh"
+        ].join("\n"))
+      ],
+      parsed: {
+        devices: [
+          device("dev_sec_core", "sec-core", "C9500-48Y4C", "17.9.4"),
+          device("dev_sec_dist", "sec-dist", "C9300-48P", "17.6.5")
+        ],
+        interfaces: [],
+        relations: [],
+        findings: []
+      },
+      performance: emptyPerformance("eval_per_device_security"),
+      operationalAssessment: undefined,
+      lifecycleEoxRecords: {},
+      lifecycleConsultedProductIds: []
+    }
+  },
+  {
+    id: "ops-interviews",
+    label: "Deterministic operations interviews",
+    record: {
+      id: "eval_ops_interviews",
+      client: client("eval_client_ops"),
+      assessment: assessment("eval_ops_interviews", "Operations Interview Eval"),
+      scope: { performanceAnalysis: { enabled: true, mode: "snapshot" } },
+      targetInventory: [asset("ops-core", "10.50.50.1", "C9500-48Y4C", "core", "critical")],
+      evidenceFiles: [],
+      parsed: {
+        devices: [device("dev_ops_core", "ops-core", "C9500-48Y4C", "17.9.4")],
+        interfaces: [],
+        relations: [],
+        findings: []
+      },
+      performance: emptyPerformance("eval_ops_interviews"),
+      operationalAssessment: completedOperationalAssessment("eval_ops_interviews", "eval_client_ops"),
       lifecycleEoxRecords: {},
       lifecycleConsultedProductIds: []
     }
@@ -194,4 +274,53 @@ function emptyPerformance(assessmentId: string) {
       updatedAt: "2026-06-01"
     }
   };
+}
+
+function completedOperationalAssessment(assessmentId: string, customerId: string) {
+  const base = createDefaultOperationalAssessment(assessmentId, customerId);
+  const interview = {
+    id: "opint_eval",
+    assessmentId,
+    interviewType: "network_operations" as const,
+    participants: "NOC",
+    date: "2026-06-05",
+    durationMinutes: 60,
+    interviewer: "Eval Architect",
+    notes: "Complete deterministic operations fixture."
+  };
+  const answers: OperationalAnswer[] = operationalQuestionBank.map((question) => ({
+    id: `opans_${question.id}`,
+    questionId: question.id,
+    interviewId: interview.id,
+    assessmentId,
+    value: operationalValueForQuestion(question.id, question.responseType),
+    score: null,
+    evidenceLevel: question.critical ? "documented" : "self_declared",
+    evidenceFiles: question.critical ? [`${question.id}.pdf`] : [],
+    comments: "",
+    answeredBy: "NOC",
+    reviewedByArchitect: true
+  }));
+  return processOperationalAssessment({
+    ...base,
+    status: "in_progress",
+    interviews: [interview],
+    answers
+  });
+}
+
+function operationalValueForQuestion(questionId: string, responseType: string) {
+  if (questionId === "MON-01") return 10;
+  if (questionId.startsWith("MON-")) {
+    if (responseType === "frequency") return "never";
+    return false;
+  }
+  if (responseType === "percentage") return 95;
+  if (responseType === "frequency") return "monthly";
+  if (responseType === "maturity_0_5") return 4;
+  if (responseType === "multi_select") return ["documented"];
+  if (responseType === "number") return 1;
+  if (responseType === "duration") return 60;
+  if (responseType === "text") return "Documented";
+  return true;
 }

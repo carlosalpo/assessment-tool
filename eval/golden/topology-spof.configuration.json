@@ -1,0 +1,14 @@
+{
+  "fixtureId": "topology-spof",
+  "scopeId": "configuration",
+  "mustFind": [],
+  "mustNotFind": [
+    {
+      "scopeId": "configuration",
+      "finding_type": "probable_issue",
+      "severityAtLeast": "high",
+      "keywords": ["uplink", "crc_errors"],
+      "devices": ["core-spof"]
+    }
+  ]
+}

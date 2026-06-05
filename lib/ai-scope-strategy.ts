@@ -839,13 +839,17 @@ function isMetricRelevant(metric: AssessmentAIContext["performanceMetrics"][numb
 }
 
 function isFindingRelevant(finding: AssessmentAIContext["deterministicFindings"][number], scopeId: AIScopeId, relevantDeviceIds: Set<string>) {
-  if (finding.affectedAssets.some((asset) => relevantDeviceIds.has(normalize(asset)))) return true;
-  if (scopeId === "security") return finding.category === "security";
-  if (scopeId === "configuration") return finding.category === "configuration";
-  if (scopeId === "lifecycle") return finding.category === "lifecycle";
-  if (scopeId === "operations" || scopeId === "evidence") return finding.category === "operations";
-  if (scopeId === "topology") return finding.category === "resiliency";
-  return false;
+  const categoryMatches =
+    (scopeId === "security" && finding.category === "security") ||
+    (scopeId === "configuration" && finding.category === "configuration") ||
+    (scopeId === "performance" && finding.sourceEngine === "performance-engine") ||
+    (scopeId === "lifecycle" && finding.category === "lifecycle") ||
+    ((scopeId === "operations" || scopeId === "evidence") && finding.category === "operations") ||
+    ((scopeId === "topology" || scopeId === "high_availability") && finding.category === "resiliency") ||
+    (scopeId === "inventory" && finding.category === "inventory");
+  if (!categoryMatches) return false;
+  if (finding.affectedAssets.length === 0) return true;
+  return finding.affectedAssets.some((asset) => relevantDeviceIds.has(normalize(asset))) || relevantDeviceIds.size === 0;
 }
 
 function isMissingEvidenceRelevant(item: AssessmentAIContext["missingEvidence"][number], scopeId: AIScopeId) {

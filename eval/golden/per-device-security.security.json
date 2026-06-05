@@ -1,0 +1,43 @@
+{
+  "fixtureId": "per-device-security",
+  "scopeId": "security",
+  "mustFind": [
+    {
+      "scopeId": "security",
+      "finding_type": "confirmed_finding",
+      "severityAtLeast": "high",
+      "keywords": ["snmp", "public"],
+      "devices": ["sec-core"]
+    },
+    {
+      "scopeId": "security",
+      "finding_type": "confirmed_finding",
+      "severityAtLeast": "high",
+      "keywords": ["telnet"],
+      "devices": ["sec-dist"]
+    },
+    {
+      "scopeId": "security",
+      "finding_type": "correlation_suspicion",
+      "severityAtLeast": "critical",
+      "keywords": ["corr_jsfma2"],
+      "devices": ["sec-core"]
+    },
+    {
+      "scopeId": "security",
+      "finding_type": "correlation_suspicion",
+      "severityAtLeast": "critical",
+      "keywords": ["corr_qno91f"],
+      "devices": ["sec-dist"]
+    }
+  ],
+  "mustNotFind": [
+    {
+      "scopeId": "security",
+      "finding_type": "confirmed_finding",
+      "severityAtLeast": "high",
+      "keywords": ["snmp", "telnet"],
+      "devices": ["sec-core", "sec-dist"]
+    }
+  ]
+}
