@@ -35,6 +35,12 @@ import {
   type LifecycleFinding
 } from "./lifecycle-analysis.ts";
 import {
+  applyOperationsNarration,
+  buildOperationsFindings,
+  isOperationalAssessmentComplete,
+  type OperationsFinding
+} from "./operations-analysis.ts";
+import {
   getTopologyDesignGuidelineRecords,
   resolveDesignGuidelines,
   topologyDesignGuidelineGlobalScopeKey,
@@ -690,6 +696,13 @@ async function runPhase(input: RunPhaseInput) {
         if (input.scopeId === "lifecycle" && isDeterministicLifecycleEnabled()) {
           return runDeterministicLifecycleScopeAnalysis(input, scopePacket, model);
         }
+        if (
+          input.scopeId === "operations" &&
+          isDeterministicOperationsEnabled() &&
+          isOperationalAssessmentComplete(input.record?.operationalAssessment)
+        ) {
+          return runDeterministicOperationsScopeAnalysis(input, scopePacket, model);
+        }
         return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model);
     }
   }
@@ -835,6 +848,180 @@ async function runDeterministicLifecycleScopeAnalysis(
       ? []
       : ["OpenAI no esta configurado; lifecycle uso hallazgos y textos determinísticos."]
   };
+}
+
+async function runDeterministicOperationsScopeAnalysis(
+  input: RunPhaseInput,
+  scopePacket: ReturnType<typeof buildAIScopePacket>,
+  model: string
+) {
+  const deterministicFindings = buildOperationsFindings(input.record?.operationalAssessment);
+  const narratedFindings = await narrateOperationsFindings({
+    findings: deterministicFindings,
+    apiKey: input.apiKey,
+    model
+  });
+  const findings = operationsFindingsToScopeAnalysisFindings(narratedFindings);
+  return {
+    phase: "scope_analysis",
+    scopeId: input.scopeId,
+    pattern: usesPatternQuery(input.scopeId) ? patternForScope(input.scopeId) : "generic",
+    provider: "deterministic-operations",
+    packetSummary: summarizeScopePacket(scopePacket),
+    findings,
+    recommendations: Array.from(new Set(findings.map((finding: any) => finding.recommendation).filter(Boolean))),
+    limitations: input.apiKey
+      ? []
+      : ["OpenAI no esta configurado; operations uso hallazgos y textos determinísticos."]
+  };
+}
+
+async function narrateOperationsFindings(input: {
+  findings: OperationsFinding[];
+  apiKey: string;
+  model: string;
+}) {
+  if (!input.apiKey || input.findings.length === 0) return input.findings;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.OPENAI_TIMEOUT_MS ?? 90000));
+  const requestBody = {
+    model: input.model,
+    input: [
+      {
+        role: "system",
+        content: [{
+          type: "input_text",
+          text: buildOperationsNarrationSystemPrompt()
+        }]
+      },
+      {
+        role: "user",
+        content: [{
+          type: "input_text",
+          text: JSON.stringify({
+            task: "Redacta solo narrativa para estos hallazgos operacionales determinísticos.",
+            fixedFindings: input.findings.map((finding) => ({
+              id: finding.id,
+              area: finding.area,
+              dimension: finding.dimension,
+              gap: finding.gap,
+              severity: finding.severity,
+              remediationCategory: finding.remediationCategory,
+              currentText: {
+                technical_rationale: finding.technical_rationale,
+                business_impact: finding.business_impact,
+                recommendation: finding.recommendation
+              }
+            }))
+          })
+        }]
+      }
+    ],
+    text: {
+      format: {
+        type: "json_schema",
+        name: "operations_narration_result",
+        strict: true,
+        schema: operationsNarrationResultSchema()
+      }
+    }
+  };
+  try {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${input.apiKey}`
+      },
+      body: JSON.stringify(requestBody)
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) return input.findings;
+    const parsed = JSON.parse(extractResponseText(payload) || "{\"narrations\":[]}");
+    return applyOperationsNarration(input.findings, Array.isArray(parsed?.narrations) ? parsed.narrations : []);
+  } catch {
+    return input.findings;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export function buildOperationsNarrationSystemPrompt() {
+  return [
+    "Eres un redactor tecnico para hallazgos operacionales ya decididos por un motor determinístico.",
+    "NO cambies el hallazgo, estado, severidad, categoria de remediacion, area ni brecha.",
+    "Solo redacta technical_rationale, business_impact y recommendation en espanol profesional y conciso.",
+    "No inventes entrevistas, evidencias, procesos ni herramientas no incluidas."
+  ].join("\n");
+}
+
+function operationsNarrationResultSchema() {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["narrations"],
+    properties: {
+      narrations: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["finding_id", "technical_rationale", "business_impact", "recommendation"],
+          properties: {
+            finding_id: { type: "string" },
+            technical_rationale: { type: "string" },
+            business_impact: { type: "string" },
+            recommendation: { type: "string" }
+          }
+        }
+      }
+    }
+  };
+}
+
+function operationsFindingsToScopeAnalysisFindings(findings: OperationsFinding[]) {
+  return findings.map((finding) => ({
+    finding_id: finding.id,
+    scope: "operations",
+    title: `${finding.dimension}: ${finding.gap}`,
+    finding_type: "probable_issue",
+    severity: finding.severity,
+    confidence: finding.confidence >= 80 ? "high" : finding.confidence >= 65 ? "medium" : "low",
+    evidence_refs: [],
+    related_fact_ids: [],
+    related_metric_ids: [],
+    related_correlation_ids: [],
+    evidence: finding.evidence.map((item) => ({
+      source_type: "interview",
+      source_name: "Tab 11 Operational Assessment",
+      hostname: null,
+      command: null,
+      excerpt: item
+    })),
+    technical_rationale: finding.technical_rationale,
+    business_impact: finding.business_impact,
+    recommendation: finding.recommendation,
+    remediation_category: finding.remediationCategory,
+    remediation_steps: [
+      "Asignar responsable operativo y fecha objetivo.",
+      "Definir evidencia esperada, KPI y frecuencia de revision.",
+      "Validar cierre con el arquitecto y las partes operativas."
+    ],
+    validation_questions: [
+      "Confirmar que las respuestas de entrevista representan la operacion actual.",
+      "Confirmar evidencia documental o export de herramienta para cerrar la brecha."
+    ],
+    related_devices: [],
+    related_sites: [],
+    dependencies: ["Entrevistas Tab 11", finding.dimension],
+    aggregation_basis: "Brecha determinada desde entrevistas operacionales del Tab 11.",
+    occurrence_count: 1,
+    time_window: "assessment",
+    correlated_entity: finding.dimension,
+    operational_area: finding.area,
+    operational_gap: finding.gap
+  }));
 }
 
 async function narrateLifecycleFindings(input: {
@@ -1881,6 +2068,10 @@ export function isDeterministicLifecycleEnabled() {
   return process.env.AI_DETERMINISTIC_LIFECYCLE === "1";
 }
 
+export function isDeterministicOperationsEnabled() {
+  return process.env.AI_DETERMINISTIC_OPERATIONS === "1";
+}
+
 function openAISynthesisModel() {
   return process.env.OPENAI_SYNTHESIS_MODEL || openAIReduceModel();
 }
@@ -2644,6 +2835,7 @@ export function hashScopeInput(record: any, scopeId: AIAnalysisScopeId, options?
       ...(isDomainPartitionEnabled() ? { domainPartition: true } : {}),
       ...(isPerDeviceEnabled() && engineForScope(scopeId) === "ai-per-device" ? { perDevice: true } : {}),
       ...(isDeterministicLifecycleEnabled() && scopeId === "lifecycle" ? { deterministicLifecycle: true } : {}),
+      ...(isDeterministicOperationsEnabled() && scopeId === "operations" ? { deterministicOperations: true } : {}),
       ...(usesDesignRubric(scopeId) && options?.designGuidelinesHash ? { designGuidelinesHash: options.designGuidelinesHash } : {}),
       engineVersion,
       client: context.client,

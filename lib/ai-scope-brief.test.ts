@@ -266,19 +266,39 @@ test("hashScopeInput changes for ai-per-device scopes only when AI_PER_DEVICE is
 test("hashScopeInput changes only for lifecycle when AI_DETERMINISTIC_LIFECYCLE is enabled", () => {
   const record = minimalRecord("assess_deterministic_lifecycle_hash");
 
-  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: undefined, AI_DESIGN_RUBRIC: undefined, AI_DETERMINISTIC_LIFECYCLE: undefined }, () => {
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: undefined, AI_DESIGN_RUBRIC: undefined, AI_DETERMINISTIC_LIFECYCLE: undefined, AI_DETERMINISTIC_OPERATIONS: undefined }, () => {
     const lifecycleOff = hashScopeInput(record, "lifecycle");
     const securityOff = hashScopeInput(record, "security");
     const topologyOff = hashScopeInput(record, "topology");
-    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: undefined, AI_DESIGN_RUBRIC: undefined, AI_DETERMINISTIC_LIFECYCLE: "1" }, () => {
+    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: undefined, AI_DESIGN_RUBRIC: undefined, AI_DETERMINISTIC_LIFECYCLE: "1", AI_DETERMINISTIC_OPERATIONS: undefined }, () => {
       assert.notEqual(hashScopeInput(record, "lifecycle"), lifecycleOff);
       assert.equal(hashScopeInput(record, "security"), securityOff);
       assert.equal(hashScopeInput(record, "topology"), topologyOff);
     });
-    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: undefined, AI_DESIGN_RUBRIC: undefined, AI_DETERMINISTIC_LIFECYCLE: "" }, () => {
+    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: undefined, AI_DESIGN_RUBRIC: undefined, AI_DETERMINISTIC_LIFECYCLE: "", AI_DETERMINISTIC_OPERATIONS: undefined }, () => {
       assert.equal(hashScopeInput(record, "lifecycle"), lifecycleOff);
       assert.equal(hashScopeInput(record, "security"), securityOff);
       assert.equal(hashScopeInput(record, "topology"), topologyOff);
+    });
+  });
+});
+
+test("hashScopeInput changes only for operations when AI_DETERMINISTIC_OPERATIONS is enabled", () => {
+  const record = minimalRecord("assess_deterministic_operations_hash");
+
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: undefined, AI_DESIGN_RUBRIC: undefined, AI_DETERMINISTIC_LIFECYCLE: undefined, AI_DETERMINISTIC_OPERATIONS: undefined }, () => {
+    const operationsOff = hashScopeInput(record, "operations");
+    const lifecycleOff = hashScopeInput(record, "lifecycle");
+    const securityOff = hashScopeInput(record, "security");
+    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: undefined, AI_DESIGN_RUBRIC: undefined, AI_DETERMINISTIC_LIFECYCLE: undefined, AI_DETERMINISTIC_OPERATIONS: "1" }, () => {
+      assert.notEqual(hashScopeInput(record, "operations"), operationsOff);
+      assert.equal(hashScopeInput(record, "lifecycle"), lifecycleOff);
+      assert.equal(hashScopeInput(record, "security"), securityOff);
+    });
+    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: undefined, AI_DESIGN_RUBRIC: undefined, AI_DETERMINISTIC_LIFECYCLE: undefined, AI_DETERMINISTIC_OPERATIONS: "" }, () => {
+      assert.equal(hashScopeInput(record, "operations"), operationsOff);
+      assert.equal(hashScopeInput(record, "lifecycle"), lifecycleOff);
+      assert.equal(hashScopeInput(record, "security"), securityOff);
     });
   });
 });

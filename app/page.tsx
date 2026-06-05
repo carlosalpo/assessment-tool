@@ -113,6 +113,7 @@ import {
   type OperationalInterviewType,
   type OperationalQuestion
 } from "@/lib/operational-assessment";
+import { isOperationalAssessmentComplete } from "@/lib/operations-analysis";
 import {
   buildPerformanceAIContext,
   buildPerformanceAssessment,
@@ -7775,6 +7776,8 @@ function AiEvaluationTab({
             const scopeDisplay = aiScopeDisplayOrder.find((scope) => scope.id === scopeId);
             const detailOpen = Boolean(expandedAreaDetails[area.id]);
             const findingsFilterActive = scopeFindingFilter === area.id;
+            const operationsInterviewBlocked = area.id === "operations" && !isOperationalAssessmentComplete(record.operationalAssessment);
+            const evaluationDisabledReason = operationsInterviewBlocked ? "Completa las entrevistas del Tab 11 primero" : undefined;
             return (
               <div key={area.id} className="rounded-md border border-border p-3">
                 <div className="flex items-start justify-between gap-3">
@@ -7823,17 +7826,19 @@ function AiEvaluationTab({
                   />
                 )}
                 <div className="mt-3 flex flex-wrap gap-2">
-                  <Button size="sm" onClick={() => onRunEvaluation(area.id)} disabled={isScopeRunning || hasRunningAnalysis}>
-                    <PlayCircle size={14} />
-                    Evaluar
-                  </Button>
+                  <span title={evaluationDisabledReason}>
+                    <Button size="sm" onClick={() => onRunEvaluation(area.id)} disabled={isScopeRunning || hasRunningAnalysis || operationsInterviewBlocked}>
+                      <PlayCircle size={14} />
+                      Evaluar
+                    </Button>
+                  </span>
                   <CardOverflowMenu
                     label={`Acciones de ${area.label}`}
                     actions={[
                       {
                         label: "Forzar re-evaluación",
                         onSelect: () => onRunEvaluation(area.id, { forceReevaluate: true }),
-                        disabled: isScopeRunning || hasRunningAnalysis
+                        disabled: isScopeRunning || hasRunningAnalysis || operationsInterviewBlocked
                       },
                       {
                         label: "Reset",
