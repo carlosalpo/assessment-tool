@@ -818,8 +818,24 @@ export default function HomePage() {
 
   useEffect(() => {
     if (!isHydrated) return;
-    window.localStorage.setItem("assessment-tool.records.v1", JSON.stringify(records));
-    if (!postgresPersistenceEnabled.current) return;
+    const hasPostgresPersistence = postgresPersistenceEnabled.current;
+    const localCache = writeRecordsLocalCache(records, !hasPostgresPersistence);
+    if (!hasPostgresPersistence) {
+      if (localCache.stored === "metadata") {
+        setPersistenceState({
+          mode: "local",
+          message: "Cache local limitado: se guardaron datos livianos sin contenido bruto de evidencia. Conecta PostgreSQL para conservar evidencias grandes.",
+          lastSyncedAt: new Date().toISOString()
+        });
+      } else if (localCache.stored === "none") {
+        setPersistenceState({
+          mode: "error",
+          message: "El navegador no tiene espacio para guardar este assessment localmente. Conecta PostgreSQL o reduce evidencia cargada.",
+          lastSyncedAt: new Date().toISOString()
+        });
+      }
+      return;
+    }
 
     const timeout = window.setTimeout(async () => {
       try {
@@ -840,6 +856,29 @@ export default function HomePage() {
 
     return () => window.clearTimeout(timeout);
   }, [isHydrated, records]);
+
+  useEffect(() => {
+    if (!isHydrated) return;
+    setRecords((current) => {
+      let changed = false;
+      const nextRecords = current.map((record) => {
+        const findings = record.parsed?.findings ?? [];
+        const uniqueFindings = ensureUniqueFindingIds(findings);
+        const hasChangedFindingId = uniqueFindings.some((finding, index) => finding.id !== findings[index]?.id);
+        if (!hasChangedFindingId) return record;
+        changed = true;
+        return {
+          ...record,
+          parsed: {
+            ...record.parsed,
+            findings: uniqueFindings
+          },
+          updatedAt: new Date().toISOString()
+        };
+      });
+      return changed ? nextRecords : current;
+    });
+  }, [isHydrated]);
 
   useEffect(() => {
     if (!isHydrated) return;
@@ -968,7 +1007,7 @@ export default function HomePage() {
             ...record,
             parsed: {
               ...record.parsed,
-              findings: [...record.parsed.findings, ...nextFindings]
+              findings: ensureUniqueFindingIds([...record.parsed.findings, ...nextFindings])
             },
             assessment: { ...record.assessment, status: nextFindings.length > 0 ? "review" : record.assessment.status },
             updatedAt: new Date().toISOString()
@@ -6648,9 +6687,9 @@ function EvidenceCompliancePanel({
       {coverageRows.length === 0 ? (
         <EmptyState icon={<Server size={24} />} title="Sin inventario incluido para revisar" />
       ) : (
-        <div className="overflow-x-auto rounded-md border border-border">
+        <div className="overflow-x-auto rounded-md border border-border bg-[hsl(var(--surface-raised))]">
           <table className="w-full min-w-[900px] text-left text-sm">
-            <thead className="bg-muted/60 text-xs uppercase text-muted-foreground">
+            <thead className="bg-[hsl(var(--surface-muted))] text-xs uppercase text-muted-foreground">
               <tr>
                 <th className="w-52 px-3 py-2 font-semibold">Equipo</th>
                 <th className="w-28 px-3 py-2 font-semibold">IP</th>
@@ -6661,14 +6700,24 @@ function EvidenceCompliancePanel({
                 ))}
               </tr>
             </thead>
-            <tbody className="divide-y divide-border bg-white">
+            <tbody className="divide-y divide-border/70">
               {coverageRows.map((row) => (
-                <tr key={row.assetId} className={cn(row.missingCount === 0 && "bg-emerald-50/35")}>
+                <tr
+                  key={row.assetId}
+                  className={cn(
+                    "transition-colors hover:bg-[hsl(var(--surface-muted))]",
+                    row.missingCount === 0 && row.skippedCount === 0
+                      ? "bg-emerald-500/10"
+                      : row.missingCount === 0
+                        ? "bg-amber-500/10"
+                        : "bg-[hsl(var(--surface-raised))]"
+                  )}
+                >
                   <td className="px-3 py-3 align-middle">
-                    <p className="font-semibold">{row.hostname}</p>
-                    <p className="text-xs text-muted-foreground">{row.model} · {row.role || "Rol pendiente"}</p>
+                    <p className="font-semibold text-foreground">{row.hostname}</p>
+                    <p className="text-xs text-muted-foreground/90">{row.model} · {row.role || "Rol pendiente"}</p>
                   </td>
-                  <td className="px-3 py-3 align-middle text-sm text-muted-foreground">{row.managementIp || "Pendiente"}</td>
+                  <td className="px-3 py-3 align-middle text-sm font-medium text-muted-foreground/95">{row.managementIp || "Pendiente"}</td>
                   <td className="px-3 py-3 align-middle">
                     <EvidenceRowStatus row={row} />
                   </td>
@@ -6940,30 +6989,36 @@ function EvidenceRowStatus({ row }: { row: EvidenceCoverageRow }) {
   if (row.missingCount === 0 && row.skippedCount === 0) {
     return (
       <div className="space-y-1">
-        <Badge tone="success">Completed</Badge>
-        <p className="text-xs text-muted-foreground">{row.collectedCount}/{evidenceRequirements.length} grupos</p>
+        <span className="inline-flex h-6 items-center rounded-md border border-emerald-400/30 bg-emerald-500/15 px-2 text-xs font-semibold text-emerald-200">
+          Completed
+        </span>
+        <p className="text-xs text-muted-foreground/90">{row.collectedCount}/{evidenceRequirements.length} grupos</p>
       </div>
     );
   }
   if (row.missingCount === 0) {
     return (
       <div className="space-y-1">
-        <Badge tone="warning">Ready con skip</Badge>
-        <p className="text-xs text-muted-foreground">{row.skippedCount} omitidas</p>
+        <span className="inline-flex h-6 items-center rounded-md border border-amber-400/35 bg-amber-500/15 px-2 text-xs font-semibold text-amber-200">
+          Ready con skip
+        </span>
+        <p className="text-xs text-muted-foreground/90">{row.skippedCount} omitidas</p>
       </div>
     );
   }
   return (
     <div className="space-y-1">
-      <Badge tone="danger">{row.missingCount} faltantes</Badge>
-      <p className="text-xs text-muted-foreground">{row.collectedCount}/{evidenceRequirements.length} grupos</p>
+      <span className="inline-flex h-6 items-center rounded-md border border-rose-400/35 bg-rose-500/15 px-2 text-xs font-semibold text-rose-200">
+        {row.missingCount} faltantes
+      </span>
+      <p className="text-xs text-muted-foreground/90">{row.collectedCount}/{evidenceRequirements.length} grupos</p>
     </div>
   );
 }
 
 function EvidenceRowAction({ row, onToggleEvidenceRowSkip }: { row: EvidenceCoverageRow; onToggleEvidenceRowSkip: (assetId: string) => void }) {
   if (row.missingCount === 0 && row.skippedCount === 0) {
-    return <span className="text-xs text-muted-foreground">Sin accion</span>;
+    return <span className="text-xs font-medium text-muted-foreground/85">Sin accion</span>;
   }
 
   return (
@@ -6979,7 +7034,7 @@ function EvidenceRequirementCell({ cell }: { cell: EvidenceCoverageCell }) {
   if (cell.status === "collected") {
     return (
       <div className="flex justify-center" title={`${requirement?.label ?? cell.requirementId}: ${cell.fileNames.join(", ")}`}>
-        <span className="inline-flex h-7 min-w-16 items-center justify-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2 text-xs font-semibold text-emerald-800">
+        <span className="inline-flex h-7 min-w-16 items-center justify-center gap-1 rounded-md border border-emerald-400/30 bg-emerald-500/15 px-2 text-xs font-semibold text-emerald-100">
           <Check size={13} />
           OK
         </span>
@@ -6990,7 +7045,7 @@ function EvidenceRequirementCell({ cell }: { cell: EvidenceCoverageCell }) {
   if (cell.status === "skipped") {
     return (
       <div className="flex justify-center" title={requirement?.label ?? cell.requirementId}>
-        <span className="inline-flex h-7 min-w-16 items-center justify-center rounded-md border border-border bg-white px-2 text-xs font-semibold text-muted-foreground">
+        <span className="inline-flex h-7 min-w-16 items-center justify-center rounded-md border border-border bg-muted/30 px-2 text-xs font-semibold text-muted-foreground">
           Skip
         </span>
       </div>
@@ -6999,7 +7054,7 @@ function EvidenceRequirementCell({ cell }: { cell: EvidenceCoverageCell }) {
 
   return (
     <div className="flex justify-center" title={requirement?.label ?? cell.requirementId}>
-      <span className="inline-flex h-7 min-w-16 items-center justify-center gap-1 rounded-md border border-rose-200 bg-rose-50 px-2 text-xs font-semibold text-rose-800">
+      <span className="inline-flex h-7 min-w-16 items-center justify-center gap-1 rounded-md border border-rose-400/35 bg-rose-500/15 px-2 text-xs font-semibold text-rose-100">
         <X size={13} />
         Falta
       </span>
@@ -8435,8 +8490,8 @@ function AIReviewPanel({
           <EmptyState icon={<Bot size={24} />} title="Sin sugerencias AI para revisar" />
         ) : (
           <div className="space-y-3">
-            {aiFindings.map((finding) => (
-              <FindingRow key={finding.id} finding={finding} onChange={(patch) => onUpdateFinding(finding.id, patch)} />
+            {aiFindings.map((finding, index) => (
+              <FindingRow key={findingRenderKey(finding, index)} finding={finding} onChange={(patch) => onUpdateFinding(finding.id, patch)} />
             ))}
           </div>
         )}
@@ -8614,8 +8669,8 @@ function FindingsTab({
                   <p className="text-sm text-muted-foreground">Sin hallazgos en este ambito.</p>
                 ) : (
                   <div className="space-y-3">
-                    {group.findings.map((finding) => (
-                      <FindingRow key={finding.id} finding={finding} onChange={(patch) => onUpdateFinding(finding.id, patch)} />
+                    {group.findings.map((finding, index) => (
+                      <FindingRow key={findingRenderKey(finding, index)} finding={finding} onChange={(patch) => onUpdateFinding(finding.id, patch)} />
                     ))}
                   </div>
                 )}
@@ -8719,9 +8774,9 @@ function RiskAssessmentMatrix({
                           </div>
                           {cell.findings.length > 0 && (
                             <div className="mt-2 flex max-h-12 flex-wrap gap-0.5 overflow-hidden">
-                              {cell.findings.slice(0, 10).map((finding) => (
+                              {cell.findings.slice(0, 10).map((finding, index) => (
                                 <span
-                                  key={finding.id}
+                                  key={findingRenderKey(finding, index)}
                                   className="rounded border border-white/70 bg-white/70 px-1 py-0 text-[9px] font-semibold leading-4 shadow-sm dark:border-white/10 dark:bg-slate-950/35 dark:text-current"
                                   title={finding.title}
                                 >
@@ -8796,8 +8851,8 @@ function RiskMatrixFindingPanel({
         {findings.length === 0 ? (
           <EmptyState icon={<ShieldCheck size={24} />} title="Sin hallazgos en esta celda" />
         ) : (
-          findings.map((finding) => (
-            <article key={finding.id} className="min-w-0 rounded-md border border-border bg-[hsl(var(--surface-raised))] p-3">
+          findings.map((finding, index) => (
+            <article key={findingRenderKey(finding, index)} className="min-w-0 rounded-md border border-border bg-[hsl(var(--surface-raised))] p-3">
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <div className="min-w-0">
                   <p className="text-[11px] font-semibold uppercase text-muted-foreground">{shortFindingId(finding)}</p>
@@ -9826,8 +9881,8 @@ function ExecutiveSummaryTab({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border bg-white">
-                    {summary.topFindings.map((finding) => (
-                      <tr key={finding.id}>
+                    {summary.topFindings.map((finding, index) => (
+                      <tr key={findingRenderKey(finding, index)}>
                         <td className="px-3 py-2 font-mono text-xs">{shortFindingId(finding)}</td>
                         <td className="px-3 py-2">{finding.title}</td>
                         <td className="px-3 py-2">{finding.category}</td>
@@ -11290,6 +11345,60 @@ function readInitialRecords() {
   }
 }
 
+function writeRecordsLocalCache(records: AssessmentRecord[], preferFullContent: boolean) {
+  if (typeof window === "undefined") return { stored: "none" as const };
+  const storageKey = "assessment-tool.records.v1";
+
+  if (preferFullContent) {
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify(records));
+      return { stored: "full" as const };
+    } catch (error) {
+      if (!isStorageQuotaError(error)) throw error;
+    }
+  }
+
+  try {
+    window.localStorage.setItem(storageKey, JSON.stringify(records.map(stripRecordEvidenceContentForLocalCache)));
+    return { stored: "metadata" as const };
+  } catch (error) {
+    if (!isStorageQuotaError(error)) throw error;
+    try {
+      window.localStorage.removeItem(storageKey);
+      window.localStorage.setItem(storageKey, JSON.stringify(records.map(stripRecordEvidenceContentForLocalCache)));
+      return { stored: "metadata" as const };
+    } catch {
+      return { stored: "none" as const };
+    }
+  }
+}
+
+function stripRecordEvidenceContentForLocalCache(record: AssessmentRecord): AssessmentRecord {
+  return {
+    ...record,
+    evidenceFiles: (record.evidenceFiles ?? []).map(stripEvidenceFileContent),
+    performance: {
+      ...record.performance,
+      evidenceFiles: (record.performance?.evidenceFiles ?? []).map(stripPerformanceEvidenceFileContent)
+    }
+  };
+}
+
+function stripEvidenceFileContent(file: EvidenceFile): EvidenceFile {
+  return { ...file, content: "" };
+}
+
+function stripPerformanceEvidenceFileContent(file: PerformanceEvidenceFile): PerformanceEvidenceFile {
+  return { ...file, content: "" };
+}
+
+function isStorageQuotaError(error: unknown) {
+  return (
+    error instanceof DOMException &&
+    (error.name === "QuotaExceededError" || error.name === "NS_ERROR_DOM_QUOTA_REACHED" || error.code === 22 || error.code === 1014)
+  );
+}
+
 async function fetchPersistedAssessmentRecords() {
   const response = await fetch("/api/assessments", { cache: "no-store" });
   const payload = await response.json().catch(() => null);
@@ -11458,7 +11567,7 @@ function normalizeRecord(record: AssessmentRecord) {
     operationalAssessment: record.operationalAssessment ?? createDefaultOperationalAssessment(record.assessment.id, record.client.id),
     parsed: {
       ...record.parsed,
-      findings: (record.parsed?.findings ?? []).map(normalizeFindingRemediationCategory)
+      findings: ensureUniqueFindingIds((record.parsed?.findings ?? []).map(normalizeFindingRemediationCategory))
     },
     performance: {
       ...createDefaultPerformanceState(record.assessment.id, normalizedScope.performanceAnalysis.mode),
@@ -11481,6 +11590,14 @@ function normalizeRecord(record: AssessmentRecord) {
   };
 }
 
+function ensureUniqueFindingIds(findings: Finding[]) {
+  const usedIds = new Set<string>();
+  return findings.map((finding) => {
+    const uniqueId = uniqueFindingId(finding.id || uid("find"), usedIds);
+    return uniqueId === finding.id ? finding : { ...finding, id: uniqueId };
+  });
+}
+
 function normalizeFindingRemediationCategory(finding: Finding | (Omit<Finding, "remediationCategory"> & { remediationCategory?: unknown })): Finding {
   const source = finding as Finding & Record<string, unknown>;
   const { [legacyRemediationField]: _legacyRemediation, ...rest } = source;
@@ -11488,6 +11605,23 @@ function normalizeFindingRemediationCategory(finding: Finding | (Omit<Finding, "
     ...(rest as Finding),
     remediationCategory: mapLegacyRemediation(String(source.remediationCategory ?? source[legacyRemediationField] ?? ""))
   };
+}
+
+function uniqueFindingId(baseId: string, usedIds: Set<string>) {
+  const normalizedBaseId = baseId.trim() || uid("find");
+  if (!usedIds.has(normalizedBaseId)) {
+    usedIds.add(normalizedBaseId);
+    return normalizedBaseId;
+  }
+
+  let suffix = 2;
+  let candidate = `${normalizedBaseId}_dup${suffix}`;
+  while (usedIds.has(candidate)) {
+    suffix += 1;
+    candidate = `${normalizedBaseId}_dup${suffix}`;
+  }
+  usedIds.add(candidate);
+  return candidate;
 }
 
 function createDefaultAIAnalysisState(): AIAnalysisState {
@@ -11787,11 +11921,15 @@ async function deleteAIDebugInteractions(assessmentId: string, currentUser: AppU
 }
 
 function persistentAIResultsToFindings(results: AIAssessmentAnalysisResults["results"], assessmentId: string): Finding[] {
+  const usedIds = new Set<string>();
   return results.flatMap((result) => {
     const findings = Array.isArray(result.findings) ? result.findings as any[] : [];
     return findings
       .filter((finding) => !isPersistentAICredentialPlaceholder(finding))
-      .map((finding) => persistentAIFindingToFinding(finding, result.scopeId, assessmentId));
+      .map((finding) => {
+        const id = uniqueFindingId(persistentAIFindingBaseId(finding, result.scopeId, assessmentId), usedIds);
+        return persistentAIFindingToFinding(finding, result.scopeId, assessmentId, id);
+      });
   });
 }
 
@@ -11801,7 +11939,7 @@ function isPersistentAICredentialPlaceholder(finding: any) {
   return title.includes("OPENAI_API_KEY") || evidence.some((item: any) => String(item?.excerpt ?? "").includes("no llamo OpenAI"));
 }
 
-function persistentAIFindingToFinding(finding: any, scopeId: string, assessmentId: string): Finding {
+function persistentAIFindingToFinding(finding: any, scopeId: string, assessmentId: string, id: string): Finding {
   const evidenceItems = Array.isArray(finding?.evidence) ? finding.evidence : [];
   const evidence = evidenceItems.map((item: any) => {
     const source = [item?.source_name, item?.hostname, item?.command].filter(Boolean).join(" · ");
@@ -11810,7 +11948,7 @@ function persistentAIFindingToFinding(finding: any, scopeId: string, assessmentI
   const relatedDevices = Array.isArray(finding?.related_devices) ? finding.related_devices.map(String) : [];
 
   return {
-    id: `aijob_${assessmentId}_${finding?.finding_id ?? uid("ai")}`,
+    id,
     title: cleanPersistentAIText(finding?.title) || "Hallazgo AI pendiente de titulo",
     category: scopeToFindingCategory(scopeId),
     risk: normalizePersistentAIRisk(finding?.severity),
@@ -11831,6 +11969,15 @@ function persistentAIFindingToFinding(finding: any, scopeId: string, assessmentI
       limitations: []
     }
   };
+}
+
+function persistentAIFindingBaseId(finding: any, scopeId: string, assessmentId: string) {
+  const findingId = cleanPersistentAIText(finding?.finding_id) || uid("ai");
+  return ["aijob", assessmentId, scopeId, findingId].map(safePersistentAIIdPart).join("_");
+}
+
+function safePersistentAIIdPart(value: string) {
+  return value.trim().replace(/[^a-zA-Z0-9_-]+/g, "_").replace(/^_+|_+$/g, "") || "unknown";
 }
 
 function scopeToFindingCategory(scopeId: string): Finding["category"] {
@@ -11965,6 +12112,10 @@ function riskMatrixToneClass(level: string) {
 function shortFindingId(finding: Finding) {
   const suffix = finding.id.replace(/^find[_-]?/i, "").slice(0, 5).toUpperCase();
   return `F-${suffix || "00000"}`;
+}
+
+function findingRenderKey(finding: Pick<Finding, "id">, index: number) {
+  return `${finding.id}:${index}`;
 }
 
 function isPerformanceFindingId(id: string) {
