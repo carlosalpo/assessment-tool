@@ -7774,6 +7774,7 @@ function AiEvaluationTab({
             const scopeStatus = aiAnalysisStatus?.scopes.find((scope) => scope.id === scopeId);
             const latestScopeJob = latestJob?.mode === "scope" && latestJob.scopeId === scopeId ? latestJob : undefined;
             const isScopeRunning = isScopeJobActive(scopeId, aiAnalysisStatus, latestJob);
+            const isCurrentScopeExecuting = isScopeCurrentlyExecuting(scopeId, latestJob);
             const areaFindings = record.parsed.findings.filter((finding) => finding.category === areaToCategory(area.id));
             const canResetArea = hasScopeDisplayActivity(scopeId, aiAnalysisStatus, latestJob, areaFindings);
             const displayedStatus = statusForScopeDisplay(scopeId, aiAnalysisStatus, latestJob);
@@ -7787,20 +7788,36 @@ function AiEvaluationTab({
             const operationsInterviewBlocked = area.id === "operations" && !isOperationalAssessmentComplete(record.operationalAssessment);
             const evaluationDisabledReason = operationsInterviewBlocked ? "Completa las entrevistas del Tab 11 primero" : undefined;
             return (
-              <div key={area.id} className="rounded-md border border-border p-3">
+              <div
+                key={area.id}
+                className={cn(
+                  "relative overflow-hidden rounded-md border p-3 transition-shadow",
+                  isCurrentScopeExecuting ? "border-primary/50 bg-primary/5 shadow-sm" : "border-border"
+                )}
+              >
+                {isCurrentScopeExecuting && <div className="absolute inset-x-0 top-0 h-1 animate-pulse bg-primary" />}
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <p className="text-sm font-semibold">{area.label}</p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {isCurrentScopeExecuting && <LoaderCircle size={14} className="animate-spin text-primary" />}
+                      <p className="text-sm font-semibold">{area.label}</p>
+                      {isCurrentScopeExecuting && <AIWorkingIndicator label="Trabajando" />}
+                    </div>
                       <p className="mt-1 text-xs text-muted-foreground">{area.description}</p>
                     </div>
                   <span title={displayedStatusLabel.tooltip}>
-                    <Badge tone={scopeStatusTone(displayedStatus)}>
-                      {displayedStatusLabel.label}
-                    </Badge>
+                    <AnimatedStatusBadge
+                      active={isCurrentScopeExecuting}
+                      label={displayedStatusLabel.label}
+                      tone={scopeStatusTone(displayedStatus)}
+                    />
                   </span>
                 </div>
                 <div className="mt-3 h-2 rounded-full bg-muted">
-                  <div className="h-2 rounded-full bg-primary" style={{ width: `${scopeProgress}%` }} />
+                  <div className="relative h-2 overflow-hidden rounded-full">
+                    <div className="h-2 rounded-full bg-primary" style={{ width: `${scopeProgress}%` }} />
+                    {isCurrentScopeExecuting && <div className="absolute inset-y-0 left-0 w-1/3 animate-pulse rounded-full bg-white/50" />}
+                  </div>
                 </div>
                 <p className="mt-2 text-xs text-muted-foreground">
                   {scopeProgress}% · {scopeMessage}
@@ -7958,7 +7975,11 @@ function AIEvaluationPipeline({ stages }: { stages: PipelineViewStage[] }) {
                 {stage.stage === "map" && <span className="text-muted-foreground">{stage.completed}/{stage.total} scopes</span>}
                 {stage.stage !== "map" && <span className="text-muted-foreground">{stage.completed}/{stage.total}</span>}
                 <span title={statusLabel.tooltip}>
-                  <Badge tone={scopeStatusTone(stage.status)}>{statusLabel.label}</Badge>
+                  <AnimatedStatusBadge
+                    active={stage.active || isAnimatedStatus(stage.status)}
+                    label={statusLabel.label}
+                    tone={scopeStatusTone(stage.status)}
+                  />
                 </span>
                 {stage.active && <Badge tone="info">Etapa activa</Badge>}
               </div>
@@ -8017,7 +8038,11 @@ function FullEvaluationScopeBreakdown({
                         <p className="text-muted-foreground">{scope.id}</p>
                       </div>
                       <span title={statusLabel.tooltip}>
-                        <Badge tone={scopeStatusTone(status)}>{statusLabel.label}</Badge>
+                        <AnimatedStatusBadge
+                          active={isScopeCurrentlyExecuting(scope.id, latestJob)}
+                          label={statusLabel.label}
+                          tone={scopeStatusTone(status)}
+                        />
                       </span>
                     </div>
                     <CompactFindingSummary summary={summary} compact />
@@ -8052,7 +8077,11 @@ function ScopeDetailPanel({
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-medium text-foreground">Scope {scope.id}</span>
         <span title={statusLabel.tooltip}>
-          <Badge tone={scopeStatusTone(status)}>{statusLabel.label}</Badge>
+          <AnimatedStatusBadge
+            active={isAnimatedStatus(status)}
+            label={statusLabel.label}
+            tone={scopeStatusTone(status)}
+          />
         </span>
       </div>
       <CompactFindingSummary summary={summary} compact />
@@ -8065,7 +8094,11 @@ function ScopeDetailPanel({
             <div key={phase.id} className="flex items-center justify-between gap-2 rounded border border-border bg-background/60 px-2 py-1">
               <span className="text-muted-foreground">{phase.label}</span>
               <span title={phaseStatusLabel.tooltip}>
-                <Badge tone={scopeStatusTone(phaseStatus)}>{phaseStatusLabel.label}</Badge>
+                <AnimatedStatusBadge
+                  active={phaseStatus === "running"}
+                  label={phaseStatusLabel.label}
+                  tone={scopeStatusTone(phaseStatus)}
+                />
               </span>
             </div>
           );
@@ -8140,7 +8173,11 @@ function AIAnalysisJobStatusPanel({
             {isActive && <LoaderCircle size={15} className="animate-spin text-primary" />}
             <p className="text-sm font-semibold">Motor persistente de analisis AI</p>
             <span title={jobStatusLabel.tooltip}>
-              <Badge tone={scopeStatusTone(job.status)}>{jobStatusLabel.label}</Badge>
+              <AnimatedStatusBadge
+                active={isActive}
+                label={jobStatusLabel.label}
+                tone={scopeStatusTone(job.status)}
+              />
             </span>
             <Badge tone="neutral">{job.mode === "full" ? "Evaluacion completa" : job.scopeId}</Badge>
             {isActive && <AIWorkingIndicator />}
@@ -8188,7 +8225,11 @@ function AIAnalysisJobStatusPanel({
               <div className="flex items-center justify-between gap-2">
                 <p className="font-medium">{scopeLabel(scopeId as AIAnalysisScopeId)}</p>
                 <span title={`${stepStatusLabel.tooltip} Progreso: ${scopeProgress}%.`}>
-                  <Badge tone={scopeStatusTone(stepStatus)}>{stepStatusLabel.label}</Badge>
+                  <AnimatedStatusBadge
+                    active={Boolean(active)}
+                    label={stepStatusLabel.label}
+                    tone={scopeStatusTone(stepStatus)}
+                  />
                 </span>
               </div>
               <p className="mt-1 text-muted-foreground">{active?.phaseName ?? steps.find((step) => step.status === "failed")?.errorMessage ?? "Fases en checkpoint persistente"}</p>
@@ -8200,10 +8241,37 @@ function AIAnalysisJobStatusPanel({
   );
 }
 
-function AIWorkingIndicator() {
+function AnimatedStatusBadge({
+  active,
+  label,
+  tone
+}: {
+  active: boolean;
+  label: string;
+  tone: React.ComponentProps<typeof Badge>["tone"];
+}) {
+  return (
+    <Badge tone={tone} className={active ? "gap-1 border-primary/40 bg-primary/10 text-primary" : undefined}>
+      <span className={active ? "animate-pulse" : undefined}>{label}</span>
+      {active && (
+        <span className="inline-flex items-center gap-0.5" aria-hidden="true">
+          {[0, 1, 2].map((index) => (
+            <span
+              key={index}
+              className="h-1 w-1 animate-bounce rounded-full bg-current"
+              style={{ animationDelay: `${index * 120}ms` }}
+            />
+          ))}
+        </span>
+      )}
+    </Badge>
+  );
+}
+
+function AIWorkingIndicator({ label = "Analizando" }: { label?: string }) {
   return (
     <span className="inline-flex items-center gap-1 text-xs text-primary" aria-label="Analisis en progreso">
-      <span>Analizando</span>
+      <span>{label}</span>
       {[0, 1, 2].map((index) => (
         <span
           key={index}
@@ -12014,6 +12082,17 @@ function isScopeJobActive(
     job.scopeId === scopeId ||
     job.steps.some((step) => step.scopeId === scopeId)
   );
+}
+
+function isScopeCurrentlyExecuting(
+  scopeId: AIScopeOrStageDisplayId,
+  latestJob: AIAnalysisJobSnapshot | undefined
+) {
+  return Boolean(latestJob?.currentPhase?.startsWith(`${scopeId}:`) && isActiveAIJobStatus(latestJob.status));
+}
+
+function isAnimatedStatus(status: string | undefined) {
+  return status === "running" || status === "queued";
 }
 
 function statusForScopeDisplay(
