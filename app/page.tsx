@@ -21,6 +21,7 @@ import {
   FileText,
   GitBranch,
   LayoutDashboard,
+  LoaderCircle,
   LogOut,
   Moon,
   Network,
@@ -7712,6 +7713,7 @@ function AiEvaluationTab({
   const hasRunningAnalysis = hasRunningAIJob(aiAnalysisStatus);
   const performanceEnabled = record.scope.performanceAnalysis.enabled;
   const latestJob = aiAnalysisStatus?.jobs[0];
+  const activeJob = aiAnalysisStatus?.jobs.find((job) => isActiveAIJobStatus(job.status));
   const isAdmin = Boolean(currentUser && canManageUsers(currentUser));
   const [expandedAreaDetails, setExpandedAreaDetails] = useState<Partial<Record<EvaluationArea, boolean>>>({});
   const [showFullBreakdown, setShowFullBreakdown] = useState(false);
@@ -7738,6 +7740,12 @@ function AiEvaluationTab({
               <PlayCircle size={16} />
               Evaluacion completa
             </Button>
+            {activeJob && (
+              <Button variant="secondary" onClick={() => onCancelAnalysisJob(activeJob.id)}>
+                <X size={16} />
+                Cancelar evaluacion
+              </Button>
+            )}
             <Button variant="ghost" onClick={() => setShowFullBreakdown((current) => !current)}>
               {showFullBreakdown ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
               Desglose completo
@@ -7753,9 +7761,9 @@ function AiEvaluationTab({
               latestJob={latestJob}
             />
           )}
-          {latestJob && (
+          {(activeJob ?? latestJob) && (
             <AIAnalysisJobStatusPanel
-              job={latestJob}
+              job={(activeJob ?? latestJob)!}
               onCancelAnalysisJob={onCancelAnalysisJob}
               onRetryAnalysisJob={onRetryAnalysisJob}
             />
@@ -8121,20 +8129,24 @@ function AIAnalysisJobStatusPanel({
   const skipped = job.steps.filter((step) => step.status === "skipped").length;
   const completed = job.steps.filter((step) => step.status === "completed").length;
   const jobStatusLabel = humanizeScopeStatus(job.status);
+  const isActive = isActiveAIJobStatus(job.status);
 
   return (
-    <div className="rounded-md border border-primary/30 bg-primary/5 p-3">
+    <div className={cn("relative overflow-hidden rounded-md border border-primary/30 bg-primary/5 p-3", isActive && "shadow-sm")}>
+      {isActive && <div className="absolute inset-x-0 top-0 h-1 animate-pulse bg-primary" />}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="flex flex-wrap items-center gap-2">
+            {isActive && <LoaderCircle size={15} className="animate-spin text-primary" />}
             <p className="text-sm font-semibold">Motor persistente de analisis AI</p>
             <span title={jobStatusLabel.tooltip}>
               <Badge tone={scopeStatusTone(job.status)}>{jobStatusLabel.label}</Badge>
             </span>
             <Badge tone="neutral">{job.mode === "full" ? "Evaluacion completa" : job.scopeId}</Badge>
+            {isActive && <AIWorkingIndicator />}
           </div>
           <p className="mt-1 text-xs text-muted-foreground">
-            {job.progress}% · {job.currentPhase ?? "Sin fase activa"} · Actualizado {formatDate(job.updatedAt)}
+            {job.progress}% · {job.currentPhase ?? "Preparando siguiente fase"} · Actualizado {formatDate(job.updatedAt)}
           </p>
           {job.errorMessage && <p className="mt-1 text-xs text-rose-300">{job.errorMessage}</p>}
         </div>
@@ -8154,7 +8166,10 @@ function AIAnalysisJobStatusPanel({
         </div>
       </div>
       <div className="mt-3 h-2 rounded-full bg-muted">
-        <div className="h-2 rounded-full bg-primary" style={{ width: `${job.progress}%` }} />
+        <div className="relative h-2 overflow-hidden rounded-full">
+          <div className="h-2 rounded-full bg-primary" style={{ width: `${job.progress}%` }} />
+          {isActive && <div className="absolute inset-y-0 left-0 w-1/3 animate-pulse rounded-full bg-white/40" />}
+        </div>
       </div>
       <div className="mt-3 grid gap-2 text-xs md:grid-cols-4">
         <MetricPanel label="Fases completadas" value={String(completed)} />
@@ -8182,6 +8197,21 @@ function AIAnalysisJobStatusPanel({
         })}
       </div>
     </div>
+  );
+}
+
+function AIWorkingIndicator() {
+  return (
+    <span className="inline-flex items-center gap-1 text-xs text-primary" aria-label="Analisis en progreso">
+      <span>Analizando</span>
+      {[0, 1, 2].map((index) => (
+        <span
+          key={index}
+          className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary"
+          style={{ animationDelay: `${index * 120}ms` }}
+        />
+      ))}
+    </span>
   );
 }
 

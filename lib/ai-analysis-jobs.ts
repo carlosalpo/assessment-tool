@@ -191,7 +191,10 @@ export const fullAssessmentScopeOrder: AIAnalysisScopeId[] = [
   "campus",
   "perimeter",
   "performance",
-  "high_availability",
+  "high_availability"
+];
+
+export const synthesisAssessmentScopeOrder: AIAnalysisScopeId[] = [
   "roadmap",
   "executive_summary"
 ];
@@ -261,14 +264,27 @@ export async function getAIAnalysisJob(jobId: string) {
 }
 
 export async function cancelAIAnalysisJob(jobId: string) {
-  await prisma.aiAnalysisJob.updateMany({
-    where: { id: jobId, status: { in: ["queued", "running"] } },
-    data: {
-      cancelRequested: true,
-      errorMessage: "Cancelacion solicitada por el usuario.",
-      updatedAt: new Date()
-    }
-  });
+  await prisma.$transaction([
+    prisma.aiAnalysisJobStep.updateMany({
+      where: { jobId, status: { in: ["pending", "running"] } },
+      data: {
+        status: "cancelled",
+        completedAt: new Date(),
+        errorMessage: "Cancelacion solicitada por el usuario."
+      }
+    }),
+    prisma.aiAnalysisJob.updateMany({
+      where: { id: jobId, status: { in: ["queued", "running"] } },
+      data: {
+        status: "cancelled",
+        cancelRequested: true,
+        completedAt: new Date(),
+        currentPhase: null,
+        errorMessage: "Cancelacion solicitada por el usuario.",
+        updatedAt: new Date()
+      }
+    })
+  ]);
   return getAIAnalysisJob(jobId);
 }
 
@@ -446,6 +462,7 @@ export async function runAIAnalysisJob(jobId: string, options?: RunAIAnalysisJob
           designGuidelines: designRubric?.guidelines ?? null,
           designGuidelinesHash: designRubric?.guidelinesHash ?? null
         });
+        if (await cancelIfRequested(jobId)) return;
         const artifact = await prisma.aiAnalysisArtifact.create({
           data: {
             assessmentId: job.assessmentId,
@@ -504,6 +521,7 @@ export async function runAIAnalysisJob(jobId: string, options?: RunAIAnalysisJob
       });
       completedScopes += 1;
     } catch (error) {
+      if (await cancelIfRequested(jobId)) return;
       failedScopes += 1;
       const message = error instanceof Error ? error.message : "Error desconocido ejecutando ambito.";
       await prisma.aiAnalysisJobStep.updateMany({
@@ -518,6 +536,7 @@ export async function runAIAnalysisJob(jobId: string, options?: RunAIAnalysisJob
   }
 
   if (isReduceStageEnabled() && job.mode === "full") {
+    if (await cancelIfRequested(jobId)) return;
     try {
       await runReduceStage({
         jobId,
@@ -526,12 +545,15 @@ export async function runAIAnalysisJob(jobId: string, options?: RunAIAnalysisJob
         forceReevaluate: job.forceReevaluate,
         debugCapture
       });
+      if (await cancelIfRequested(jobId)) return;
     } catch (error) {
+      if (await cancelIfRequested(jobId)) return;
       console.warn("Reduce AI stage failed without failing the job.", error);
     }
   }
 
   if (isSynthesisStageEnabled() && job.mode === "full") {
+    if (await cancelIfRequested(jobId)) return;
     try {
       await runSynthesisStage({
         jobId,
@@ -540,7 +562,9 @@ export async function runAIAnalysisJob(jobId: string, options?: RunAIAnalysisJob
         forceReevaluate: job.forceReevaluate,
         debugCapture
       });
+      if (await cancelIfRequested(jobId)) return;
     } catch (error) {
+      if (await cancelIfRequested(jobId)) return;
       console.warn("Synthesis AI stage failed without failing the job.", error);
     }
   }
@@ -834,7 +858,8 @@ async function runDeterministicLifecycleScopeAnalysis(
   const narratedFindings = await narrateLifecycleFindings({
     findings: deterministicFindings,
     apiKey: input.apiKey,
-    model
+    model,
+    jobId: input.jobId
   });
   const findings = lifecycleFindingsToScopeAnalysisFindings(narratedFindings, scopePacket);
   return {
@@ -860,7 +885,8 @@ async function runDeterministicOperationsScopeAnalysis(
   const narratedFindings = await narrateOperationsFindings({
     findings: deterministicFindings,
     apiKey: input.apiKey,
-    model
+    model,
+    jobId: input.jobId
   });
   const findings = operationsFindingsToScopeAnalysisFindings(narratedFindings);
   return {
@@ -881,10 +907,12 @@ async function narrateOperationsFindings(input: {
   findings: OperationsFinding[];
   apiKey: string;
   model: string;
+  jobId?: string;
 }) {
   if (!input.apiKey || input.findings.length === 0) return input.findings;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), Number(process.env.OPENAI_TIMEOUT_MS ?? 90000));
+  const cancelPoll = input.jobId ? pollJobCancellation(input.jobId, controller) : null;
   const requestBody = {
     model: input.model,
     input: [
@@ -945,7 +973,20 @@ async function narrateOperationsFindings(input: {
     return input.findings;
   } finally {
     clearTimeout(timeout);
+    if (cancelPoll) clearInterval(cancelPoll);
   }
+}
+
+function pollJobCancellation(jobId: string, controller: AbortController) {
+  return setInterval(() => {
+    if (controller.signal.aborted) return;
+    void prisma.aiAnalysisJob.findUnique({
+      where: { id: jobId },
+      select: { cancelRequested: true, status: true }
+    }).then((job) => {
+      if (job?.cancelRequested || job?.status === "cancelled") controller.abort();
+    }).catch(() => undefined);
+  }, 1500);
 }
 
 export function buildOperationsNarrationSystemPrompt() {
@@ -1029,10 +1070,12 @@ async function narrateLifecycleFindings(input: {
   findings: LifecycleFinding[];
   apiKey: string;
   model: string;
+  jobId?: string;
 }) {
   if (!input.apiKey || input.findings.length === 0) return input.findings;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), Number(process.env.OPENAI_TIMEOUT_MS ?? 90000));
+  const cancelPoll = input.jobId ? pollJobCancellation(input.jobId, controller) : null;
   const requestBody = {
     model: input.model,
     input: [
@@ -1094,6 +1137,7 @@ async function narrateLifecycleFindings(input: {
     return input.findings;
   } finally {
     clearTimeout(timeout);
+    if (cancelPoll) clearInterval(cancelPoll);
   }
 }
 
@@ -1296,10 +1340,14 @@ async function runReduceStage(input: {
     }
   };
   const startedAt = Date.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.OPENAI_TIMEOUT_MS ?? 90000));
+  const cancelPoll = pollJobCancellation(input.jobId, controller);
   let capturedFailure = false;
   try {
     const response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
+      signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${input.apiKey}`
@@ -1416,6 +1464,9 @@ async function runReduceStage(input: {
       });
     }
     throw error;
+  } finally {
+    clearTimeout(timeout);
+    clearInterval(cancelPoll);
   }
 }
 
@@ -1511,10 +1562,14 @@ async function runSynthesisTarget(
     }
   };
   const startedAt = Date.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.OPENAI_TIMEOUT_MS ?? 90000));
+  const cancelPoll = pollJobCancellation(input.jobId, controller);
   let capturedFailure = false;
   try {
     const response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
+      signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${input.apiKey}`
@@ -1636,6 +1691,9 @@ async function runSynthesisTarget(
       });
     }
     throw error;
+  } finally {
+    clearTimeout(timeout);
+    clearInterval(cancelPoll);
   }
 }
 
@@ -1658,6 +1716,7 @@ async function callOpenAIForScopeAnalysis(
   const resultSchema = usesPatternQuery(scopeId) ? scopeAnalysisResultSchemaForPattern(patternForScope(scopeId)) : scopeAnalysisResultSchema();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), Number(process.env.OPENAI_TIMEOUT_MS ?? 90000));
+  const cancelPoll = debug?.jobId ? pollJobCancellation(debug.jobId, controller) : null;
   const requestBody = {
     model,
     input: [
@@ -1781,6 +1840,7 @@ async function callOpenAIForScopeAnalysis(
     return deterministicScopeAnalysisFallback(scopeId, deterministicScopeFindings, message);
   } finally {
     clearTimeout(timeout);
+    if (cancelPoll) clearInterval(cancelPoll);
   }
 }
 

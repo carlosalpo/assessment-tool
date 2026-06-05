@@ -59,8 +59,9 @@ type ScopeProgressJob = {
   steps: ScopeProgressStep[];
 };
 
-// Display-only mirror of lib/ai-analysis-jobs.ts fullAssessmentScopeOrder.
-// Keep this in sync when backend scope order changes; do not import server/prisma code into the client bundle.
+// Display-only order for finding scopes plus optional synthesis stages.
+// Keep finding scopes in sync with lib/ai-analysis-jobs.ts fullAssessmentScopeOrder;
+// do not import server/prisma code into the client bundle.
 export const aiScopeDisplayOrder: AIScopeDisplayMetadata[] = [
   { id: "topology", label: "Topología", group: "Fundamentos" },
   { id: "configuration", label: "Configuración", group: "Fundamentos" },

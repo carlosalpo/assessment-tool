@@ -48,7 +48,7 @@ const expectedGroupByScope: Record<string, AIScopeDisplayGroup> = {
   executive_summary: "Síntesis"
 };
 
-test("aiScopeDisplayOrder covers the 16 backend full-evaluation scopes in display order", () => {
+test("aiScopeDisplayOrder covers finding scopes and optional synthesis stages in display order", () => {
   assert.deepEqual(aiScopeDisplayOrder.map((scope) => scope.id), expectedScopeOrder);
   assert.equal(new Set(aiScopeDisplayOrder.map((scope) => scope.id)).size, 16);
   for (const scope of aiScopeDisplayOrder) {

@@ -21,7 +21,9 @@ import {
 } from "./ai-scope-strategy.ts";
 import {
   deterministicFindingsToScopeAnalysisFindings,
-  filterFindingsForValidationPhase
+  filterFindingsForValidationPhase,
+  fullAssessmentScopeOrder,
+  synthesisAssessmentScopeOrder
 } from "./ai-analysis-jobs.ts";
 
 const baseInput = (): AssessmentAIContextInput => ({
@@ -108,6 +110,12 @@ test("mapLegacyRemediation maps legacy and unknown values to remediation categor
   assert.equal(mapLegacyRemediation("pending-validation"), "pending_validation");
   assert.equal(mapLegacyRemediation("validation_required"), "pending_validation");
   assert.equal(mapLegacyRemediation("unexpected"), "pending_validation");
+});
+
+test("full assessment scope order excludes synthesis-only roadmap and executive summary", () => {
+  assert.equal(fullAssessmentScopeOrder.includes("roadmap"), false);
+  assert.equal(fullAssessmentScopeOrder.includes("executive_summary"), false);
+  assert.deepEqual(synthesisAssessmentScopeOrder, ["roadmap", "executive_summary"]);
 });
 
 test("buildAssessmentAIContext normalizes core assessment data", () => {
