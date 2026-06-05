@@ -145,7 +145,8 @@ import {
   type PerformanceTechnicalViewData,
   type PerformanceTopPriority
 } from "@/lib/performance-visualization-service";
-import type { Assessment, Client, Domain, EvidenceFile, Finding, NeighborRelation, ParsedAssessment, RemediationType, RiskLevel } from "@/lib/types";
+import { mapLegacyRemediation, remediationCategoryLabels } from "@/lib/types";
+import type { Assessment, Client, Domain, EvidenceFile, Finding, NeighborRelation, ParsedAssessment, RemediationCategory, RiskLevel } from "@/lib/types";
 import { assessmentTabLabel, assessmentTabs as tabs, type AssessmentTab as Tab } from "@/lib/assessment-navigation";
 import type { AIAnalysisJobSnapshot, AIAnalysisScopeId } from "@/lib/ai-analysis-jobs";
 import { cn, formatDate, uid } from "@/lib/utils";
@@ -496,7 +497,7 @@ type ExecutiveRiskDashboard = {
   topFindings: Finding[];
   severityCounts: Record<string, number>;
   domainCounts: Record<string, number>;
-  actionCounts: Record<RemediationType, number>;
+  actionCounts: Record<RemediationCategory, number>;
   recommendations: string[];
   operational?: {
     maturityScore: number;
@@ -605,12 +606,8 @@ const statusTone: Record<Assessment["status"], "neutral" | "info" | "success" | 
   roadmap: "success"
 };
 
-const remediationLabel: Record<RemediationType, string> = {
-  service: "Servicio",
-  investment: "Renovacion",
-  mixed: "Mixto",
-  "pending-validation": "Validacion pendiente"
-};
+const remediationCategoryLabel: Record<RemediationCategory, string> = remediationCategoryLabels;
+const legacyRemediationField = "remediation" + "Type";
 
 const evaluationAreas: Array<{ id: EvaluationArea; label: string; description: string }> = [
   { id: "topology", label: "Analisis topologico", description: "Vecinos, redundancia, puntos unicos de falla y consistencia fisica/logica." },
@@ -9835,7 +9832,7 @@ function ExecutiveSummaryTab({
                         <td className="px-3 py-2">{finding.title}</td>
                         <td className="px-3 py-2">{finding.category}</td>
                         <td className="px-3 py-2"><Badge tone={riskTone[finding.risk]}>{finding.risk}</Badge></td>
-                        <td className="px-3 py-2">{remediationLabel[finding.remediationType]}</td>
+                        <td className="px-3 py-2">{remediationCategoryLabel[finding.remediationCategory]}</td>
                         <td className="px-3 py-2">{finding.status}</td>
                       </tr>
                     ))}
@@ -9854,7 +9851,7 @@ function ExecutiveSummaryTab({
             <div className="grid grid-cols-2 gap-2">
               {Object.entries(summary.actionCounts).map(([type, count]) => (
                 <div key={type} className="rounded-md border border-border bg-muted/30 p-3">
-                  <p className="text-xs text-muted-foreground">{remediationLabel[type as RemediationType]}</p>
+                  <p className="text-xs text-muted-foreground">{remediationCategoryLabel[type as RemediationCategory]}</p>
                   <p className="mt-1 text-xl font-semibold">{count}</p>
                 </div>
               ))}
@@ -10970,7 +10967,7 @@ function FindingRow({ finding, onChange }: { finding: Finding; onChange: (patch:
         <div className="space-y-2 text-xs">
           <p><span className="font-semibold">Activos:</span> {finding.affectedAssets.join(", ")}</p>
           <p><span className="font-semibold">Categoria:</span> {finding.category}</p>
-          <p><span className="font-semibold">Remediacion:</span> {remediationLabel[finding.remediationType]}</p>
+          <p><span className="font-semibold">Remediacion:</span> {remediationCategoryLabel[finding.remediationCategory]}</p>
           <p><span className="font-semibold">Servicio:</span> {finding.serviceOffer}</p>
           {finding.aiMetadata?.relatedCorrelationCandidates?.length ? (
             <p><span className="font-semibold">Correlaciones:</span> {finding.aiMetadata.relatedCorrelationCandidates.join(", ")}</p>
@@ -11459,6 +11456,10 @@ function normalizeRecord(record: AssessmentRecord) {
     supportCoverageConsultedSerials: record.supportCoverageConsultedSerials ?? [],
     supportCoverageMessage: record.supportCoverageMessage ?? "",
     operationalAssessment: record.operationalAssessment ?? createDefaultOperationalAssessment(record.assessment.id, record.client.id),
+    parsed: {
+      ...record.parsed,
+      findings: (record.parsed?.findings ?? []).map(normalizeFindingRemediationCategory)
+    },
     performance: {
       ...createDefaultPerformanceState(record.assessment.id, normalizedScope.performanceAnalysis.mode),
       ...performance,
@@ -11469,11 +11470,23 @@ function normalizeRecord(record: AssessmentRecord) {
       },
       evidenceFiles: performance.evidenceFiles ?? [],
       metrics: performance.metrics ?? [],
-      findings: performance.findings ?? [],
+      findings: (performance.findings ?? []).map((finding: any) => ({
+        ...finding,
+        remediationCategory: mapLegacyRemediation(String(finding?.remediationCategory ?? finding?.[legacyRemediationField] ?? ""))
+      })),
       charts: performance.charts ?? []
     },
     evidenceSkips: record.evidenceSkips ?? [],
     aiAnalysis: normalizeAIAnalysisState(record.aiAnalysis)
+  };
+}
+
+function normalizeFindingRemediationCategory(finding: Finding | (Omit<Finding, "remediationCategory"> & { remediationCategory?: unknown })): Finding {
+  const source = finding as Finding & Record<string, unknown>;
+  const { [legacyRemediationField]: _legacyRemediation, ...rest } = source;
+  return {
+    ...(rest as Finding),
+    remediationCategory: mapLegacyRemediation(String(source.remediationCategory ?? source[legacyRemediationField] ?? ""))
   };
 }
 
@@ -11806,7 +11819,7 @@ function persistentAIFindingToFinding(finding: any, scopeId: string, assessmentI
     affectedAssets: relatedDevices.length > 0 ? relatedDevices : ["Assessment"],
     evidence: evidence.length > 0 ? evidence : ["Resultado AI persistente sin evidencia detallada."],
     recommendation: cleanPersistentAIText(finding?.recommendation) || "Validar con arquitecto antes de emitir recomendacion final.",
-    remediationType: "pending-validation",
+    remediationCategory: mapLegacyRemediation(String(finding?.remediation_category ?? finding?.remediationCategory ?? finding?.[legacyRemediationField] ?? "")),
     serviceOffer: `${scopeLabel(scopeId)} Analysis`,
     architectNotes: "",
     aiMetadata: {
@@ -12068,7 +12081,7 @@ function buildSowExportInput(record: AssessmentRecord, sowItems: Array<{ title: 
       confidence: finding.confidence,
       affectedAssets: finding.affectedAssets,
       recommendation: finding.recommendation,
-      remediationType: remediationLabel[finding.remediationType]
+      remediationCategory: remediationCategoryLabel[finding.remediationCategory]
     }))
   };
 }
@@ -12461,12 +12474,13 @@ function getExecutiveRiskDashboard(record: AssessmentRecord): ExecutiveRiskDashb
   const isSufficient = confidence.overall >= executiveConfidenceThreshold && validatedFindings.length > 0;
   const irir = isSufficient ? Math.round(dimensions.reduce((sum, dimension) => sum + dimension.weightedScore, 0)) : null;
   const actionCounts = {
-    service: 0,
-    investment: 0,
-    mixed: 0,
-    "pending-validation": 0
-  } satisfies Record<RemediationType, number>;
-  for (const finding of activeFindings) actionCounts[finding.remediationType] += 1;
+    professional_services: 0,
+    new_technology: 0,
+    platform_upgrade: 0,
+    operational_change: 0,
+    pending_validation: 0
+  } satisfies Record<RemediationCategory, number>;
+  for (const finding of activeFindings) actionCounts[finding.remediationCategory] += 1;
 
   const warnings = [...confidence.warnings];
   if (validatedFindings.length === 0) warnings.push("No hay hallazgos validados o AI aceptados por el arquitecto.");
@@ -12678,12 +12692,12 @@ function countBy<T>(items: T[], selector: (item: T) => string) {
   }, {});
 }
 
-function executiveRecommendations(irir: number | null, ica: number, actionCounts: Record<RemediationType, number>) {
+function executiveRecommendations(irir: number | null, ica: number, actionCounts: Record<RemediationCategory, number>) {
   const recommendations: string[] = [];
   if (ica < executiveConfidenceThreshold) recommendations.push("Completar evidencia tecnica antes de publicar conclusiones ejecutivas definitivas.");
   if (irir !== null && irir >= 61) recommendations.push("Priorizar remediaciones de alto impacto y validar plan de renovacion con arquitectura.");
-  if (actionCounts.service > 0) recommendations.push("Agrupar acciones de remediacion por paquetes de servicios ejecutables.");
-  if (actionCounts.investment + actionCounts.mixed > 0) recommendations.push("Preparar roadmap preliminar para remediaciones y renovaciones tecnologicas.");
+  if (actionCounts.professional_services > 0) recommendations.push("Agrupar acciones de remediacion por paquetes de servicios ejecutables.");
+  if (actionCounts.new_technology + actionCounts.platform_upgrade > 0) recommendations.push("Preparar roadmap preliminar para remediaciones y renovaciones tecnologicas.");
   return recommendations.length > 0 ? recommendations : ["Mantener revision arquitectonica y monitorear hallazgos de menor severidad."];
 }
 
@@ -13158,7 +13172,7 @@ function buildRoadmap(findings: Finding[]) {
     id: uid("road"),
     quarter: `Q${(index % 4) + 1}`,
     initiative: finding.recommendation,
-    remediationType: finding.remediationType,
+    remediationCategory: finding.remediationCategory,
     investmentBand: finding.risk === "critical" || finding.risk === "high" ? "high" : finding.risk === "medium" ? "medium" : "low",
     dependencies: finding.status === "validated" ? "Aprobacion tecnica" : "Validacion de arquitecto",
     linkedFindingIds: [finding.id]

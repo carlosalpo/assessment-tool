@@ -46,6 +46,7 @@ const baseFindingFields = [
   "technical_rationale",
   "business_impact",
   "recommendation",
+  "remediation_category",
   "remediation_steps",
   "validation_questions",
   "related_devices",

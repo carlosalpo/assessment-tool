@@ -34,10 +34,11 @@ enum RiskLevel {
   INFO
 }
 
-enum RemediationType {
-  SERVICE
-  INVESTMENT
-  MIXED
+enum RemediationCategory {
+  PROFESSIONAL_SERVICES
+  NEW_TECHNOLOGY
+  PLATFORM_UPGRADE
+  OPERATIONAL_CHANGE
   PENDING_VALIDATION
 }
 
@@ -150,7 +151,7 @@ model Finding {
   status          FindingStatus   @default(AI_DRAFT)
   evidence        Json
   recommendation  String
-  remediationType RemediationType
+  remediationCategory RemediationCategory
   serviceOffer    String?
   architectNotes  String?
   devices         FindingDevice[]
@@ -174,7 +175,7 @@ model RoadmapItem {
   assessment      Assessment       @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
   quarter         String
   initiative      String
-  remediationType RemediationType
+  remediationCategory RemediationCategory
   investmentBand  String
   dependencies    String?
   findings        RoadmapFinding[]

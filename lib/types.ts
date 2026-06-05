@@ -2,7 +2,32 @@ export type Domain = "enterprise-networking" | "datacenter-networking";
 
 export type FindingStatus = "ai-draft" | "ai_suggested" | "accepted" | "edited" | "validated" | "discarded";
 export type RiskLevel = "critical" | "high" | "medium" | "low" | "info";
-export type RemediationType = "service" | "investment" | "mixed" | "pending-validation";
+export type RemediationCategory =
+  | "professional_services"
+  | "new_technology"
+  | "platform_upgrade"
+  | "operational_change"
+  | "pending_validation";
+
+export const remediationCategoryLabels: Record<RemediationCategory, string> = {
+  professional_services: "Servicios profesionales",
+  new_technology: "Nueva tecnologia",
+  platform_upgrade: "Actualizacion de plataforma",
+  operational_change: "Cambio operacional",
+  pending_validation: "Pendiente de validacion"
+};
+
+export function mapLegacyRemediation(legacy: string): RemediationCategory {
+  const normalized = legacy.trim().toLowerCase().replace(/\s+/g, "_");
+  if (normalized === "service" || normalized === "professional_services") return "professional_services";
+  if (normalized === "investment" || normalized === "new_technology") return "new_technology";
+  if (normalized === "platform_upgrade") return "platform_upgrade";
+  if (normalized === "operational_change") return "operational_change";
+  if (normalized === "mixed" || normalized === "pending-validation" || normalized === "validation_required" || normalized === "pending_validation") {
+    return "pending_validation";
+  }
+  return "pending_validation";
+}
 
 export type Client = {
   id: string;
@@ -91,7 +116,7 @@ export type Finding = {
   affectedAssets: string[];
   evidence: string[];
   recommendation: string;
-  remediationType: RemediationType;
+  remediationCategory: RemediationCategory;
   serviceOffer: string;
   architectNotes?: string;
   aiMetadata?: {
@@ -125,7 +150,7 @@ export type RoadmapItem = {
   id: string;
   quarter: string;
   initiative: string;
-  remediationType: RemediationType;
+  remediationCategory: RemediationCategory;
   investmentBand: "low" | "medium" | "high" | "tbd";
   dependencies: string;
   linkedFindingIds: string[];

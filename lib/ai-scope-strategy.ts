@@ -9,6 +9,7 @@ import {
   type OperationalStateFact
 } from "./ai-analysis.ts";
 import { patternForScope } from "./ai-scope-schemas.ts";
+import { mapLegacyRemediation, type RemediationCategory } from "./types.ts";
 
 export type AIScopeId =
   | "inventory"
@@ -140,6 +141,14 @@ export type ScopeValidationResult = {
   validFindings: any[];
   rejectedFindings: Array<{ finding_id: string; title: string; reason: string }>;
 };
+
+const remediationCategories: RemediationCategory[] = [
+  "professional_services",
+  "new_technology",
+  "platform_upgrade",
+  "operational_change",
+  "pending_validation"
+];
 
 export type ScopeBrief = {
   scopeId: string;
@@ -531,6 +540,7 @@ export function validateScopeAnalysisResult(parsed: any, packet: AIScopePacket):
     const findingType = String(finding.finding_type ?? "");
     const severity = String(finding.severity ?? "");
     const text = `${finding.title ?? ""} ${finding.technical_rationale ?? ""} ${finding.business_impact ?? ""}`.toLowerCase();
+    finding.remediation_category = normalizeScopeRemediationCategory(finding.remediation_category ?? finding.remediationCategory);
 
     if (findingType && !strategy.allowedFindingTypes.includes(findingType as AIScopeFindingType)) {
       reasons.push(`finding_type ${findingType} no esta permitido para ${packet.scopeId}.`);
@@ -584,6 +594,11 @@ export function validateScopeAnalysisResult(parsed: any, packet: AIScopePacket):
   }
 
   return { validFindings, rejectedFindings };
+}
+
+function normalizeScopeRemediationCategory(value: unknown): RemediationCategory {
+  const text = String(value ?? "");
+  return remediationCategories.includes(text as RemediationCategory) ? (text as RemediationCategory) : mapLegacyRemediation(text);
 }
 
 export function buildScopeBrief(findings: any[], scopeId: AIScopeId | string, scopeLabel: string): ScopeBrief {

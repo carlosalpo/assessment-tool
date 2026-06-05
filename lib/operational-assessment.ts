@@ -1,4 +1,5 @@
 import { uid } from "./utils.ts";
+import type { RemediationCategory } from "./types.ts";
 
 export type OperationalAssessmentStatus = "draft" | "in_progress" | "completed" | "ai_reviewed" | "validated";
 export type OperationalInterviewType =
@@ -22,7 +23,7 @@ export type OperationalResponseType =
   | "text"
   | "evidence_upload";
 export type OperationalEvidenceLevel = "none" | "self_declared" | "documented" | "tool_export" | "validated";
-export type OperationalRemediationType = "service" | "investment" | "mixed" | "validation_required";
+export type OperationalRemediationCategory = RemediationCategory;
 export type OperationalFindingStatus = "draft" | "validated" | "discarded";
 export type OperationalDomain =
   | "governance"
@@ -116,7 +117,7 @@ export type OperationalFinding = {
   businessImpact: string;
   technicalImpact: string;
   recommendation: string;
-  remediationType: OperationalRemediationType;
+  remediationCategory: OperationalRemediationCategory;
   relatedQuestions: string[];
   relatedAnswers: string[];
   status: OperationalFindingStatus;
@@ -608,7 +609,7 @@ function makeOperationalFinding(input: {
     businessImpact: "Mayor exposicion a interrupciones operativas y tiempos de recuperacion extendidos.",
     technicalImpact: "Debilidad en procesos de operacion, control y trazabilidad.",
     recommendation: "Formalizar proceso, responsables, evidencia y medicion recurrente.",
-    remediationType: "service",
+    remediationCategory: "operational_change",
     relatedQuestions: input.relatedQuestions,
     relatedAnswers: input.relatedAnswers,
     status: "draft"

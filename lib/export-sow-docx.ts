@@ -65,7 +65,7 @@ export type SowDocumentInput = {
     confidence: number;
     affectedAssets: string[];
     recommendation: string;
-    remediationType: string;
+    remediationCategory: string;
   }>;
 };
 
@@ -189,7 +189,7 @@ function documentXml(input: SowDocumentInput) {
         finding.status,
         `${Math.round(finding.confidence * 100)}%`,
         finding.affectedAssets.join(", ") || "Pendiente",
-        finding.remediationType,
+        finding.remediationCategory,
         finding.recommendation
       ])
     ])}

@@ -352,7 +352,7 @@ function generatePreliminaryFindings(content: string, device: DeviceInventory, s
       device,
       evidence: [`${device.hostname} ejecuta version ${version}`, ...device.evidence],
       recommendation: "Validar ciclo de vida del tren de software y planear upgrade controlado.",
-      remediationType: "mixed",
+      remediationCategory: "platform_upgrade",
       serviceOffer: "Assessment de lifecycle y ejecucion de upgrade"
     }));
   }
@@ -367,7 +367,7 @@ function generatePreliminaryFindings(content: string, device: DeviceInventory, s
       device,
       evidence: [publicCommunity],
       recommendation: "Eliminar comunidades por defecto, restringir ACLs y migrar a SNMPv3.",
-      remediationType: "service",
+      remediationCategory: "professional_services",
       serviceOffer: "Hardening de administracion y monitoreo"
     }));
   }
@@ -382,7 +382,7 @@ function generatePreliminaryFindings(content: string, device: DeviceInventory, s
       device,
       evidence: [telnet],
       recommendation: "Permitir solo SSH, validar AAA y aplicar controles de acceso administrativo.",
-      remediationType: "service",
+      remediationCategory: "professional_services",
       serviceOffer: "Hardening de acceso administrativo"
     }));
   }
@@ -397,7 +397,7 @@ function generatePreliminaryFindings(content: string, device: DeviceInventory, s
       device,
       evidence: [httpServer],
       recommendation: "Deshabilitar HTTP no cifrado o sustituir por HTTPS con acceso restringido.",
-      remediationType: "service",
+      remediationCategory: "professional_services",
       serviceOffer: "Hardening de plano de administracion"
     }));
   }
@@ -412,7 +412,7 @@ function generatePreliminaryFindings(content: string, device: DeviceInventory, s
       device,
       evidence: errDisabled.slice(0, 5),
       recommendation: "Revisar causa de err-disable, documentar impacto y corregir fisico/configuracion.",
-      remediationType: "pending-validation",
+      remediationCategory: "operational_change",
       serviceOffer: "Soporte operativo y saneamiento de puertos"
     }));
   }
@@ -426,7 +426,7 @@ function generatePreliminaryFindings(content: string, device: DeviceInventory, s
       device,
       evidence: [`Archivo procesado: ${sourceFile}`, ...device.evidence.slice(0, 2)],
       recommendation: "Validar rol, criticidad y ownership del dispositivo con el arquitecto.",
-      remediationType: "pending-validation",
+      remediationCategory: "pending_validation",
       serviceOffer: "Validacion de inventario y alcance"
     }));
   }

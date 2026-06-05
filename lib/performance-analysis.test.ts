@@ -130,7 +130,7 @@ test("performanceFindingsToGenericFindings drops findings without evidence", () 
     impact: "No debe publicarse.",
     probableCause: "Sin evidencia.",
     recommendation: "Validar evidencia antes de publicar.",
-    remediationType: "validation_required",
+    remediationCategory: "pending_validation",
     confidence: 0.7,
     aiGenerated: true,
     status: "ai_suggested",

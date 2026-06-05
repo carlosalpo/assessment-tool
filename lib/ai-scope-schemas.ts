@@ -5,6 +5,7 @@ type JsonSchema = Record<string, any>;
 export type ScopeQueryPattern = "graph" | "entity" | "aggregation" | "synthesis";
 
 const WIRED_PATTERN_QUERIES = new Set<ScopeQueryPattern>(["entity", "graph", "aggregation"]);
+const remediationCategoryEnum = ["professional_services", "new_technology", "platform_upgrade", "operational_change", "pending_validation"];
 
 export const scopePattern: Record<AIScopeId, ScopeQueryPattern> = {
   inventory: "entity",
@@ -215,6 +216,7 @@ function baseFindingRequiredProperties() {
     "technical_rationale",
     "business_impact",
     "recommendation",
+    "remediation_category",
     "remediation_steps",
     "validation_questions",
     "related_devices",
@@ -253,6 +255,7 @@ function baseFindingProperties(): JsonSchema {
     technical_rationale: { type: "string" },
     business_impact: { type: "string" },
     recommendation: { type: "string" },
+    remediation_category: { type: "string", enum: remediationCategoryEnum },
     remediation_steps: { type: "array", items: { type: "string" } },
     validation_questions: { type: "array", items: { type: "string" } },
     related_devices: { type: "array", items: { type: "string" } },

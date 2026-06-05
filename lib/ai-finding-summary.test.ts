@@ -71,7 +71,7 @@ function finding(patch: Partial<Finding> = {}): Finding {
     affectedAssets: ["core-01"],
     evidence: ["show command"],
     recommendation: "Validar",
-    remediationType: "pending-validation",
+    remediationCategory: "pending_validation",
     serviceOffer: "Assessment",
     architectNotes: "",
     aiMetadata: {

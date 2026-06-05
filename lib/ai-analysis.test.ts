@@ -7,7 +7,7 @@ import {
   generateCorrelationCandidates,
   type AssessmentAIContextInput
 } from "./ai-analysis.ts";
-import type { Finding } from "@/lib/types";
+import { mapLegacyRemediation, type Finding } from "./types.ts";
 import {
   buildAIScopePacket,
   buildAssessmentKnowledgeGraph,
@@ -62,7 +62,7 @@ const baseInput = (): AssessmentAIContextInput => ({
       { id: "rel_1", localDeviceId: "dev_core01", localHostname: "core-01", localInterface: "Te1/0/1", remoteHostname: "dist-01", remoteInterface: "Te1/0/1", protocol: "cdp", confidence: 0.92, evidence: ["Device ID: dist-01 Interface: Te1/0/1"] }
     ],
     findings: [
-      { id: "find_det_1", title: "Comunidad SNMP publica configurada", category: "security", risk: "high", confidence: 0.9, status: "ai-draft", affectedAssets: ["core-01"], evidence: ["snmp-server community public RO"], recommendation: "Migrar a SNMPv3", remediationType: "service", serviceOffer: "Hardening" }
+      { id: "find_det_1", title: "Comunidad SNMP publica configurada", category: "security", risk: "high", confidence: 0.9, status: "ai-draft", affectedAssets: ["core-01"], evidence: ["snmp-server community public RO"], recommendation: "Migrar a SNMPv3", remediationCategory: "professional_services", serviceOffer: "Hardening" }
     ]
   },
   performance: {
@@ -98,6 +98,16 @@ const baseInput = (): AssessmentAIContextInput => ({
     "WS-C6509-E": { endOfSaleDate: "2020-10-30", lastDateOfSupport: "2025-10-31" }
   },
   lifecycleConsultedProductIds: ["WS-C6509-E"]
+});
+
+test("mapLegacyRemediation maps legacy and unknown values to remediation categories", () => {
+  assert.equal(mapLegacyRemediation("service"), "professional_services");
+  assert.equal(mapLegacyRemediation("investment"), "new_technology");
+  assert.equal(mapLegacyRemediation("platform_upgrade"), "platform_upgrade");
+  assert.equal(mapLegacyRemediation("mixed"), "pending_validation");
+  assert.equal(mapLegacyRemediation("pending-validation"), "pending_validation");
+  assert.equal(mapLegacyRemediation("validation_required"), "pending_validation");
+  assert.equal(mapLegacyRemediation("unexpected"), "pending_validation");
 });
 
 test("buildAssessmentAIContext normalizes core assessment data", () => {
@@ -408,6 +418,40 @@ test("validateScopeAnalysisResult accepts real evidence refs excluded from the t
 
   assert.equal(result.validFindings.length, 1);
   assert.equal(result.rejectedFindings.length, 0);
+});
+
+test("validateScopeAnalysisResult normalizes missing or invalid remediation_category", () => {
+  const packet = buildAIScopePacket({ record: baseInput(), scopeId: "configuration" });
+  const evidenceRef = packet.evidencePack[0];
+  const finding = {
+    finding_id: "cfg_remediation_category_default",
+    scope: "configuration",
+    title: "Desviacion con categoria de remediacion pendiente",
+    finding_type: "probable_issue",
+    severity: "medium",
+    confidence: "medium",
+    evidence_refs: [evidenceRef.id],
+    related_fact_ids: [],
+    related_metric_ids: [],
+    related_correlation_ids: [],
+    evidence: [{ source_type: "cli", source_name: evidenceRef.id, hostname: evidenceRef.deviceId ?? null, command: evidenceRef.command ?? null, excerpt: evidenceRef.excerpt }],
+    technical_rationale: "La evidencia existe en el assessment.",
+    business_impact: "Puede requerir priorizacion tecnica.",
+    recommendation: "Validar y categorizar la accion.",
+    remediation_steps: [],
+    validation_questions: [],
+    related_devices: ["core-01"],
+    related_sites: [],
+    dependencies: []
+  };
+
+  const missing = validateScopeAnalysisResult({ findings: [finding] }, packet);
+  const invalid = validateScopeAnalysisResult({ findings: [{ ...finding, finding_id: "cfg_invalid_category", remediation_category: "legacy_unknown" }] }, packet);
+
+  assert.equal(missing.validFindings.length, 1);
+  assert.equal(missing.validFindings[0].remediation_category, "pending_validation");
+  assert.equal(invalid.validFindings.length, 1);
+  assert.equal(invalid.validFindings[0].remediation_category, "pending_validation");
 });
 
 test("validateScopeAnalysisResult accepts real facts metrics and correlations excluded from the trimmed packet", () => {
@@ -848,7 +892,7 @@ function findingFixture(patch: Partial<Finding> = {}): Finding {
     affectedAssets: ["core-01"],
     evidence: ["evidence"],
     recommendation: "Validar y corregir",
-    remediationType: "service" as const,
+    remediationCategory: "professional_services" as const,
     serviceOffer: "AI contextual correlation review",
     architectNotes: "",
     aiMetadata: {

@@ -1,4 +1,4 @@
-import type { EvidenceFile, Finding, RemediationType } from "@/lib/types";
+import type { EvidenceFile, Finding, RemediationCategory } from "@/lib/types";
 
 export type PerformanceAnalysisMode = "snapshot" | "historical" | "hybrid";
 export type PerformanceEvidenceSourceType = "cli_snapshot" | "nms_export" | "telemetry_export" | "syslog" | "netflow" | "report" | "manual_upload";
@@ -28,7 +28,7 @@ export type PerformanceMetricType =
   | "qos_drops"
   | "routing_neighbor_stability";
 
-export type PerformanceRemediationType = "service" | "investment" | "mixed" | "validation_required";
+export type PerformanceRemediationCategory = RemediationCategory;
 
 export type PerformanceScope = {
   enabled: boolean;
@@ -95,7 +95,7 @@ export type PerformanceFinding = {
   impact: string;
   probableCause: string;
   recommendation: string;
-  remediationType: PerformanceRemediationType;
+  remediationCategory: PerformanceRemediationCategory;
   confidence: number;
   aiGenerated: boolean;
   status: "draft" | "ai_suggested" | "validated" | "discarded";
@@ -363,7 +363,7 @@ export function generatePerformanceFindings(assessmentId: string, metrics: Perfo
       impact: "Reduce la confianza para evaluar tendencias, capacidad y recurrencia.",
       probableCause: "Evidencia limitada a snapshot o ausencia de exportes historicos.",
       recommendation: "Solicitar reportes NMS/telemetria de 7, 30 o 90 dias para validar tendencias.",
-      remediationType: "validation_required",
+      remediationCategory: "pending_validation",
       confidence: 0.7,
       aiGenerated: false,
       status: "draft",
@@ -473,7 +473,7 @@ export function performanceFindingsToGenericFindings(findings: PerformanceFindin
       affectedAssets: [...finding.affectedDeviceIds, ...finding.affectedInterfaceIds],
       evidence: finding.evidence,
       recommendation: finding.recommendation,
-      remediationType: normalizePerformanceRemediation(finding.remediationType),
+      remediationCategory: finding.remediationCategory,
       serviceOffer: "Performance Analysis",
       confidence: finding.confidence,
       status:
@@ -485,10 +485,6 @@ export function performanceFindingsToGenericFindings(findings: PerformanceFindin
               ? "ai_suggested"
               : "ai-draft"
     }));
-}
-
-function normalizePerformanceRemediation(remediationType: PerformanceRemediationType): RemediationType {
-  return remediationType === "validation_required" ? "pending-validation" : remediationType;
 }
 
 function parsePerformanceMetrics(assessmentId: string, file: PerformanceEvidenceFile): PerformanceMetric[] {
@@ -594,7 +590,7 @@ function metricToFinding(assessmentId: string, metricItem: PerformanceMetric): P
     impact: "Puede degradar disponibilidad, estabilidad o experiencia de usuarios/aplicaciones.",
     probableCause: "Saturacion, errores fisicos/logicos, drops o presion de recursos. Requiere validacion tecnica.",
     recommendation: metricRecommendation(metricItem.metricType),
-    remediationType: category === "capacity" || category === "resource_exhaustion" ? "mixed" : "service",
+    remediationCategory: category === "capacity" || category === "resource_exhaustion" ? "new_technology" : "operational_change",
     confidence: metricItem.confidence,
     aiGenerated: false,
     status: "draft",

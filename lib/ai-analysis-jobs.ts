@@ -27,6 +27,7 @@ import {
   synthesisResultSchema,
   usesPatternQuery
 } from "./ai-scope-schemas.ts";
+import { mapLegacyRemediation } from "./types.ts";
 
 export type AIAnalysisJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "partially_completed";
 export type AIAnalysisStepStatus = "pending" | "running" | "completed" | "failed" | "skipped" | "cancelled";
@@ -124,7 +125,8 @@ export type SynthesisDigest = {
   catalog: Record<string, string[]>;
 };
 
-const engineVersion = "ai-analysis-engine-v4";
+const engineVersion = "ai-analysis-engine-v5";
+const remediationCategoryEnum = ["professional_services", "new_technology", "platform_upgrade", "operational_change", "pending_validation"];
 const maxChunkChars = 14000;
 const defaultOpenAIAnalysisModel = "gpt-5.2";
 const crossScopeCorrelationScopeId = "cross_scope_correlation";
@@ -1145,7 +1147,8 @@ async function callOpenAIForScopeAnalysis(
               "Usa memory.acceptedOrDeterministicFindings y memory.openCorrelationCandidates como candidatos con evidencia.",
               "Puedes conservar, ajustar severidad o descartar candidatos solo si la evidencia contradice el candidato.",
               "No devuelvas findings vacio cuando la memoria tenga candidatos validos soportados por evidencia.",
-              "Incluye evidence_refs, related_fact_ids, related_metric_ids y related_correlation_ids usando solo IDs existentes en el packet."
+              "Incluye evidence_refs, related_fact_ids, related_metric_ids y related_correlation_ids usando solo IDs existentes en el packet.",
+              "Incluye remediation_category con una de las 4 categorias accionables; usa pending_validation solo si no aplica remediacion o falta validacion del arquitecto."
             ],
             aiScopePacket: scopePacket,
             previousArtifacts: compactPreviousArtifacts(previousArtifacts),
@@ -1468,6 +1471,7 @@ export function deterministicFindingsToScopeAnalysisFindings(findings: any[], pa
         technical_rationale: String(finding.title ?? "Hallazgo generado por reglas deterministicas con evidencia del assessment."),
         business_impact: "Debe ser revisado por el arquitecto para confirmar impacto, alcance y prioridad.",
         recommendation: "Validar evidencia relacionada y definir accion de remediacion o levantamiento adicional.",
+        remediation_category: mapLegacyRemediation(String(finding.remediationCategory ?? finding.remediation_category ?? "")),
         remediation_steps: ["Revisar evidencia trazable", "Confirmar alcance con el arquitecto", "Documentar decision final"],
         validation_questions: ["Confirmar si la evidencia representa el estado actual de produccion."],
         related_devices: Array.isArray(finding.affectedAssets) ? finding.affectedAssets : [],
@@ -1586,6 +1590,7 @@ export function buildScopeSystemPrompt(scopeId: AIAnalysisScopeId) {
     "No inventes equipos, rutas, conexiones ni vulnerabilidades.",
     "Usa solo el AIScopePacket provisto. No uses conocimiento externo para completar datos faltantes.",
     "Todo hallazgo debe tener evidence_refs existentes en AIScopePacket.fullEvidenceRefIds o debe clasificarse como visibility_gap/validation_required.",
+    "Todo hallazgo debe incluir remediation_category. Usa professional_services, new_technology, platform_upgrade u operational_change para hallazgos accionables; pending_validation solo para gaps, validaciones o casos que el arquitecto debe categorizar.",
     "Respeta la estrategia, tipos de hallazgo y reglas de validacion especificas del ambito.",
     "Si la evidencia es insuficiente, usa validation_required o visibility_gap en vez de inferir.",
     `Prompt version: ${promptVersion}. Engine version: ${engineVersion}.`
@@ -1651,6 +1656,7 @@ function scopeAnalysisResultSchema() {
             "technical_rationale",
             "business_impact",
             "recommendation",
+            "remediation_category",
             "remediation_steps",
             "validation_questions",
             "related_devices",
@@ -1686,6 +1692,7 @@ function scopeAnalysisResultSchema() {
             technical_rationale: { type: "string" },
             business_impact: { type: "string" },
             recommendation: { type: "string" },
+            remediation_category: { type: "string", enum: remediationCategoryEnum },
             remediation_steps: { type: "array", items: { type: "string" } },
             validation_questions: { type: "array", items: { type: "string" } },
             related_devices: { type: "array", items: { type: "string" } },
@@ -1786,6 +1793,7 @@ function buildDeterministicTopologyFindings(record: any) {
       technical_rationale: `${selfRelations.length} relaciones descubiertas tienen el mismo equipo como origen y destino. Esto puede indicar salida mezclada, parsing incorrecto, vecinos mal identificados o una inconsistencia de documentacion topologica que impide confiar plenamente en dependencias y redundancia.`,
       business_impact: "Una topologia con relaciones ambiguas reduce la confianza del assessment para identificar puntos unicos de falla, dependencias criticas y rutas de remediacion.",
       recommendation: "Validar los bloques CDP/LLDP por hostname, corregir evidencias mezcladas y confirmar pares fisicos/logicos antes de cerrar el mapa topologico.",
+      remediation_category: "operational_change",
       remediation_steps: ["Separar evidencia por dispositivo origen", "Reejecutar show cdp/lldp neighbors detail por equipo", "Validar pares origen/destino en el diagrama topologico"],
       related_devices: Array.from(new Set(samples.flatMap((relation: any) => [relation.localHostname, relation.remoteHostname]).filter(Boolean))),
       related_sites: [],
@@ -1816,6 +1824,7 @@ function buildDeterministicTopologyFindings(record: any) {
       technical_rationale: "Dispositivos marcados como criticos o de alta prioridad tienen cero o una relacion topologica detectada. Para equipos core, datacenter, WAN edge, firewalls o controladores, esto puede ocultar puntos unicos de falla o evidencia incompleta de redundancia.",
       business_impact: "La baja cobertura de vecinos en equipos criticos limita la capacidad de demostrar resiliencia y puede ocultar dependencias operativas de alto impacto.",
       recommendation: "Completar evidencia CDP/LLDP, port-channel/vPC y redundancia para los equipos criticos antes de aceptar la topologia como validada.",
+      remediation_category: "pending_validation",
       remediation_steps: ["Recolectar vecinos CDP/LLDP desde cada equipo critico", "Validar port-channel/vPC/stack/SSO cuando aplique", "Actualizar inventario objetivo con pares redundantes esperados"],
       related_devices: criticalSingleHomed.map((item: LowCoverageDevice) => String(item.device.hostname ?? "")).filter(Boolean),
       related_sites: Array.from(new Set(criticalSingleHomed.map((item: LowCoverageDevice) => String(item.device.site ?? "")).filter(Boolean))),
@@ -1840,6 +1849,7 @@ function buildDeterministicTopologyFindings(record: any) {
       technical_rationale: "Sin relaciones CDP/LLDP parseadas no es posible soportar con evidencia la redundancia fisica/logica ni dependencias entre capas.",
       business_impact: "El assessment no puede concluir puntos unicos de falla o resiliencia sin evidencia topologica verificable.",
       recommendation: "Recolectar y cargar evidencia CDP/LLDP por dispositivo antes de cerrar la evaluacion topologica.",
+      remediation_category: "pending_validation",
       remediation_steps: ["Recolectar show cdp neighbors detail", "Recolectar show lldp neighbors detail", "Reprocesar evidencia"],
       related_devices: targetInventory.slice(0, 8).map((device: any) => String(device.hostname ?? "")).filter(Boolean),
       related_sites: Array.from(new Set(targetInventory.map((device: any) => String(device.site ?? "")).filter(Boolean))).slice(0, 8),

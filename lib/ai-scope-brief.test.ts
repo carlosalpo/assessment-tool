@@ -510,9 +510,10 @@ function baseSystemPrompt() {
     "No inventes equipos, rutas, conexiones ni vulnerabilidades.",
     "Usa solo el AIScopePacket provisto. No uses conocimiento externo para completar datos faltantes.",
     "Todo hallazgo debe tener evidence_refs existentes en AIScopePacket.fullEvidenceRefIds o debe clasificarse como visibility_gap/validation_required.",
+    "Todo hallazgo debe incluir remediation_category. Usa professional_services, new_technology, platform_upgrade u operational_change para hallazgos accionables; pending_validation solo para gaps, validaciones o casos que el arquitecto debe categorizar.",
     "Respeta la estrategia, tipos de hallazgo y reglas de validacion especificas del ambito.",
     "Si la evidencia es insuficiente, usa validation_required o visibility_gap en vez de inferir.",
-    "Prompt version: assessment-ai-prompts-v1. Engine version: ai-analysis-engine-v4."
+    "Prompt version: assessment-ai-prompts-v1. Engine version: ai-analysis-engine-v5."
   ].join("\n");
 }
 

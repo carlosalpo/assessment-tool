@@ -29,7 +29,7 @@ test("architecture tab no longer renders performance as an internal subtab", () 
 
   assert.ok(architectureStart > -1);
   assert.ok(performanceStart > architectureStart);
-  assert.match(architectureSource, /<TopologyTab record=\{record\} \/>/);
+  assert.match(architectureSource, /<TopologyTab\b[^>]*record=\{record\}[^>]*\/>/);
   assert.doesNotMatch(architectureSource, /Performance/);
 });
 

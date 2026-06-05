@@ -1,5 +1,6 @@
 "use client";
 
+import { remediationCategoryLabels } from "@/lib/types";
 import type { Finding } from "@/lib/types";
 import JSZip from "jszip";
 
@@ -13,7 +14,7 @@ export async function exportFindingsToExcel(findings: Finding[], assessmentName:
     Confianza: `${Math.round(finding.confidence * 100)}%`,
     Evidencia: finding.evidence.join("\n---\n"),
     Recomendacion: finding.recommendation,
-    Remediacion: finding.remediationType,
+    Remediacion: remediationCategoryLabels[finding.remediationCategory],
     Servicio: finding.serviceOffer,
     NotasArquitecto: finding.architectNotes ?? ""
   }));

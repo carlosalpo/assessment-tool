@@ -1,6 +1,7 @@
 "use client";
 
 import JSZip from "jszip";
+import { remediationCategoryLabels } from "@/lib/types";
 import type { Assessment, Client, Finding } from "@/lib/types";
 
 type FindingDocumentInput = {
@@ -65,7 +66,7 @@ function findingXml(finding: Finding) {
     paragraph(`Riesgo: ${finding.risk} | Confianza: ${Math.round(finding.confidence * 100)}% | Estado: ${finding.status}`),
     paragraph(`Activos afectados: ${finding.affectedAssets.join(", ") || "Pendiente"}`),
     paragraph(`Recomendacion: ${finding.recommendation}`),
-    paragraph(`Tipo de remediacion: ${finding.remediationType}`),
+    paragraph(`Tipo de remediacion: ${remediationCategoryLabels[finding.remediationCategory]}`),
     paragraph(`Evidencia: ${finding.evidence.join(" | ")}`)
   ].join("");
 }
