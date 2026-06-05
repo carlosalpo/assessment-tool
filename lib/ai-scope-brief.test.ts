@@ -249,14 +249,34 @@ test("hashScopeInput changes for ai-design scopes when AI_DESIGN_RUBRIC includes
 test("hashScopeInput changes for ai-per-device scopes only when AI_PER_DEVICE is enabled", () => {
   const record = minimalRecord("assess_per_device_hash");
 
-  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: undefined, AI_DESIGN_RUBRIC: undefined }, () => {
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: undefined, AI_DESIGN_RUBRIC: undefined, AI_DETERMINISTIC_LIFECYCLE: undefined }, () => {
     const securityOff = hashScopeInput(record, "security");
     const topologyOff = hashScopeInput(record, "topology");
-    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: "1", AI_DESIGN_RUBRIC: undefined }, () => {
+    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: "1", AI_DESIGN_RUBRIC: undefined, AI_DETERMINISTIC_LIFECYCLE: undefined }, () => {
       assert.notEqual(hashScopeInput(record, "security"), securityOff);
       assert.equal(hashScopeInput(record, "topology"), topologyOff);
     });
-    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: "", AI_DESIGN_RUBRIC: undefined }, () => {
+    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: "", AI_DESIGN_RUBRIC: undefined, AI_DETERMINISTIC_LIFECYCLE: undefined }, () => {
+      assert.equal(hashScopeInput(record, "security"), securityOff);
+      assert.equal(hashScopeInput(record, "topology"), topologyOff);
+    });
+  });
+});
+
+test("hashScopeInput changes only for lifecycle when AI_DETERMINISTIC_LIFECYCLE is enabled", () => {
+  const record = minimalRecord("assess_deterministic_lifecycle_hash");
+
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: undefined, AI_DESIGN_RUBRIC: undefined, AI_DETERMINISTIC_LIFECYCLE: undefined }, () => {
+    const lifecycleOff = hashScopeInput(record, "lifecycle");
+    const securityOff = hashScopeInput(record, "security");
+    const topologyOff = hashScopeInput(record, "topology");
+    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: undefined, AI_DESIGN_RUBRIC: undefined, AI_DETERMINISTIC_LIFECYCLE: "1" }, () => {
+      assert.notEqual(hashScopeInput(record, "lifecycle"), lifecycleOff);
+      assert.equal(hashScopeInput(record, "security"), securityOff);
+      assert.equal(hashScopeInput(record, "topology"), topologyOff);
+    });
+    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: undefined, AI_DESIGN_RUBRIC: undefined, AI_DETERMINISTIC_LIFECYCLE: "" }, () => {
+      assert.equal(hashScopeInput(record, "lifecycle"), lifecycleOff);
       assert.equal(hashScopeInput(record, "security"), securityOff);
       assert.equal(hashScopeInput(record, "topology"), topologyOff);
     });

@@ -12,6 +12,7 @@ import type {
 } from "@/lib/types";
 import type { OperationalAssessment } from "@/lib/operational-assessment";
 import type { PerformanceMetric, PerformanceState } from "@/lib/performance-analysis";
+import { inferLifecycleEvaluation, type LifecycleEoxRecord, type LifecycleSource } from "./lifecycle-analysis.ts";
 
 export type CorrelationType =
   | "config_state_mismatch"
@@ -34,6 +35,11 @@ export type AIContextDevice = {
   model: string;
   softwareVersion: string;
   lifecycleStatus: "unknown" | "active" | "end_of_sale" | "end_of_support" | "obsolete";
+  lifecycleSource?: LifecycleSource;
+  lifecycleDates?: {
+    endOfSaleDate?: string;
+    lastDateOfSupport?: string;
+  };
   criticality: "low" | "medium" | "high" | "critical";
   evidenceRefs: string[];
 };
@@ -218,7 +224,7 @@ export type AssessmentAIContextInput = {
   parsed: ParsedAssessment;
   performance: PerformanceState;
   operationalAssessment?: OperationalAssessment;
-  lifecycleEoxRecords?: Record<string, { endOfSaleDate?: string; lastDateOfSupport?: string }>;
+  lifecycleEoxRecords?: Record<string, LifecycleEoxRecord>;
   lifecycleConsultedProductIds?: string[];
 };
 
@@ -331,7 +337,7 @@ function buildContextDevices(input: AssessmentAIContextInput): AIContextDevice[]
     const asset = assetsByHost.get(key);
     const parsed = parsedByHost.get(key);
     const hostname = parsed?.hostname ?? asset?.hostname ?? key;
-    const lifecycleStatus = inferLifecycleStatus(parsed, input.lifecycleEoxRecords ?? {});
+    const lifecycleEvaluation = inferLifecycleEvaluation(parsed, input.lifecycleEoxRecords ?? {});
     return {
       id: parsed?.id ?? asset?.id ?? hostname,
       hostname,
@@ -340,7 +346,11 @@ function buildContextDevices(input: AssessmentAIContextInput): AIContextDevice[]
       platform: asset?.platform || inferPlatform(parsed?.model ?? ""),
       model: parsed?.model && parsed.model !== "No identificado" ? parsed.model : asset?.model || "unknown",
       softwareVersion: parsed?.softwareVersion ?? "unknown",
-      lifecycleStatus,
+      lifecycleStatus: lifecycleEvaluation.status,
+      lifecycleSource: lifecycleEvaluation.source,
+      lifecycleDates: lifecycleEvaluation.source
+        ? (lifecycleEvaluation.source === "hardware" ? lifecycleEvaluation.hardware.dates : lifecycleEvaluation.software.dates)
+        : undefined,
       criticality: normalizeCriticality(asset?.priority, asset?.role || parsed?.suggestedRole || ""),
       evidenceRefs: Array.from(new Set([...(parsed?.sourceFiles ?? []), ...(parsed?.evidence ?? [])])).slice(0, 8)
     };
@@ -793,15 +803,6 @@ function hasHistoricalMetric(context: AssessmentAIContext, deviceId: string, int
   );
 }
 
-function inferLifecycleStatus(device: DeviceInventory | undefined, eoxRecords: Record<string, { endOfSaleDate?: string; lastDateOfSupport?: string }>): AIContextDevice["lifecycleStatus"] {
-  const pids = [device?.model, ...(device?.inventoryItems ?? []).map((item) => item.productId)].filter(Boolean) as string[];
-  const records = pids.map((pid) => eoxRecords[pid]).filter(Boolean);
-  if (records.some((record) => isPastDate(record.lastDateOfSupport))) return "end_of_support";
-  if (records.some((record) => isPastDate(record.endOfSaleDate))) return "end_of_sale";
-  if (/^(12|15)\./.test(device?.softwareVersion ?? "")) return "obsolete";
-  return records.length > 0 ? "active" : "unknown";
-}
-
 function normalizeCriticality(priority: string | undefined, role: string) {
   if (priority === "critical" || /core|wan|internet|firewall|collapsed/i.test(role)) return "critical";
   if (priority === "high" || /distribution|dc|datacenter/i.test(role)) return "high";
@@ -875,12 +876,6 @@ function commandForMetric(metricType: string) {
   if (metricType === "cpu") return "show processes cpu";
   if (metricType === "memory") return "show memory statistics";
   return "performance evidence";
-}
-
-function isPastDate(value?: string) {
-  if (!value) return false;
-  const date = new Date(`${value}T00:00:00`);
-  return !Number.isNaN(date.getTime()) && date.getTime() < Date.now();
 }
 
 function dedupeCandidates(candidates: CorrelationCandidate[]) {

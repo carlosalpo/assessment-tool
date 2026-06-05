@@ -73,6 +73,13 @@ import {
   type AIAnalysisState
 } from "@/lib/ai-analysis";
 import {
+  findLifecycleEoxRecord,
+  isConsultableLifecycleKey,
+  lifecycleLookupVariants,
+  lifecycleRecordStatus,
+  type LifecycleEoxRecord as SharedLifecycleEoxRecord
+} from "@/lib/lifecycle-analysis";
+import {
   areaToFindingCategory,
   filterFindingsByArea,
   summarizeAreaFindings,
@@ -294,19 +301,8 @@ type InventoryAsset = {
   included: boolean;
 };
 
-type LifecycleEoxRecord = {
-  productId: string;
-  description: string;
-  bulletinNumber: string;
-  bulletinUrl: string;
-  announcementDate: string;
-  endOfSaleDate: string;
-  endOfSecurityVulSupportDate: string;
-  endOfSvcAttachDate: string;
-  lastDateOfSupport: string;
+type LifecycleEoxRecord = SharedLifecycleEoxRecord & {
   inputValue?: string;
-  source?: "support-api" | "public-cisco";
-  sourceNote?: string;
 };
 
 type LifecycleEoxLookupResult = {
@@ -9489,20 +9485,18 @@ function LifecycleStatusBadge({ row }: { row: LifecycleHardwareRow }) {
     Icon = Check;
   }
 
-  const lastSupport = parseLifecycleDate(row.eox?.lastDateOfSupport ?? "");
-  const endOfSale = parseLifecycleDate(row.eox?.endOfSaleDate ?? "");
-  const now = new Date();
-  if (lastSupport && lastSupport < now) {
+  const status = lifecycleRecordStatus(row.eox);
+  if (status === "end_of_support") {
     tone = "danger";
     title = "Sin soporte";
     description = "Last Date of Support vencida";
     Icon = AlertTriangle;
-  } else if (endOfSale && endOfSale < now) {
+  } else if (status === "end_of_sale") {
     tone = "warning";
     title = "End-of-sale";
     description = "Venta finalizada, soporte vigente";
     Icon = AlertTriangle;
-  } else if (row.eox) {
+  } else if (status === "active") {
     tone = "success";
     title = "Con EoX";
     description = "Boletin Cisco identificado";
@@ -9539,20 +9533,33 @@ function LifecycleSoftwareStatusBadge({ row }: { row: LifecycleSoftwareRow }) {
     title = "Sin version";
     description = "No se pudo extraer version";
     Icon = AlertTriangle;
-  } else if (!isConsultableCiscoProductId(row.productId)) {
+  } else if (!isConsultableLifecycleKey(row.softwareVersion) && !isConsultableCiscoProductId(row.productId)) {
     tone = "warning";
-    title = "Sin PID";
-    description = "No hay PID para contexto Cisco";
+    title = "Sin clave";
+    description = "No hay version/PID consultable";
     Icon = AlertTriangle;
-  } else if (row.consulted && row.eox) {
+  }
+
+  const status = lifecycleRecordStatus(row.eox);
+  if (status === "end_of_support") {
+    tone = "danger";
+    title = "Sin soporte";
+    description = "Release fuera de soporte";
+    Icon = AlertTriangle;
+  } else if (status === "end_of_sale") {
     tone = "warning";
-    title = "Validar release";
-    description = "PID tiene boletin EoX asociado";
+    title = "End-of-sale";
+    description = "Release con venta finalizada";
     Icon = AlertTriangle;
+  } else if (status === "active") {
+    tone = "success";
+    title = "Con EoX";
+    description = "Boletin lifecycle identificado";
+    Icon = Check;
   } else if (row.consulted) {
     tone = "info";
-    title = "Sin EoX HW";
-    description = "Validar release recomendado";
+    title = "Sin anuncio";
+    description = "No hay EoX publico confirmado";
     Icon = Check;
   }
 
@@ -13145,7 +13152,10 @@ async function fetchSupportCoverageRecords(serials: string[], ciscoToken: string
 }
 
 function lifecycleProductIds(record: AssessmentRecord) {
-  return Array.from(new Set(buildLifecycleHardwareRows(record, {}, []).map((row) => row.productId).filter(isKnownProductId)));
+  return Array.from(new Set([
+    ...buildLifecycleHardwareRows(record, {}, []).map((row) => row.productId).filter(isKnownProductId),
+    ...buildLifecycleSoftwareRows(record, {}, []).map((row) => row.softwareVersion).filter(isConsultableLifecycleKey)
+  ]));
 }
 
 function supportCoverageSerials(record: AssessmentRecord) {
@@ -13245,6 +13255,7 @@ function buildLifecycleSoftwareRows(
     const chassisItem = preferredChassisInventoryItem(inventoryItems);
     const productId = chassisItem?.productId || device.model || "No identificado";
     const productKey = normalizeProductId(productId);
+    const softwareKey = device.softwareVersion || "No identificado";
     rows.push({
       id: `software:${device.id}:${productKey}`,
       hostname: device.hostname,
@@ -13252,15 +13263,16 @@ function buildLifecycleSoftwareRows(
       productId,
       softwareVersion: device.softwareVersion || "No identificado",
       source: device.sourceFiles?.[0] ?? "show version",
-      eox: lifecycleEoxRecordForProduct(productKey, eoxRecords),
-      lookup: lifecycleLookupForProduct(productKey, lookupResults),
-      consulted: lifecycleConsultedHas(productKey, consulted)
+      eox: lifecycleEoxRecordForProduct(softwareKey, eoxRecords) ?? lifecycleEoxRecordForProduct(productKey, eoxRecords),
+      lookup: lifecycleLookupForProduct(softwareKey, lookupResults) ?? lifecycleLookupForProduct(productKey, lookupResults),
+      consulted: lifecycleConsultedHas(softwareKey, consulted) || lifecycleConsultedHas(productKey, consulted)
     });
   }
 
   for (const asset of record.targetInventory.filter((item) => item.included && !parsedHostnames.has(item.hostname.toLowerCase()))) {
     const productId = asset.model || "No identificado";
     const productKey = normalizeProductId(productId);
+    const softwareKey = "No identificado";
     rows.push({
       id: `software:${asset.id}:${productKey}`,
       hostname: asset.hostname,
@@ -13268,9 +13280,9 @@ function buildLifecycleSoftwareRows(
       productId,
       softwareVersion: "No identificado",
       source: "Inventario cargado",
-      eox: lifecycleEoxRecordForProduct(productKey, eoxRecords),
-      lookup: lifecycleLookupForProduct(productKey, lookupResults),
-      consulted: lifecycleConsultedHas(productKey, consulted)
+      eox: lifecycleEoxRecordForProduct(softwareKey, eoxRecords) ?? lifecycleEoxRecordForProduct(productKey, eoxRecords),
+      lookup: lifecycleLookupForProduct(softwareKey, lookupResults) ?? lifecycleLookupForProduct(productKey, lookupResults),
+      consulted: lifecycleConsultedHas(softwareKey, consulted) || lifecycleConsultedHas(productKey, consulted)
     });
   }
 
@@ -13278,7 +13290,7 @@ function buildLifecycleSoftwareRows(
 }
 
 function lifecycleLookupForProduct(productId: string, lookupResults: Record<string, LifecycleEoxLookupResult>) {
-  const variants = lifecycleProductIdVariants(productId);
+  const variants = lifecycleLookupVariants(productId);
   for (const variant of variants) {
     const lookup = lookupResults[variant];
     if (lookup) return lookup;
@@ -13287,16 +13299,11 @@ function lifecycleLookupForProduct(productId: string, lookupResults: Record<stri
 }
 
 function lifecycleEoxRecordForProduct(productId: string, eoxRecords: Record<string, LifecycleEoxRecord>) {
-  const variants = lifecycleProductIdVariants(productId);
-  for (const variant of variants) {
-    const record = eoxRecords[variant];
-    if (record) return record;
-  }
-  return undefined;
+  return findLifecycleEoxRecord(productId, eoxRecords);
 }
 
 function lifecycleConsultedHas(productId: string, consulted: Set<string>) {
-  return lifecycleProductIdVariants(productId).some((variant) => consulted.has(variant));
+  return lifecycleLookupVariants(productId).some((variant) => consulted.has(variant));
 }
 
 const effectiveParsedCache = new WeakMap<AssessmentRecord, ParsedAssessment>();
@@ -13445,12 +13452,6 @@ function dateOrPending(value: string | undefined, consulted: boolean) {
   return <span className="text-muted-foreground">{consulted ? "Sin dato Cisco" : "Pendiente"}</span>;
 }
 
-function parseLifecycleDate(value: string) {
-  if (!value) return null;
-  const parsed = new Date(`${value}T00:00:00`);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
-}
-
 function confirmAction(message: string) {
   if (typeof window === "undefined") return true;
   return window.confirm(message);
@@ -13492,27 +13493,15 @@ function rebuildPerformanceState(record: AssessmentRecord, evidenceFiles: Perfor
   };
 }
 
-function lifecycleStatus(model: string) {
-  if (!model || model === "No identificado") return "Pendiente";
-  if (/2960|3750|3850|n5k/i.test(model)) return "Riesgo lifecycle";
-  return "Validar";
-}
-
-function softwareStatus(version: string) {
-  if (!version || version === "No identificado") return "Pendiente";
-  if (/^(12|15)\./.test(version)) return "Version antigua";
-  return "Validar";
-}
-
 function softwareLifecycleAction(row: LifecycleSoftwareRow) {
   if (!row.softwareVersion || row.softwareVersion === "No identificado") {
     return "Cargar show version para extraer version de software.";
   }
   if (!row.consulted) {
-    return "Consultar Cisco EoX para obtener contexto lifecycle del PID.";
+    return "Consultar Cisco EoX para obtener contexto lifecycle de la version y del PID.";
   }
   if (row.eox) {
-    return "Validar release recomendado, compatibilidad y plan de upgrade asociado al lifecycle del equipo.";
+    return "Planificar upgrade validando release recomendado, compatibilidad y ventana de cambio.";
   }
   return "Validar release recomendado y ventana de upgrade contra guias Cisco.";
 }

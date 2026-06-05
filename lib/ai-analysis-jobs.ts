@@ -31,6 +31,10 @@ import { buildAssessmentAIContext } from "./ai-analysis.ts";
 import { isPerDeviceEnabled, planDeviceBatches } from "./ai-device-context.ts";
 import { engineForScope } from "./ai-scope-engine.ts";
 import {
+  buildLifecycleFindings,
+  type LifecycleFinding
+} from "./lifecycle-analysis.ts";
+import {
   getTopologyDesignGuidelineRecords,
   resolveDesignGuidelines,
   topologyDesignGuidelineGlobalScopeKey,
@@ -683,6 +687,9 @@ async function runPhase(input: RunPhaseInput) {
         return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model);
       case "deterministic-narrate":
         // DOM-D: deterministic.
+        if (input.scopeId === "lifecycle" && isDeterministicLifecycleEnabled()) {
+          return runDeterministicLifecycleScopeAnalysis(input, scopePacket, model);
+        }
         return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model);
     }
   }
@@ -801,6 +808,230 @@ async function runPerDeviceScopeAIAnalysis(
   }
 
   return mergeScopePartitionResults(input.scopeId, partitionResults, batches);
+}
+
+async function runDeterministicLifecycleScopeAnalysis(
+  input: RunPhaseInput,
+  scopePacket: ReturnType<typeof buildAIScopePacket>,
+  model: string
+) {
+  const context = buildAssessmentAIContext(input.record);
+  const deterministicFindings = buildLifecycleFindings(context, input.record?.lifecycleEoxRecords ?? {});
+  const narratedFindings = await narrateLifecycleFindings({
+    findings: deterministicFindings,
+    apiKey: input.apiKey,
+    model
+  });
+  const findings = lifecycleFindingsToScopeAnalysisFindings(narratedFindings, scopePacket);
+  return {
+    phase: "scope_analysis",
+    scopeId: input.scopeId,
+    pattern: usesPatternQuery(input.scopeId) ? patternForScope(input.scopeId) : "generic",
+    provider: "deterministic-lifecycle",
+    packetSummary: summarizeScopePacket(scopePacket),
+    findings,
+    recommendations: Array.from(new Set(findings.map((finding: any) => finding.recommendation).filter(Boolean))),
+    limitations: input.apiKey
+      ? []
+      : ["OpenAI no esta configurado; lifecycle uso hallazgos y textos determinísticos."]
+  };
+}
+
+async function narrateLifecycleFindings(input: {
+  findings: LifecycleFinding[];
+  apiKey: string;
+  model: string;
+}) {
+  if (!input.apiKey || input.findings.length === 0) return input.findings;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.OPENAI_TIMEOUT_MS ?? 90000));
+  const requestBody = {
+    model: input.model,
+    input: [
+      {
+        role: "system",
+        content: [{
+          type: "input_text",
+          text: buildLifecycleNarrationSystemPrompt()
+        }]
+      },
+      {
+        role: "user",
+        content: [{
+          type: "input_text",
+          text: JSON.stringify({
+            task: "Redacta solo narrativa para estos hallazgos lifecycle determinísticos.",
+            fixedFindings: input.findings.map((finding) => ({
+              id: finding.id,
+              device: finding.device,
+              status: finding.status,
+              source: finding.source,
+              dates: finding.dates,
+              severity: finding.severity,
+              remediationCategory: finding.remediationCategory,
+              currentText: {
+                technical_rationale: finding.technical_rationale,
+                business_impact: finding.business_impact,
+                recommendation: finding.recommendation
+              }
+            }))
+          })
+        }]
+      }
+    ],
+    text: {
+      format: {
+        type: "json_schema",
+        name: "lifecycle_narration_result",
+        strict: true,
+        schema: lifecycleNarrationResultSchema()
+      }
+    }
+  };
+  try {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${input.apiKey}`
+      },
+      body: JSON.stringify(requestBody)
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) return input.findings;
+    const parsed = JSON.parse(extractResponseText(payload) || "{\"narrations\":[]}");
+    return applyLifecycleNarration(input.findings, Array.isArray(parsed?.narrations) ? parsed.narrations : []);
+  } catch {
+    return input.findings;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export function applyLifecycleNarration(findings: LifecycleFinding[], narrations: any[]) {
+  const narrationById = new Map((Array.isArray(narrations) ? narrations : []).map((item) => [String(item?.finding_id ?? item?.id ?? ""), item]));
+  return findings.map((finding) => {
+    const narration = narrationById.get(finding.id);
+    if (!narration) return finding;
+    return {
+      ...finding,
+      technical_rationale: boundedNarrationText(narration.technical_rationale, finding.technical_rationale),
+      business_impact: boundedNarrationText(narration.business_impact, finding.business_impact),
+      recommendation: boundedNarrationText(narration.recommendation, finding.recommendation)
+    };
+  });
+}
+
+export function buildLifecycleNarrationSystemPrompt() {
+  return [
+    "Eres un redactor tecnico para hallazgos lifecycle ya decididos por un motor determinístico.",
+    "NO cambies el hallazgo, estado, severidad, categoria de remediacion, fechas, fuente ni equipo.",
+    "Solo redacta technical_rationale, business_impact y recommendation en espanol profesional y conciso.",
+    "No inventes soporte, fechas, boletines ni evidencia no incluida."
+  ].join("\n");
+}
+
+function lifecycleNarrationResultSchema() {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["narrations"],
+    properties: {
+      narrations: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["finding_id", "technical_rationale", "business_impact", "recommendation"],
+          properties: {
+            finding_id: { type: "string" },
+            technical_rationale: { type: "string" },
+            business_impact: { type: "string" },
+            recommendation: { type: "string" }
+          }
+        }
+      }
+    }
+  };
+}
+
+function lifecycleFindingsToScopeAnalysisFindings(findings: LifecycleFinding[], packet: ReturnType<typeof buildAIScopePacket>) {
+  const evidenceById = new Map(fullEvidenceCatalogForPacket(packet).map((ref) => [ref.id, ref]));
+  return findings.map((finding) => {
+    const evidenceRefs = finding.evidenceRefs.filter((ref) => evidenceById.has(ref)).slice(0, 8);
+    const evidence = evidenceRefs.length > 0
+      ? evidenceRefs.map((refId) => {
+          const ref = evidenceById.get(refId);
+          return {
+            source_type: ref?.sourceFile ? "cli" : "document",
+            source_name: ref?.sourceFile ?? refId,
+            hostname: ref?.deviceId ?? finding.device,
+            command: ref?.command ?? null,
+            excerpt: ref?.excerpt ?? refId
+          };
+        })
+      : [{
+          source_type: "document",
+          source_name: finding.source === "software" ? "Software lifecycle lookup" : "Hardware lifecycle lookup",
+          hostname: finding.device,
+          command: null,
+          excerpt: lifecycleFindingEvidenceExcerpt(finding)
+        }];
+    return {
+      finding_id: finding.id,
+      scope: "lifecycle",
+      title: finding.title,
+      finding_type: finding.dates.endOfSaleDate || finding.dates.lastDateOfSupport ? "confirmed_finding" : "probable_issue",
+      severity: finding.severity,
+      confidence: finding.confidence >= 80 ? "high" : "medium",
+      evidence_refs: evidenceRefs,
+      related_fact_ids: [],
+      related_metric_ids: [],
+      related_correlation_ids: [],
+      evidence,
+      technical_rationale: finding.technical_rationale,
+      business_impact: finding.business_impact,
+      recommendation: finding.recommendation,
+      remediation_category: finding.remediationCategory,
+      remediation_steps: lifecycleRemediationSteps(finding),
+      validation_questions: finding.validation_questions,
+      related_devices: finding.affectedAssets,
+      related_sites: [],
+      dependencies: ["Inventario lifecycle", finding.source === "software" ? "Version de software" : "PID hardware"],
+      lifecycle_status: finding.status,
+      lifecycle_source: finding.source,
+      lifecycle_dates: finding.dates
+    };
+  });
+}
+
+function lifecycleFindingEvidenceExcerpt(finding: LifecycleFinding) {
+  const dates = [
+    finding.dates.endOfSaleDate ? `End-of-Sale ${finding.dates.endOfSaleDate}` : "",
+    finding.dates.lastDateOfSupport ? `Last Date of Support ${finding.dates.lastDateOfSupport}` : ""
+  ].filter(Boolean).join("; ");
+  return `${finding.device}: ${finding.source} lifecycle ${finding.status}${dates ? ` (${dates})` : ""}.`;
+}
+
+function lifecycleRemediationSteps(finding: LifecycleFinding) {
+  if (finding.source === "software") {
+    return [
+      "Validar release recomendado y matriz de compatibilidad.",
+      "Preparar plan de upgrade con ventana, rollback y pruebas.",
+      "Actualizar documentacion y monitoreo posterior al cambio."
+    ];
+  }
+  return [
+    "Confirmar alcance de equipos/componentes afectados.",
+    "Definir reemplazo o actualizacion de plataforma segun criticidad.",
+    "Planificar migracion con pruebas, respaldo y ventana aprobada."
+  ];
+}
+
+function boundedNarrationText(value: unknown, fallback: string) {
+  const text = String(value ?? "").trim();
+  return text ? text.slice(0, 1600) : fallback;
 }
 
 async function runReduceStage(input: {
@@ -1646,6 +1877,10 @@ export function isSynthesisStageEnabled() {
   return process.env.AI_SYNTHESIS_STAGE === "1";
 }
 
+export function isDeterministicLifecycleEnabled() {
+  return process.env.AI_DETERMINISTIC_LIFECYCLE === "1";
+}
+
 function openAISynthesisModel() {
   return process.env.OPENAI_SYNTHESIS_MODEL || openAIReduceModel();
 }
@@ -2408,6 +2643,7 @@ export function hashScopeInput(record: any, scopeId: AIAnalysisScopeId, options?
       ...(isEvidenceTieringEnabled() ? { evidenceTiering: true } : {}),
       ...(isDomainPartitionEnabled() ? { domainPartition: true } : {}),
       ...(isPerDeviceEnabled() && engineForScope(scopeId) === "ai-per-device" ? { perDevice: true } : {}),
+      ...(isDeterministicLifecycleEnabled() && scopeId === "lifecycle" ? { deterministicLifecycle: true } : {}),
       ...(usesDesignRubric(scopeId) && options?.designGuidelinesHash ? { designGuidelinesHash: options.designGuidelinesHash } : {}),
       engineVersion,
       client: context.client,
