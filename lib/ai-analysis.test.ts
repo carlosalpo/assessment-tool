@@ -23,6 +23,7 @@ import {
   deterministicFindingsToScopeAnalysisFindings,
   filterFindingsForValidationPhase,
   fullAssessmentScopeOrder,
+  reclaimStaleAIJobs,
   scopesForJob,
   synthesisAssessmentScopeOrder
 } from "./ai-analysis-jobs.ts";
@@ -126,6 +127,40 @@ test("operations scope is blocked until Tab 11 interviews are complete", () => {
     () => scopesForJob("scope", "operations", input),
     /Completa las entrevistas del Tab 11 primero/
   );
+});
+
+test("reclaimStaleAIJobs fails stale active jobs and preserves recent active jobs", async () => {
+  const now = Date.now();
+  const staleAt = new Date(now - 10 * 60 * 1000);
+  const recentAt = new Date(now - 30 * 1000);
+  const fakeDb = fakeStaleJobDb({
+    now,
+    jobs: [
+      { id: "job_stale", status: "running", updatedAt: staleAt, completedAt: null, cancelRequested: true, currentPhase: "security:scope_analysis", errorMessage: null },
+      { id: "job_recent", status: "running", updatedAt: recentAt, completedAt: null, cancelRequested: false, currentPhase: "topology:scope_analysis", errorMessage: null }
+    ],
+    steps: [
+      { id: "step_stale_running", jobId: "job_stale", status: "running", completedAt: null, errorMessage: null },
+      { id: "step_stale_pending", jobId: "job_stale", status: "pending", completedAt: null, errorMessage: null },
+      { id: "step_stale_done", jobId: "job_stale", status: "completed", completedAt: staleAt, errorMessage: null },
+      { id: "step_recent_running", jobId: "job_recent", status: "running", completedAt: null, errorMessage: null }
+    ]
+  });
+
+  const result = await reclaimStaleAIJobs(180000, fakeDb as any);
+
+  assert.deepEqual(result, { reclaimed: 1, jobIds: ["job_stale"] });
+  const staleJob = fakeDb.jobs.find((job) => job.id === "job_stale");
+  const recentJob = fakeDb.jobs.find((job) => job.id === "job_recent");
+  assert.equal(staleJob?.status, "failed");
+  assert.equal(staleJob?.cancelRequested, false);
+  assert.equal(staleJob?.currentPhase, null);
+  assert.match(staleJob?.errorMessage ?? "", /Job huerfano reclamado/);
+  assert.equal(fakeDb.steps.find((step) => step.id === "step_stale_running")?.status, "failed");
+  assert.equal(fakeDb.steps.find((step) => step.id === "step_stale_pending")?.status, "failed");
+  assert.equal(fakeDb.steps.find((step) => step.id === "step_stale_done")?.status, "completed");
+  assert.equal(recentJob?.status, "running");
+  assert.equal(fakeDb.steps.find((step) => step.id === "step_recent_running")?.status, "running");
 });
 
 test("buildAssessmentAIContext normalizes core assessment data", () => {
@@ -957,4 +992,58 @@ function findingFixture(patch: Partial<Finding> = {}): Finding {
     },
     ...patch
   };
+}
+
+function fakeStaleJobDb(input: {
+  now: number;
+  jobs: Array<{
+    id: string;
+    status: string;
+    updatedAt: Date;
+    completedAt: Date | null;
+    cancelRequested: boolean;
+    currentPhase: string | null;
+    errorMessage: string | null;
+  }>;
+  steps: Array<{
+    id: string;
+    jobId: string;
+    status: string;
+    completedAt: Date | null;
+    errorMessage: string | null;
+  }>;
+}) {
+  const db = {
+    jobs: input.jobs,
+    steps: input.steps,
+    aiAnalysisJob: {
+      findMany: async (args: any) => db.jobs
+        .filter((job) => args.where.status.in.includes(job.status) && job.updatedAt < args.where.updatedAt.lt)
+        .map((job) => ({ id: job.id })),
+      updateMany: async (args: any) => {
+        const ids = new Set(args.where.id.in);
+        let count = 0;
+        for (const job of db.jobs) {
+          if (!ids.has(job.id)) continue;
+          Object.assign(job, args.data, { updatedAt: new Date(input.now) });
+          count += 1;
+        }
+        return { count };
+      }
+    },
+    aiAnalysisJobStep: {
+      updateMany: async (args: any) => {
+        const jobIds = new Set(args.where.jobId.in);
+        let count = 0;
+        for (const step of db.steps) {
+          if (!jobIds.has(step.jobId) || !args.where.status.in.includes(step.status)) continue;
+          Object.assign(step, args.data);
+          count += 1;
+        }
+        return { count };
+      }
+    },
+    $transaction: async (queries: Array<Promise<unknown>>) => Promise.all(queries)
+  };
+  return db;
 }

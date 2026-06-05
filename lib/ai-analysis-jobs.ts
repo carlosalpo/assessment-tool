@@ -126,6 +126,17 @@ type DesignRubricContext = {
   guidelinesHash: string;
 };
 
+type StaleJobPrismaClient = {
+  aiAnalysisJob: {
+    findMany(args: any): Promise<Array<{ id: string }>>;
+    updateMany(args: any): Promise<unknown>;
+  };
+  aiAnalysisJobStep: {
+    updateMany(args: any): Promise<unknown>;
+  };
+  $transaction(queries: Promise<unknown>[]): Promise<unknown>;
+};
+
 export type ReduceDigestFinding = {
   scope: string;
   finding_id: string;
@@ -157,6 +168,7 @@ const defaultOpenAIAnalysisModel = "gpt-5.2";
 const crossScopeCorrelationScopeId = "cross_scope_correlation";
 const reduceFindingsPerScopeLimit = 8;
 const synthesisFindingsPerScopeLimit = 12;
+const staleAIJobMessage = "Job huerfano reclamado tras inactividad/reinicio.";
 
 export const aiAnalysisScopes: Array<{ id: AIAnalysisScopeId; label: string; description: string }> = [
   { id: "inventory", label: "Inventario", description: "Inventario, identidad, modelos, seriales y roles." },
@@ -212,6 +224,8 @@ export async function createAIAnalysisJob(input: CreateAIAnalysisJobInput) {
   if (input.mode === "scope" && !input.scopeId) {
     throw new Error("scopeId es requerido para un job por ambito.");
   }
+
+  await reclaimStaleAIJobsSafely();
 
   const existing = await prisma.aiAnalysisJob.findFirst({
     where: {
@@ -320,6 +334,8 @@ export async function retryAIAnalysisJob(jobId: string, options?: RunAIAnalysisJ
 }
 
 export async function getAssessmentAIAnalysisStatus(assessmentId: string) {
+  await reclaimStaleAIJobsSafely();
+
   const [jobs, results] = await Promise.all([
     prisma.aiAnalysisJob.findMany({
       where: { assessmentId },
@@ -365,6 +381,54 @@ export async function getAssessmentAIAnalysisResults(assessmentId: string) {
       updatedAt: result.updatedAt.toISOString()
     }))
   };
+}
+
+export async function reclaimStaleAIJobs(maxAgeMs = 180000, db: StaleJobPrismaClient = prisma) {
+  const now = new Date();
+  const cutoff = new Date(now.getTime() - maxAgeMs);
+  const staleJobs = await db.aiAnalysisJob.findMany({
+    where: {
+      status: { in: ["queued", "running"] },
+      updatedAt: { lt: cutoff }
+    },
+    select: { id: true }
+  });
+  const jobIds = staleJobs.map((job) => job.id);
+  if (jobIds.length === 0) return { reclaimed: 0, jobIds };
+
+  await db.$transaction([
+    db.aiAnalysisJobStep.updateMany({
+      where: {
+        jobId: { in: jobIds },
+        status: { in: ["pending", "running"] }
+      },
+      data: {
+        status: "failed",
+        completedAt: now,
+        errorMessage: staleAIJobMessage
+      }
+    }),
+    db.aiAnalysisJob.updateMany({
+      where: { id: { in: jobIds } },
+      data: {
+        status: "failed",
+        completedAt: now,
+        currentPhase: null,
+        cancelRequested: false,
+        errorMessage: staleAIJobMessage
+      }
+    })
+  ]);
+
+  return { reclaimed: jobIds.length, jobIds };
+}
+
+async function reclaimStaleAIJobsSafely() {
+  try {
+    await reclaimStaleAIJobs();
+  } catch (error) {
+    console.warn("No se pudieron reclamar jobs AI huerfanos.", error);
+  }
 }
 
 export async function resetAssessmentAIAnalysis(assessmentId: string, scopeId?: AIAnalysisScopeId | null) {
