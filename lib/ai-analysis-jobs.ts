@@ -30,6 +30,12 @@ import {
 import { buildAssessmentAIContext } from "./ai-analysis.ts";
 import { isPerDeviceEnabled, planDeviceBatches } from "./ai-device-context.ts";
 import { engineForScope } from "./ai-scope-engine.ts";
+import {
+  getTopologyDesignGuidelineRecords,
+  resolveDesignGuidelines,
+  topologyDesignGuidelineGlobalScopeKey,
+  type ResolvedDesignGuidelines
+} from "./ai-design-guidelines.ts";
 import { mapLegacyRemediation } from "./types.ts";
 
 export type AIAnalysisJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "partially_completed";
@@ -103,6 +109,11 @@ export type CreateAIAnalysisJobInput = {
 
 type RunAIAnalysisJobOptions = {
   apiKey?: string;
+};
+
+type DesignRubricContext = {
+  guidelines: ResolvedDesignGuidelines;
+  guidelinesHash: string;
 };
 
 export type ReduceDigestFinding = {
@@ -367,6 +378,9 @@ export async function runAIAnalysisJob(jobId: string, options?: RunAIAnalysisJob
   const record = snapshot.data as any;
   const scopes = scopesForJob(job.mode as AIAnalysisMode, job.scopeId as AIAnalysisScopeId | null, record);
   const debugCapture = process.env.AI_DEBUG_DISABLE === "1" ? false : (await getAiDebugSetting(job.assessmentId).catch(() => ({ captureEnabled: false }))).captureEnabled;
+  const designRubric = isDesignRubricEnabled()
+    ? await loadDesignRubricContext(job.assessmentId)
+    : null;
   let failedScopes = 0;
   let completedScopes = 0;
   let skippedScopes = 0;
@@ -375,7 +389,9 @@ export async function runAIAnalysisJob(jobId: string, options?: RunAIAnalysisJob
     const cancelled = await cancelIfRequested(jobId);
     if (cancelled) return;
 
-    const inputHash = hashScopeInput(record, scopeId);
+    const inputHash = hashScopeInput(record, scopeId, {
+      designGuidelinesHash: designRubric?.guidelinesHash ?? null
+    });
     const existingResult = await prisma.aiScopeResult.findUnique({
       where: { assessmentId_scopeId: { assessmentId: job.assessmentId, scopeId } }
     });
@@ -407,7 +423,18 @@ export async function runAIAnalysisJob(jobId: string, options?: RunAIAnalysisJob
           data: { currentPhase: `${scopeId}:${phase}` }
         });
 
-        const content = await runPhase({ jobId, assessmentId: job.assessmentId, record, scopeId, phase, previousArtifacts: artifacts.map((artifact) => artifact.content), apiKey, debugCapture });
+        const content = await runPhase({
+          jobId,
+          assessmentId: job.assessmentId,
+          record,
+          scopeId,
+          phase,
+          previousArtifacts: artifacts.map((artifact) => artifact.content),
+          apiKey,
+          debugCapture,
+          designGuidelines: designRubric?.guidelines ?? null,
+          designGuidelinesHash: designRubric?.guidelinesHash ?? null
+        });
         const artifact = await prisma.aiAnalysisArtifact.create({
           data: {
             assessmentId: job.assessmentId,
@@ -529,6 +556,8 @@ type RunPhaseInput = {
   previousArtifacts: any[];
   apiKey: string;
   debugCapture: boolean;
+  designGuidelines?: ResolvedDesignGuidelines | null;
+  designGuidelinesHash?: string | null;
 };
 
 async function runPhase(input: RunPhaseInput) {
@@ -573,6 +602,13 @@ async function runPhase(input: RunPhaseInput) {
       deterministicCandidateCount: baseContext.deterministicFindings.length,
       tokenBudget: scopePacket.budget.maxInputTokens,
       packetBudget: scopePacket.budget,
+      ...(usesDesignRubric(input.scopeId) && input.designGuidelines ? {
+        designRubric: {
+          source: input.designGuidelines.source,
+          sourceScopeKey: input.designGuidelines.sourceScopeKey,
+          guidelinesHash: input.designGuidelinesHash
+        }
+      } : {}),
       promptVersion: getPromptVersion(),
       engineVersion
     };
@@ -634,6 +670,10 @@ async function runPhase(input: RunPhaseInput) {
         return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model);
       case "ai-design":
         // DOM-C: design rubric.
+        if (usesDesignRubric(input.scopeId) && input.designGuidelines) {
+          const systemPrompt = buildDesignRubricSystemPrompt(buildScopeSystemPrompt(input.scopeId), input.designGuidelines);
+          return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model, systemPrompt);
+        }
         return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model);
       case "ai-per-device":
         // DOM-B: per-device packing.
@@ -687,14 +727,16 @@ async function runCurrentScopeAIAnalysis(
   scopePacket: ReturnType<typeof buildAIScopePacket>,
   priorScopeResults: Awaited<ReturnType<typeof loadPriorScopeResults>>,
   explicitMaxInputTokens: number | undefined,
-  model: string
+  model: string,
+  systemPrompt?: string
 ) {
   const partitions = planScopePartitions(input.record, input.scopeId, scopePacket);
   if (partitions.length <= 1) {
     return callOpenAIForScopeAnalysis(input.scopeId, scopePacket, input.previousArtifacts, input.apiKey, model, {
       jobId: input.jobId,
       assessmentId: input.assessmentId,
-      debugCapture: input.debugCapture
+      debugCapture: input.debugCapture,
+      systemPrompt
     });
   }
 
@@ -710,7 +752,8 @@ async function runCurrentScopeAIAnalysis(
     const partitionResult = await callOpenAIForScopeAnalysis(input.scopeId, partitionPacket, input.previousArtifacts, input.apiKey, model, {
       jobId: input.jobId,
       assessmentId: input.assessmentId,
-      debugCapture: input.debugCapture
+      debugCapture: input.debugCapture,
+      systemPrompt
     });
     partitionResults.push({
       ...partitionResult,
@@ -1181,7 +1224,7 @@ async function callOpenAIForScopeAnalysis(
   previousArtifacts: any[],
   apiKey: string,
   model: string,
-  debug?: { jobId: string; assessmentId: string; debugCapture: boolean }
+  debug?: { jobId: string; assessmentId: string; debugCapture: boolean; systemPrompt?: string }
 ) {
   if (!apiKey) {
     throw new Error("OpenAI API key no esta configurada para el motor persistente.");
@@ -1201,7 +1244,7 @@ async function callOpenAIForScopeAnalysis(
         role: "system",
         content: [{
           type: "input_text",
-          text: buildScopeSystemPrompt(scopeId)
+          text: debug?.systemPrompt ?? buildScopeSystemPrompt(scopeId)
         }]
       },
       {
@@ -1676,6 +1719,27 @@ export function buildScopeSystemPrompt(scopeId: AIAnalysisScopeId) {
     lines.splice(lines.length - 1, 0, "Modo por equipo: el contexto incluye varios equipos con su rol, vecinos y protocolos. Genera hallazgos POR EQUIPO; cada hallazgo indica en `related_devices` el equipo especifico. No mezcles equipos en un mismo hallazgo salvo interaccion explicita entre ellos.");
   }
   return lines.join("\n");
+}
+
+export function buildDesignRubricSystemPrompt(basePrompt: string, guidelines: ResolvedDesignGuidelines) {
+  return [
+    basePrompt,
+    "",
+    "Modo rubrica de diseno: evalua este ambito como conformidad de diseno contra las guidelines resueltas.",
+    "Usa la rubrica para razonar sobre alta disponibilidad, resiliencia fisica/logica, resiliencia del control plane, segmentacion, jerarquia y core colapsado vs distribuido.",
+    "Conserva las reglas anti-alucinacion del prompt base: no inventes topologia, no inventes conexiones y no afirmes SPOF/single-homed sin evidencia topologica relacionada.",
+    `Fuente de rubrica: ${guidelines.source} (${guidelines.sourceScopeKey}).`,
+    "Rubrica de evaluacion:",
+    guidelines.content
+  ].join("\n");
+}
+
+export function isDesignRubricEnabled() {
+  return process.env.AI_DESIGN_RUBRIC === "1";
+}
+
+export function usesDesignRubric(scopeId: AIAnalysisScopeId) {
+  return isDesignRubricEnabled() && engineForScope(scopeId) === "ai-design";
 }
 
 function buildReduceSystemPrompt() {
@@ -2334,7 +2398,7 @@ function chunkFromText(scopeId: AIAnalysisScopeId, index: number, text: string) 
   };
 }
 
-export function hashScopeInput(record: any, scopeId: AIAnalysisScopeId) {
+export function hashScopeInput(record: any, scopeId: AIAnalysisScopeId, options?: { designGuidelinesHash?: string | null }) {
   const context = buildScopeContext(record, scopeId);
   return createHash("sha256")
     .update(stableStringify({
@@ -2344,12 +2408,28 @@ export function hashScopeInput(record: any, scopeId: AIAnalysisScopeId) {
       ...(isEvidenceTieringEnabled() ? { evidenceTiering: true } : {}),
       ...(isDomainPartitionEnabled() ? { domainPartition: true } : {}),
       ...(isPerDeviceEnabled() && engineForScope(scopeId) === "ai-per-device" ? { perDevice: true } : {}),
+      ...(usesDesignRubric(scopeId) && options?.designGuidelinesHash ? { designGuidelinesHash: options.designGuidelinesHash } : {}),
       engineVersion,
       client: context.client,
       assessment: context.assessment,
       sourceCounts: context.sourceCounts,
       evidenceText: context.evidenceText
     }))
+    .digest("hex");
+}
+
+async function loadDesignRubricContext(assessmentId: string): Promise<DesignRubricContext> {
+  const records = await getTopologyDesignGuidelineRecords([topologyDesignGuidelineGlobalScopeKey, assessmentId]);
+  const guidelines = resolveDesignGuidelines(assessmentId, records);
+  return {
+    guidelines,
+    guidelinesHash: hashDesignGuidelines(guidelines.content)
+  };
+}
+
+export function hashDesignGuidelines(content: string) {
+  return createHash("sha256")
+    .update(stableStringify({ content }))
     .digest("hex");
 }
 

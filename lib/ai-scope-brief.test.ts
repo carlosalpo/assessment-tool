@@ -7,16 +7,20 @@ import {
   summarizePriorScopeResults
 } from "./ai-scope-strategy.ts";
 import {
+  buildDesignRubricSystemPrompt,
   buildReduceDigest,
   buildSynthesisDigest,
   buildScopeSystemPrompt,
+  hashDesignGuidelines,
   hashScopeInput,
   isReduceStageEnabled,
   isSynthesisStageEnabled,
   mergeScopePartitionResults,
+  usesDesignRubric,
   validateReduceResult,
   validateSynthesisResult
 } from "./ai-analysis-jobs.ts";
+import type { ResolvedDesignGuidelines } from "./ai-design-guidelines.ts";
 
 test("buildScopeBrief caps top findings, sorts by severity and confidence, and extracts questions", () => {
   const brief = buildScopeBrief([
@@ -163,10 +167,10 @@ test("buildScopeSystemPrompt keeps the base prompt unless a map pattern query is
 });
 
 test("buildScopeSystemPrompt adds per-device instructions only for ai-per-device scopes when enabled", () => {
-  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_PER_DEVICE: undefined }, () => {
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_PER_DEVICE: undefined, AI_DESIGN_RUBRIC: undefined }, () => {
     assert.equal(buildScopeSystemPrompt("security"), baseSystemPrompt());
   });
-  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_PER_DEVICE: "1" }, () => {
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_PER_DEVICE: "1", AI_DESIGN_RUBRIC: undefined }, () => {
     const securityPrompt = buildScopeSystemPrompt("security");
     assert.notEqual(securityPrompt, baseSystemPrompt());
     assert.match(securityPrompt, /Modo por equipo/);
@@ -176,15 +180,42 @@ test("buildScopeSystemPrompt adds per-device instructions only for ai-per-device
   });
 });
 
+test("buildDesignRubricSystemPrompt adds design conformity rubric while preserving anti-hallucination rules", () => {
+  const basePrompt = buildScopeSystemPrompt("topology");
+  const prompt = buildDesignRubricSystemPrompt(basePrompt, guideline("Rubrica custom: core distribuido y redundancia WAN."));
+
+  assert.match(prompt, /Rubrica custom: core distribuido y redundancia WAN/);
+  assert.match(prompt, /conformidad de diseno/);
+  assert.match(prompt, /alta disponibilidad/);
+  assert.match(prompt, /core colapsado vs distribuido/);
+  assert.match(prompt, /No inventes equipos, rutas, conexiones ni vulnerabilidades/);
+  assert.match(prompt, /no afirmes SPOF\/single-homed sin evidencia topologica relacionada/);
+  assert.match(prompt, /evidence_refs existentes/);
+});
+
+test("usesDesignRubric selects only ai-design scopes when AI_DESIGN_RUBRIC is enabled", () => {
+  withEnv({ AI_DESIGN_RUBRIC: undefined }, () => {
+    assert.equal(usesDesignRubric("topology"), false);
+    assert.equal(usesDesignRubric("high_availability"), false);
+  });
+  withEnv({ AI_DESIGN_RUBRIC: "1" }, () => {
+    assert.equal(usesDesignRubric("topology"), true);
+    assert.equal(usesDesignRubric("high_availability"), true);
+    assert.equal(usesDesignRubric("security"), false);
+    assert.equal(usesDesignRubric("configuration"), false);
+    assert.equal(usesDesignRubric("roadmap"), false);
+  });
+});
+
 test("hashScopeInput changes for entity graph and aggregation but not synthesis scopes when AI_PATTERN_QUERIES is enabled", () => {
   const record = minimalRecord("assess_pattern_hash");
 
-  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_PER_DEVICE: undefined }, () => {
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_PER_DEVICE: undefined, AI_DESIGN_RUBRIC: undefined }, () => {
     const securityOff = hashScopeInput(record, "security");
     const topologyOff = hashScopeInput(record, "topology");
     const evidenceOff = hashScopeInput(record, "evidence");
     const roadmapOff = hashScopeInput(record, "roadmap");
-    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: "1", AI_PER_DEVICE: undefined }, () => {
+    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: "1", AI_PER_DEVICE: undefined, AI_DESIGN_RUBRIC: undefined }, () => {
       assert.notEqual(hashScopeInput(record, "security"), securityOff);
       assert.notEqual(hashScopeInput(record, "topology"), topologyOff);
       assert.notEqual(hashScopeInput(record, "evidence"), evidenceOff);
@@ -193,17 +224,39 @@ test("hashScopeInput changes for entity graph and aggregation but not synthesis 
   });
 });
 
+test("hashScopeInput changes for ai-design scopes when AI_DESIGN_RUBRIC includes guidelines hash", () => {
+  const record = minimalRecord("assess_design_rubric_hash");
+  const firstHash = hashDesignGuidelines("Rubrica A");
+  const secondHash = hashDesignGuidelines("Rubrica B");
+
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: undefined, AI_DESIGN_RUBRIC: undefined }, () => {
+    const topologyOff = hashScopeInput(record, "topology", { designGuidelinesHash: firstHash });
+    const haOff = hashScopeInput(record, "high_availability", { designGuidelinesHash: firstHash });
+    const securityOff = hashScopeInput(record, "security", { designGuidelinesHash: firstHash });
+    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: undefined, AI_DESIGN_RUBRIC: "1" }, () => {
+      assert.notEqual(hashScopeInput(record, "topology", { designGuidelinesHash: firstHash }), topologyOff);
+      assert.notEqual(hashScopeInput(record, "topology", { designGuidelinesHash: secondHash }), hashScopeInput(record, "topology", { designGuidelinesHash: firstHash }));
+      assert.notEqual(hashScopeInput(record, "high_availability", { designGuidelinesHash: firstHash }), haOff);
+      assert.equal(hashScopeInput(record, "security", { designGuidelinesHash: firstHash }), securityOff);
+    });
+    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: undefined, AI_DESIGN_RUBRIC: "" }, () => {
+      assert.equal(hashScopeInput(record, "topology", { designGuidelinesHash: secondHash }), topologyOff);
+      assert.equal(hashScopeInput(record, "security", { designGuidelinesHash: secondHash }), securityOff);
+    });
+  });
+});
+
 test("hashScopeInput changes for ai-per-device scopes only when AI_PER_DEVICE is enabled", () => {
   const record = minimalRecord("assess_per_device_hash");
 
-  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: undefined }, () => {
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: undefined, AI_DESIGN_RUBRIC: undefined }, () => {
     const securityOff = hashScopeInput(record, "security");
     const topologyOff = hashScopeInput(record, "topology");
-    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: "1" }, () => {
+    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: "1", AI_DESIGN_RUBRIC: undefined }, () => {
       assert.notEqual(hashScopeInput(record, "security"), securityOff);
       assert.equal(hashScopeInput(record, "topology"), topologyOff);
     });
-    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: "" }, () => {
+    withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_EVIDENCE_TIERING: undefined, AI_DOMAIN_PARTITION: undefined, AI_PER_DEVICE: "", AI_DESIGN_RUBRIC: undefined }, () => {
       assert.equal(hashScopeInput(record, "security"), securityOff);
       assert.equal(hashScopeInput(record, "topology"), topologyOff);
     });
@@ -553,6 +606,17 @@ function baseSystemPrompt() {
     "Si la evidencia es insuficiente, usa validation_required o visibility_gap en vez de inferir.",
     "Prompt version: assessment-ai-prompts-v1. Engine version: ai-analysis-engine-v5."
   ].join("\n");
+}
+
+function guideline(content: string): ResolvedDesignGuidelines {
+  return {
+    assessmentId: "assess_guideline",
+    content,
+    source: "assessment",
+    sourceScopeKey: "assess_guideline",
+    updatedBy: "admin@example.com",
+    updatedAt: "2026-06-05T00:00:00.000Z"
+  };
 }
 
 function withEnv(values: Record<string, string | undefined>, run: () => void) {
