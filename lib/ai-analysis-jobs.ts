@@ -147,10 +147,17 @@ export type ReduceDigestFinding = {
   related_devices: string[];
 };
 
+export type ReduceDigestCrossDeviceIndexEntry = {
+  device: string;
+  scopes: string[];
+  finding_ids: string[];
+};
+
 export type ReduceDigest = {
   digestVersion: string;
   findings: ReduceDigestFinding[];
   catalog: Record<string, string[]>;
+  crossDeviceIndex: ReduceDigestCrossDeviceIndexEntry[];
 };
 
 export type SynthesisTarget = "roadmap" | "executive_summary";
@@ -2304,6 +2311,8 @@ function buildReduceSystemPrompt() {
     "Eres un arquitecto senior Cisco ejecutando la etapa Reduce transversal de un assessment.",
     "Usa solo el reduceDigest provisto; no inventes finding_id, scopes, equipos ni evidencia.",
     "Produce hallazgos compuestos solo cuando fuentes reales de al menos 2 scopes distintos soporten una correlacion cross-dominio.",
+    "Cuando un mismo equipo aparezca en hallazgos de >=2 scopes distintos (ver crossDeviceIndex), genera un hallazgo compuesto que AGREGUE esos hallazgos para ese equipo, citando sus source_finding_ids reales.",
+    "Prioriza los equipos con mas scopes afectados. No necesitas un vinculo causal: la coincidencia de multiples dominios en el mismo equipo YA es un riesgo compuesto.",
     "Cada finding debe completar source_finding_ids con IDs existentes y composite_rationale con la correlacion transversal.",
     "Si la correlacion no esta soportada, devuelve findings vacio y explica la limitacion."
   ].join("\n");
@@ -2597,8 +2606,39 @@ export function buildReduceDigest(scopeResults: any[]): ReduceDigest {
   return {
     digestVersion: "ai-reduce-digest-v1",
     findings: digestFindings,
-    catalog
+    catalog,
+    crossDeviceIndex: buildReduceCrossDeviceIndex(digestFindings)
   };
+}
+
+function buildReduceCrossDeviceIndex(findings: ReduceDigestFinding[]): ReduceDigestCrossDeviceIndexEntry[] {
+  const byDevice = new Map<string, { device: string; scopes: Set<string>; findingIds: Set<string> }>();
+
+  for (const finding of findings) {
+    const devices = Array.from(new Map(
+      normalizeStringList(finding.related_devices).map((device) => [normalizeSignatureText(device), device] as const)
+    ).values());
+    for (const device of devices) {
+      const key = normalizeSignatureText(device);
+      if (!key) continue;
+      const entry = byDevice.get(key) ?? { device, scopes: new Set<string>(), findingIds: new Set<string>() };
+      entry.scopes.add(finding.scope);
+      entry.findingIds.add(finding.finding_id);
+      byDevice.set(key, entry);
+    }
+  }
+
+  return Array.from(byDevice.values())
+    .filter((entry) => entry.scopes.size >= 2)
+    .map((entry) => ({
+      device: entry.device,
+      scopes: Array.from(entry.scopes).sort((left, right) => left.localeCompare(right)),
+      finding_ids: Array.from(entry.findingIds).sort((left, right) => left.localeCompare(right))
+    }))
+    .sort((left, right) =>
+      right.scopes.length - left.scopes.length ||
+      normalizeSignatureText(left.device).localeCompare(normalizeSignatureText(right.device))
+    );
 }
 
 export function validateReduceResult(parsed: any, digest: ReduceDigest) {

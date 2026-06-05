@@ -409,6 +409,40 @@ test("buildReduceDigest builds a stable scoped finding catalog and caps by sever
   assert.deepEqual(digest.catalog.topology, ["topo-1"]);
   assert.equal(digest.findings.some((finding) => finding.scope === "roadmap"), false);
   assert.equal(digest.findings.every((finding) => typeof finding.remediation_category === "string"), true);
+  assert.deepEqual(digest.crossDeviceIndex, [
+    { device: "core-9", scopes: ["security", "topology"], finding_ids: ["sec-9", "topo-1"] }
+  ]);
+});
+
+test("buildReduceDigest indexes devices that appear across multiple scopes in deterministic order", () => {
+  const digest = buildReduceDigest([
+    reduceScopeResult("security", [
+      scopeFinding({ finding_id: "sec-core", title: "SNMP insecure", related_devices: ["CORE-HQ-01"] }),
+      scopeFinding({ finding_id: "sec-edge", title: "Weak edge access", related_devices: ["EDGE-01"] }),
+      scopeFinding({ finding_id: "sec-solo", title: "Standalone issue", related_devices: ["BRANCH-01"] })
+    ]),
+    reduceScopeResult("configuration", [
+      scopeFinding({ finding_id: "cfg-core", title: "Config drift", related_devices: ["core-hq-01"] }),
+      scopeFinding({ finding_id: "cfg-edge", title: "Missing standard", related_devices: ["EDGE-01"] })
+    ]),
+    reduceScopeResult("lifecycle", [
+      scopeFinding({ finding_id: "life-core", title: "EoX platform", related_devices: ["CORE-HQ-01"] })
+    ])
+  ]);
+
+  assert.deepEqual(digest.crossDeviceIndex, [
+    {
+      device: "core-hq-01",
+      scopes: ["configuration", "lifecycle", "security"],
+      finding_ids: ["cfg-core", "life-core", "sec-core"]
+    },
+    {
+      device: "EDGE-01",
+      scopes: ["configuration", "security"],
+      finding_ids: ["cfg-edge", "sec-edge"]
+    }
+  ]);
+  assert.equal(digest.crossDeviceIndex.some((entry) => entry.device === "BRANCH-01"), false);
 });
 
 test("validateReduceResult enforces real sources from at least two scopes and known devices", () => {
