@@ -174,6 +174,8 @@ type TopologyView = "relations" | "graph";
 
 type EvaluationArea = "topology" | "configuration" | "security" | "lifecycle" | "operations" | "logs";
 type AIEvaluationSubtab = "evaluation" | "findings" | "settings";
+type AISettingsSubtab = "playbook" | "guidelines" | "debug";
+type PlaybookEditorSubtab = "criteria" | "expected" | "exclusions";
 type DeviceType = "switch" | "router" | "nexus-switch" | "aci" | "wireless-controller" | "firewall" | "other";
 type SortDirection = "asc" | "desc";
 type InventorySortKey = "included" | "hostname" | "managementIp" | "serial" | "model" | "deviceType" | "role" | "topologyLayer" | "priority";
@@ -8025,11 +8027,79 @@ function AiEvaluationTab({
           aria-labelledby="ai-evaluation-subtab-settings"
           className="space-y-4"
         >
-          <ScopePlaybookAdminPanel currentUser={currentUser} />
-          <TopologyDesignGuidelinesAdminPanel record={record} currentUser={currentUser} />
-          <AIDebugAdminPanel record={record} currentUser={currentUser} />
+          <AISettingsAdminTabs record={record} currentUser={currentUser} />
         </div>
       )}
+    </div>
+  );
+}
+
+function AISettingsAdminTabs({ record, currentUser }: { record: AssessmentRecord; currentUser: AppUser }) {
+  const [activeSettingsSubtab, setActiveSettingsSubtab] = useState<AISettingsSubtab>("playbook");
+  const settingsSubtabRefs = useRef<Partial<Record<AISettingsSubtab, HTMLButtonElement | null>>>({});
+  const settingsSubtabs = [
+    { id: "playbook" as const, label: "Playbook - Configuracion", panelId: "ai-settings-subtab-panel-playbook" },
+    { id: "guidelines" as const, label: "Guidelines de diseno - Topologia", panelId: "ai-settings-subtab-panel-guidelines" },
+    { id: "debug" as const, label: "Debug OpenAI", panelId: "ai-settings-subtab-panel-debug" }
+  ];
+
+  function handleSettingsSubtabKeyDown(event: React.KeyboardEvent<HTMLButtonElement>, currentIndex: number) {
+    if (!["ArrowRight", "ArrowLeft", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const lastIndex = settingsSubtabs.length - 1;
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? lastIndex
+        : event.key === "ArrowRight"
+          ? currentIndex === lastIndex ? 0 : currentIndex + 1
+          : currentIndex === 0 ? lastIndex : currentIndex - 1;
+    const nextSubtab = settingsSubtabs[nextIndex].id;
+    setActiveSettingsSubtab(nextSubtab);
+    window.requestAnimationFrame(() => settingsSubtabRefs.current[nextSubtab]?.focus());
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex gap-2 overflow-x-auto rounded-md border border-border bg-muted/30 p-1" role="tablist" aria-label="Ajustes de Evaluacion AI">
+        {settingsSubtabs.map((tab, index) => {
+          const selected = activeSettingsSubtab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              ref={(element) => {
+                settingsSubtabRefs.current[tab.id] = element;
+              }}
+              id={`ai-settings-subtab-${tab.id}`}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              aria-controls={tab.panelId}
+              tabIndex={selected ? 0 : -1}
+              className={cn(
+                "inline-flex h-9 shrink-0 items-center rounded px-3 text-sm font-medium outline-none transition focus:ring-2 focus:ring-primary/70",
+                selected ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:bg-background hover:text-foreground"
+              )}
+              onClick={() => setActiveSettingsSubtab(tab.id)}
+              onKeyDown={(event) => handleSettingsSubtabKeyDown(event, index)}
+            >
+              {tab.label}
+            </button>
+          );
+        })}
+      </div>
+
+      <div id="ai-settings-subtab-panel-playbook" role="tabpanel" aria-labelledby="ai-settings-subtab-playbook" hidden={activeSettingsSubtab !== "playbook"}>
+        <ScopePlaybookAdminPanel currentUser={currentUser} />
+      </div>
+
+      <div id="ai-settings-subtab-panel-guidelines" role="tabpanel" aria-labelledby="ai-settings-subtab-guidelines" hidden={activeSettingsSubtab !== "guidelines"}>
+        <TopologyDesignGuidelinesAdminPanel record={record} currentUser={currentUser} />
+      </div>
+
+      <div id="ai-settings-subtab-panel-debug" role="tabpanel" aria-labelledby="ai-settings-subtab-debug" hidden={activeSettingsSubtab !== "debug"}>
+        <AIDebugAdminPanel record={record} currentUser={currentUser} />
+      </div>
     </div>
   );
 }
@@ -8241,6 +8311,10 @@ function ScopeDetailPanel({
       </div>
     </div>
   );
+}
+
+function humanizeAIPhase(phaseName: string) {
+  return aiScopePhaseDisplay.find((phase) => phase.id === phaseName)?.label ?? phaseName.replaceAll("_", " ");
 }
 
 function CompactFindingSummary({ summary, compact = false }: { summary: AreaFindingSummary; compact?: boolean }) {
@@ -8601,6 +8675,8 @@ function ScopePlaybookAdminPanel({ currentUser }: { currentUser: AppUser }) {
     state: "idle",
     message: ""
   });
+  const [activePlaybookSubtab, setActivePlaybookSubtab] = useState<PlaybookEditorSubtab>("criteria");
+  const playbookSubtabRefs = useRef<Partial<Record<PlaybookEditorSubtab, HTMLButtonElement | null>>>({});
 
   const loadPlaybook = useCallback(async () => {
     if (!isAdmin) return;
@@ -8643,6 +8719,48 @@ function ScopePlaybookAdminPanel({ currentUser }: { currentUser: AppUser }) {
 
   if (!isAdmin) return null;
   const busy = status.state === "loading" || status.state === "saving";
+  const playbookSubtabs = [
+    { id: "criteria" as const, label: "Criterios", count: draft.criteria.length, panelId: "scope-playbook-subtab-panel-criteria" },
+    { id: "expected" as const, label: "Hallazgos esperados", count: draft.expected.length, panelId: "scope-playbook-subtab-panel-expected" },
+    { id: "exclusions" as const, label: "Exclusiones", count: draft.exclusions.length, panelId: "scope-playbook-subtab-panel-exclusions" }
+  ];
+
+  function handlePlaybookSubtabKeyDown(event: React.KeyboardEvent<HTMLButtonElement>, currentIndex: number) {
+    if (!["ArrowRight", "ArrowLeft", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const lastIndex = playbookSubtabs.length - 1;
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? lastIndex
+        : event.key === "ArrowRight"
+          ? currentIndex === lastIndex ? 0 : currentIndex + 1
+          : currentIndex === 0 ? lastIndex : currentIndex - 1;
+    const nextSubtab = playbookSubtabs[nextIndex].id;
+    setActivePlaybookSubtab(nextSubtab);
+    window.requestAnimationFrame(() => playbookSubtabRefs.current[nextSubtab]?.focus());
+  }
+
+  function addPlaybookItem() {
+    if (activePlaybookSubtab === "criteria") {
+      setDraft((current) => ({
+        ...current,
+        criteria: [...current.criteria, { id: uid("criterion"), aspect: "", guidance: "" }]
+      }));
+      return;
+    }
+    if (activePlaybookSubtab === "expected") {
+      setDraft((current) => ({
+        ...current,
+        expected: [...current.expected, { id: uid("expected"), title: "", description: "", severityHint: "medium", exampleRationale: "" }]
+      }));
+      return;
+    }
+    setDraft((current) => ({
+      ...current,
+      exclusions: [...current.exclusions, { id: uid("exclusion"), keywords: [], reason: "", source: "manual" }]
+    }));
+  }
 
   return (
     <Panel>
@@ -8685,21 +8803,84 @@ function ScopePlaybookAdminPanel({ currentUser }: { currentUser: AppUser }) {
             {status.message}
           </div>
         )}
-        <PlaybookCriteriaEditor
-          values={draft.criteria}
-          disabled={busy}
-          onChange={(criteria) => setDraft((current) => ({ ...current, criteria }))}
-        />
-        <PlaybookExpectedEditor
-          values={draft.expected}
-          disabled={busy}
-          onChange={(expected) => setDraft((current) => ({ ...current, expected }))}
-        />
-        <PlaybookExclusionEditor
-          values={draft.exclusions}
-          disabled={busy}
-          onChange={(exclusions) => setDraft((current) => ({ ...current, exclusions }))}
-        />
+        <div className="flex flex-wrap items-end justify-between gap-2 border-b border-border pt-1">
+          <div className="flex gap-1 overflow-x-auto" role="tablist" aria-label="Secciones del playbook de configuracion">
+            {playbookSubtabs.map((tab, index) => {
+              const selected = activePlaybookSubtab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  ref={(element) => {
+                    playbookSubtabRefs.current[tab.id] = element;
+                  }}
+                  id={`scope-playbook-subtab-${tab.id}`}
+                  type="button"
+                  role="tab"
+                  aria-selected={selected}
+                  aria-controls={tab.panelId}
+                  tabIndex={selected ? 0 : -1}
+                  className={cn(
+                    "-mb-px inline-flex h-10 shrink-0 items-center gap-2 rounded-t-md border px-3 text-sm font-medium outline-none transition focus:ring-2 focus:ring-primary/70",
+                    selected
+                      ? "border-border border-b-background bg-background text-foreground shadow-sm"
+                      : "border-transparent bg-muted/30 text-muted-foreground hover:border-border hover:bg-background/70 hover:text-foreground"
+                  )}
+                  onClick={() => setActivePlaybookSubtab(tab.id)}
+                  onKeyDown={(event) => handlePlaybookSubtabKeyDown(event, index)}
+                >
+                  <span>{tab.label}</span>
+                  <Badge tone="neutral">{tab.count}</Badge>
+                </button>
+              );
+            })}
+          </div>
+          <Button size="sm" variant="secondary" className="mb-1" onClick={addPlaybookItem} disabled={busy}>
+            <Plus size={14} />
+            Agregar
+          </Button>
+        </div>
+
+        <div
+          id="scope-playbook-subtab-panel-criteria"
+          role="tabpanel"
+          aria-labelledby="scope-playbook-subtab-criteria"
+          className="rounded-b-md rounded-tr-md border border-t-0 border-border bg-background p-3"
+          hidden={activePlaybookSubtab !== "criteria"}
+        >
+          <PlaybookCriteriaEditor
+            values={draft.criteria}
+            disabled={busy}
+            onChange={(criteria) => setDraft((current) => ({ ...current, criteria }))}
+          />
+        </div>
+
+        <div
+          id="scope-playbook-subtab-panel-expected"
+          role="tabpanel"
+          aria-labelledby="scope-playbook-subtab-expected"
+          className="rounded-b-md rounded-tr-md border border-t-0 border-border bg-background p-3"
+          hidden={activePlaybookSubtab !== "expected"}
+        >
+          <PlaybookExpectedEditor
+            values={draft.expected}
+            disabled={busy}
+            onChange={(expected) => setDraft((current) => ({ ...current, expected }))}
+          />
+        </div>
+
+        <div
+          id="scope-playbook-subtab-panel-exclusions"
+          role="tabpanel"
+          aria-labelledby="scope-playbook-subtab-exclusions"
+          className="rounded-b-md rounded-tr-md border border-t-0 border-border bg-background p-3"
+          hidden={activePlaybookSubtab !== "exclusions"}
+        >
+          <PlaybookExclusionEditor
+            values={draft.exclusions}
+            disabled={busy}
+            onChange={(exclusions) => setDraft((current) => ({ ...current, exclusions }))}
+          />
+        </div>
       </PanelBody>
     </Panel>
   );
@@ -8718,14 +8899,8 @@ function PlaybookCriteriaEditor({
     onChange(values.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item));
   }
   return (
-    <div className="rounded-md border border-border p-3">
-      <PlaybookSectionHeader
-        title="Criterios"
-        count={values.length}
-        onAdd={() => onChange([...values, { id: uid("criterion"), aspect: "", guidance: "" }])}
-        disabled={disabled}
-      />
-      <div className="mt-3 space-y-2">
+    <div>
+      <div className="space-y-2">
         {values.map((item, index) => (
           <div key={item.id} className="grid gap-2 rounded-md border border-border bg-muted/20 p-2 md:grid-cols-[180px_1fr_auto]">
             <Input value={item.aspect} disabled={disabled} placeholder="Aspecto" onChange={(event) => update(index, { aspect: event.target.value })} />
@@ -8753,14 +8928,8 @@ function PlaybookExpectedEditor({
     onChange(values.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item));
   }
   return (
-    <div className="rounded-md border border-border p-3">
-      <PlaybookSectionHeader
-        title="Hallazgos esperados"
-        count={values.length}
-        onAdd={() => onChange([...values, { id: uid("expected"), title: "", description: "", severityHint: "medium", exampleRationale: "" }])}
-        disabled={disabled}
-      />
-      <div className="mt-3 space-y-2">
+    <div>
+      <div className="space-y-2">
         {values.map((item, index) => (
           <div key={item.id} className="grid gap-2 rounded-md border border-border bg-muted/20 p-2 lg:grid-cols-[1fr_130px_1fr_auto]">
             <Input value={item.title} disabled={disabled} placeholder="Titulo esperado" onChange={(event) => update(index, { title: event.target.value })} />
@@ -8803,14 +8972,8 @@ function PlaybookExclusionEditor({
     onChange(values.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item));
   }
   return (
-    <div className="rounded-md border border-border p-3">
-      <PlaybookSectionHeader
-        title="Exclusiones"
-        count={values.length}
-        onAdd={() => onChange([...values, { id: uid("exclusion"), keywords: [], reason: "", source: "manual" }])}
-        disabled={disabled}
-      />
-      <div className="mt-3 space-y-2">
+    <div>
+      <div className="space-y-2">
         {values.map((item, index) => (
           <div key={item.id} className="grid gap-2 rounded-md border border-border bg-muted/20 p-2 lg:grid-cols-[1fr_150px_1fr_120px_auto]">
             <Input
@@ -8852,31 +9015,6 @@ function PlaybookExclusionEditor({
   );
 }
 
-function PlaybookSectionHeader({
-  title,
-  count,
-  onAdd,
-  disabled
-}: {
-  title: string;
-  count: number;
-  onAdd: () => void;
-  disabled: boolean;
-}) {
-  return (
-    <div className="flex flex-wrap items-center justify-between gap-2">
-      <div className="flex items-center gap-2">
-        <p className="text-sm font-semibold">{title}</p>
-        <Badge tone="neutral">{count}</Badge>
-      </div>
-      <Button size="sm" variant="secondary" onClick={onAdd} disabled={disabled}>
-        <Plus size={14} />
-        Agregar
-      </Button>
-    </div>
-  );
-}
-
 function AIDebugAdminPanel({ record, currentUser }: { record: AssessmentRecord; currentUser: AppUser }) {
   const isAdmin = canManageUsers(currentUser);
   const [setting, setSetting] = useState<AIDebugSetting | null>(null);
@@ -8886,16 +9024,35 @@ function AIDebugAdminPanel({ record, currentUser }: { record: AssessmentRecord; 
     message: ""
   });
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [expandedDebugScopes, setExpandedDebugScopes] = useState<Record<string, boolean>>({});
 
-  const groupedInteractions = useMemo(() => {
-    const groups = new Map<string, { scopeId: string; phaseName: string; items: AIDebugInteraction[] }>();
+  const debugScopeGroups = useMemo(() => {
+    const groups = new Map<string, {
+      scopeId: string;
+      itemCount: number;
+      rejectedCount: number;
+      phases: Map<string, { phaseName: string; items: AIDebugInteraction[] }>;
+    }>();
     interactions.forEach((interaction) => {
-      const key = `${interaction.scopeId}:${interaction.phaseName}`;
-      const group = groups.get(key) ?? { scopeId: interaction.scopeId, phaseName: interaction.phaseName, items: [] };
-      group.items.push(interaction);
-      groups.set(key, group);
+      const group = groups.get(interaction.scopeId) ?? {
+        scopeId: interaction.scopeId,
+        itemCount: 0,
+        rejectedCount: 0,
+        phases: new Map<string, { phaseName: string; items: AIDebugInteraction[] }>()
+      };
+      const phase = group.phases.get(interaction.phaseName) ?? { phaseName: interaction.phaseName, items: [] };
+      phase.items.push(interaction);
+      group.itemCount += 1;
+      group.rejectedCount += summarizeRejectedFindings(interaction.rejectedFindings).count;
+      group.phases.set(interaction.phaseName, phase);
+      groups.set(interaction.scopeId, group);
     });
-    return Array.from(groups.values());
+    return Array.from(groups.values()).map((group) => ({
+      scopeId: group.scopeId,
+      itemCount: group.itemCount,
+      rejectedCount: group.rejectedCount,
+      phases: Array.from(group.phases.values())
+    }));
   }, [interactions]);
 
   const loadDebugData = useCallback(async () => {
@@ -9005,82 +9162,106 @@ function AIDebugAdminPanel({ record, currentUser }: { record: AssessmentRecord; 
             {status.message}
           </div>
         )}
-        {groupedInteractions.length === 0 ? (
+        {debugScopeGroups.length === 0 ? (
           <div className="rounded-md border border-dashed border-border p-3 text-sm text-muted-foreground">
             No hay interacciones capturadas para este assessment.
           </div>
         ) : (
           <div className="space-y-3">
-            {groupedInteractions.map((group) => (
-              <div key={`${group.scopeId}:${group.phaseName}`} className="rounded-md border border-border">
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2">
+            {debugScopeGroups.map((scopeGroup, index) => (
+              <details
+                key={scopeGroup.scopeId}
+                className="rounded-md border border-border"
+                open={expandedDebugScopes[scopeGroup.scopeId] ?? index === 0}
+                onToggle={(event) => {
+                  const open = event.currentTarget.open;
+                  setExpandedDebugScopes((current) => ({ ...current, [scopeGroup.scopeId]: open }));
+                }}
+              >
+                <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-2 px-3 py-2">
                   <div>
-                    <p className="text-sm font-semibold">{scopeLabel(group.scopeId as AIAnalysisScopeId)}</p>
-                    <p className="text-xs text-muted-foreground">{group.phaseName}</p>
+                    <p className="text-sm font-semibold">{scopeLabel(scopeGroup.scopeId as AIAnalysisScopeId)}</p>
+                    <p className="text-xs text-muted-foreground">{scopeGroup.phases.length} fases capturadas</p>
                   </div>
-                  <Badge tone="neutral">{group.items.length} llamadas</Badge>
-                </div>
-                <div className="space-y-2 p-3">
-                  {group.items.map((interaction) => {
-                    const rejectedSummary = summarizeRejectedFindings(interaction.rejectedFindings);
-                    const interactionStatusLabel = humanizeScopeStatus(interaction.status);
-                    return (
-                      <div key={interaction.id} className="rounded-md border border-border bg-background/50 p-3">
-                        <div className="flex flex-wrap items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span title={interactionStatusLabel.tooltip}>
-                                <Badge tone={scopeStatusTone(interaction.status)}>{interactionStatusLabel.label}</Badge>
-                              </span>
-                              <span className="text-xs font-medium">{interaction.model}</span>
-                              <span className="text-xs text-muted-foreground">{formatDate(interaction.createdAt)}</span>
-                            </div>
-                            <p className="mt-1 truncate text-xs text-muted-foreground">
-                              job {interaction.jobId} · {interaction.promptVersion} · {interaction.engineVersion}
-                            </p>
-                          </div>
-                          <div className="grid min-w-full gap-2 text-xs sm:min-w-[520px] sm:grid-cols-4">
-                            <DebugMetric label="HTTP" value={interaction.httpStatus ?? "-"} />
-                            <DebugMetric label="Latencia" value={formatDebugLatency(interaction.latencyMs)} />
-                            <DebugMetric label="Input" value={`${formatDebugNumber(interaction.inputTokensEst)} est / ${formatDebugNumber(interaction.inputTokens)} real`} />
-                            <DebugMetric label="Output" value={formatDebugNumber(interaction.outputTokens)} />
-                          </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge tone="neutral">{scopeGroup.itemCount} llamadas</Badge>
+                    <Badge tone={scopeGroup.rejectedCount > 0 ? "danger" : "neutral"}>{scopeGroup.rejectedCount} rechazados</Badge>
+                  </div>
+                </summary>
+                <div className="space-y-3 border-t border-border p-3">
+                  {scopeGroup.phases.map((group) => (
+                    <div key={`${scopeGroup.scopeId}:${group.phaseName}`} className="rounded-md border border-border bg-muted/10">
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2">
+                        <div>
+                          <p className="text-sm font-semibold">{humanizeAIPhase(group.phaseName)}</p>
+                          <p className="text-xs text-muted-foreground">{group.phaseName}</p>
                         </div>
-                        <div className="mt-3 flex flex-wrap gap-2 text-xs">
-                          <Badge tone={interaction.budgetTrimmed ? "warning" : "neutral"}>
-                            {interaction.budgetTrimmed ? "Budget recortado" : "Budget completo"}
-                          </Badge>
-                          <Badge tone={interaction.excludedEvidenceRefs > 0 ? "warning" : "neutral"}>
-                            {interaction.excludedEvidenceRefs} evidencias excluidas
-                          </Badge>
-                          <Badge tone={rejectedSummary.count > 0 ? "danger" : "neutral"}>
-                            {rejectedSummary.count} rechazados
-                          </Badge>
-                          {rejectedSummary.reasons.map((reason) => (
-                            <span key={reason} className="rounded bg-muted px-2 py-1 text-muted-foreground">{reason}</span>
-                          ))}
-                        </div>
-                        <div className="mt-3 grid gap-2 lg:grid-cols-2">
-                          <DebugJsonBlock
-                            title="Request"
-                            size={debugJsonSizeLabel(interaction.requestJson)}
-                            value={interaction.requestJson}
-                            copied={copiedKey === `${interaction.id}:request`}
-                            onCopy={() => void copyInteractionJson(`${interaction.id}:request`, interaction.requestJson)}
-                          />
-                          <DebugJsonBlock
-                            title="Response"
-                            size={debugJsonSizeLabel(interaction.responseJson)}
-                            value={interaction.responseJson}
-                            copied={copiedKey === `${interaction.id}:response`}
-                            onCopy={() => void copyInteractionJson(`${interaction.id}:response`, interaction.responseJson)}
-                          />
-                        </div>
+                        <Badge tone="neutral">{group.items.length} llamadas</Badge>
                       </div>
-                    );
-                  })}
+                      <div className="space-y-2 p-3">
+                        {group.items.map((interaction) => {
+                          const rejectedSummary = summarizeRejectedFindings(interaction.rejectedFindings);
+                          const interactionStatusLabel = humanizeScopeStatus(interaction.status);
+                          return (
+                            <div key={interaction.id} className="rounded-md border border-border bg-background/50 p-3">
+                              <div className="flex flex-wrap items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <span title={interactionStatusLabel.tooltip}>
+                                      <Badge tone={scopeStatusTone(interaction.status)}>{interactionStatusLabel.label}</Badge>
+                                    </span>
+                                    <span className="text-xs font-medium">{interaction.model}</span>
+                                    <span className="text-xs text-muted-foreground">{formatDate(interaction.createdAt)}</span>
+                                  </div>
+                                  <p className="mt-1 truncate text-xs text-muted-foreground">
+                                    job {interaction.jobId} · {interaction.promptVersion} · {interaction.engineVersion}
+                                  </p>
+                                </div>
+                                <div className="grid min-w-full gap-2 text-xs sm:min-w-[520px] sm:grid-cols-4">
+                                  <DebugMetric label="HTTP" value={interaction.httpStatus ?? "-"} />
+                                  <DebugMetric label="Latencia" value={formatDebugLatency(interaction.latencyMs)} />
+                                  <DebugMetric label="Input" value={`${formatDebugNumber(interaction.inputTokensEst)} est / ${formatDebugNumber(interaction.inputTokens)} real`} />
+                                  <DebugMetric label="Output" value={formatDebugNumber(interaction.outputTokens)} />
+                                </div>
+                              </div>
+                              <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                                <Badge tone={interaction.budgetTrimmed ? "warning" : "neutral"}>
+                                  {interaction.budgetTrimmed ? "Budget recortado" : "Budget completo"}
+                                </Badge>
+                                <Badge tone={interaction.excludedEvidenceRefs > 0 ? "warning" : "neutral"}>
+                                  {interaction.excludedEvidenceRefs} evidencias excluidas
+                                </Badge>
+                                <Badge tone={rejectedSummary.count > 0 ? "danger" : "neutral"}>
+                                  {rejectedSummary.count} rechazados
+                                </Badge>
+                                {rejectedSummary.reasons.map((reason) => (
+                                  <span key={reason} className="rounded bg-muted px-2 py-1 text-muted-foreground">{reason}</span>
+                                ))}
+                              </div>
+                              <div className="mt-3 grid gap-2 lg:grid-cols-2">
+                                <DebugJsonBlock
+                                  title="Request"
+                                  size={debugJsonSizeLabel(interaction.requestJson)}
+                                  value={interaction.requestJson}
+                                  copied={copiedKey === `${interaction.id}:request`}
+                                  onCopy={() => void copyInteractionJson(`${interaction.id}:request`, interaction.requestJson)}
+                                />
+                                <DebugJsonBlock
+                                  title="Response"
+                                  size={debugJsonSizeLabel(interaction.responseJson)}
+                                  value={interaction.responseJson}
+                                  copied={copiedKey === `${interaction.id}:response`}
+                                  onCopy={() => void copyInteractionJson(`${interaction.id}:response`, interaction.responseJson)}
+                                />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
                 </div>
-              </div>
+              </details>
             ))}
           </div>
         )}
