@@ -173,6 +173,7 @@ type WorkspaceView = "dashboard" | "detail" | "settings";
 type TopologyView = "relations" | "graph";
 
 type EvaluationArea = "topology" | "configuration" | "security" | "lifecycle" | "operations" | "logs";
+type AIEvaluationSubtab = "evaluation" | "findings" | "settings";
 type DeviceType = "switch" | "router" | "nexus-switch" | "aci" | "wireless-controller" | "firewall" | "other";
 type SortDirection = "asc" | "desc";
 type InventorySortKey = "included" | "hostname" | "managementIp" | "serial" | "model" | "deviceType" | "role" | "topologyLayer" | "priority";
@@ -7754,11 +7755,86 @@ function AiEvaluationTab({
   const [expandedAreaDetails, setExpandedAreaDetails] = useState<Partial<Record<EvaluationArea, boolean>>>({});
   const [showFullBreakdown, setShowFullBreakdown] = useState(false);
   const [scopeFindingFilter, setScopeFindingFilter] = useState<EvaluationArea | null>(null);
+  const [activeSubtab, setActiveSubtab] = useState<AIEvaluationSubtab>("evaluation");
+  const subtabRefs = useRef<Partial<Record<AIEvaluationSubtab, HTMLButtonElement | null>>>({});
   const pipelineStages = buildPipelineView(aiAnalysisStatus, latestJob).filter((stage) => shouldShowPipelineStage(stage, record, aiAnalysisStatus, latestJob));
+  const aiFindingsToReviewCount = record.parsed.findings.filter((finding) => finding.aiMetadata && finding.status === "ai_suggested").length;
+  const aiSubtabs = [
+    { id: "evaluation" as const, label: "Evaluacion", count: null, active: Boolean(activeJob) },
+    { id: "findings" as const, label: "Hallazgos", count: aiFindingsToReviewCount, active: false },
+    ...(isAdmin ? [{ id: "settings" as const, label: "Ajustes", count: null, active: false }] : [])
+  ];
+
+  useEffect(() => {
+    setActiveSubtab("evaluation");
+  }, [record.id]);
+
+  useEffect(() => {
+    if (!isAdmin && activeSubtab === "settings") setActiveSubtab("evaluation");
+  }, [activeSubtab, isAdmin]);
+
+  function handleSubtabKeyDown(event: React.KeyboardEvent<HTMLButtonElement>, currentIndex: number) {
+    if (!["ArrowRight", "ArrowLeft", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const lastIndex = aiSubtabs.length - 1;
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? lastIndex
+        : event.key === "ArrowRight"
+          ? currentIndex === lastIndex ? 0 : currentIndex + 1
+          : currentIndex === 0 ? lastIndex : currentIndex - 1;
+    const nextSubtab = aiSubtabs[nextIndex].id;
+    setActiveSubtab(nextSubtab);
+    window.requestAnimationFrame(() => subtabRefs.current[nextSubtab]?.focus());
+  }
+
+  function toggleScopeFindingFilterFromEvaluation(area: EvaluationArea) {
+    setScopeFindingFilter((current) => current === area ? null : area);
+    setActiveSubtab("findings");
+  }
 
   return (
     <div className="space-y-4">
-      <Panel>
+      <div className="flex gap-2 overflow-x-auto rounded-md border border-border bg-muted/30 p-1" role="tablist" aria-label="Secciones internas de Evaluacion AI">
+        {aiSubtabs.map((tab, index) => {
+          const selected = activeSubtab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              ref={(element) => {
+                subtabRefs.current[tab.id] = element;
+              }}
+              id={`ai-evaluation-subtab-${tab.id}`}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              aria-controls={`ai-evaluation-subtab-panel-${tab.id}`}
+              tabIndex={selected ? 0 : -1}
+              className={cn(
+                "inline-flex h-9 shrink-0 items-center gap-2 rounded px-3 text-sm font-medium outline-none transition focus:ring-2 focus:ring-primary/70",
+                selected ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:bg-background hover:text-foreground"
+              )}
+              onClick={() => setActiveSubtab(tab.id)}
+              onKeyDown={(event) => handleSubtabKeyDown(event, index)}
+            >
+              <span>{tab.label}{typeof tab.count === "number" ? ` (${tab.count})` : ""}</span>
+              {tab.active && (
+                <span className={cn("h-2 w-2 rounded-full", selected ? "bg-primary-foreground" : "bg-primary")} aria-label="Job activo" />
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      {activeSubtab === "evaluation" && (
+        <div
+          id="ai-evaluation-subtab-panel-evaluation"
+          role="tabpanel"
+          aria-labelledby="ai-evaluation-subtab-evaluation"
+          className="space-y-4"
+        >
+          <Panel>
         <PanelHeader className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <Bot size={16} className="text-primary" />
@@ -7871,7 +7947,7 @@ function AiEvaluationTab({
                   <button
                     type="button"
                     className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
-                    onClick={() => setScopeFindingFilter((current) => current === area.id ? null : area.id)}
+                    onClick={() => toggleScopeFindingFilterFromEvaluation(area.id)}
                   >
                     <Search size={14} />
                     {findingsFilterActive ? "Ocultar filtro" : "Ver hallazgos"}
@@ -7922,17 +7998,38 @@ function AiEvaluationTab({
           )}
           </div>
         </PanelBody>
-      </Panel>
-      {isAdmin && currentUser && <TopologyDesignGuidelinesAdminPanel record={record} currentUser={currentUser} />}
-      {isAdmin && currentUser && <ScopePlaybookAdminPanel currentUser={currentUser} />}
-      {isAdmin && currentUser && <AIDebugAdminPanel record={record} currentUser={currentUser} />}
-      <AIReviewPanel
-        record={record}
-        currentUser={currentUser}
-        scopeFindingFilter={scopeFindingFilter}
-        onClearScopeFindingFilter={() => setScopeFindingFilter(null)}
-        onUpdateFinding={onUpdateFinding}
-      />
+          </Panel>
+        </div>
+      )}
+
+      {activeSubtab === "findings" && (
+        <div
+          id="ai-evaluation-subtab-panel-findings"
+          role="tabpanel"
+          aria-labelledby="ai-evaluation-subtab-findings"
+        >
+          <AIReviewPanel
+            record={record}
+            currentUser={currentUser}
+            scopeFindingFilter={scopeFindingFilter}
+            onClearScopeFindingFilter={() => setScopeFindingFilter(null)}
+            onUpdateFinding={onUpdateFinding}
+          />
+        </div>
+      )}
+
+      {activeSubtab === "settings" && isAdmin && currentUser && (
+        <div
+          id="ai-evaluation-subtab-panel-settings"
+          role="tabpanel"
+          aria-labelledby="ai-evaluation-subtab-settings"
+          className="space-y-4"
+        >
+          <ScopePlaybookAdminPanel currentUser={currentUser} />
+          <TopologyDesignGuidelinesAdminPanel record={record} currentUser={currentUser} />
+          <AIDebugAdminPanel record={record} currentUser={currentUser} />
+        </div>
+      )}
     </div>
   );
 }
