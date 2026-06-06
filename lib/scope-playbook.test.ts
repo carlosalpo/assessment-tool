@@ -9,6 +9,7 @@ import {
   applyExclusions,
   buildPlaybookPromptSection,
   defaultConfigurationScopePlaybook,
+  defaultEvidenceScopePlaybook,
   defaultSecurityScopePlaybook,
   deviceOsFamily,
   isSupportedScopePlaybookScopeId,
@@ -195,6 +196,19 @@ test("default security playbook covers key platform hardening areas", () => {
   assert.ok(defaultSecurityScopePlaybook.expected.some((item) => item.id === "expected-sec-telnet-enabled"));
   assert.ok(defaultSecurityScopePlaybook.expected.some((item) => item.id === "expected-sec-control-plane-unprotected"));
   assert.ok(defaultSecurityScopePlaybook.expected.some((item) => item.id === "expected-sec-asa-acl-any-any"));
+});
+
+test("default evidence playbook covers key log and event analysis areas", () => {
+  assert.equal(defaultEvidenceScopePlaybook.scopeId, "evidence");
+  assert.ok(defaultEvidenceScopePlaybook.criteria.length >= 18);
+  assert.ok(defaultEvidenceScopePlaybook.expected.length >= 18);
+  assert.ok(defaultEvidenceScopePlaybook.criteria.some((item) => item.id === "ev-log-coverage-quality" && item.appliesTo.includes("all")));
+  assert.ok(defaultEvidenceScopePlaybook.criteria.some((item) => item.id === "ev-routing-adjacency-churn" && item.appliesTo.includes("ios-xe")));
+  assert.ok(defaultEvidenceScopePlaybook.criteria.some((item) => item.id === "ev-asa-failover-interface" && item.appliesTo.includes("asa")));
+  assert.ok(defaultEvidenceScopePlaybook.criteria.some((item) => item.id === "ev-nxos-vpc-fex-fabric" && item.appliesTo.includes("nxos")));
+  assert.ok(defaultEvidenceScopePlaybook.expected.some((item) => item.id === "expected-ev-routing-neighbor-churn"));
+  assert.ok(defaultEvidenceScopePlaybook.expected.some((item) => item.id === "expected-ev-asa-failover-interface-risk"));
+  assert.ok(defaultEvidenceScopePlaybook.expected.some((item) => item.id === "expected-ev-evidence-conflict-validation"));
 });
 
 test("playbook API allowlist accepts the four command-output scopes and rejects others", () => {

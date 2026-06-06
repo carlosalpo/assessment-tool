@@ -700,6 +700,267 @@ export const defaultSecurityScopePlaybook: ScopePlaybook = {
   exclusions: []
 };
 
+export const defaultEvidenceScopePlaybook: ScopePlaybook = {
+  scopeId: "evidence",
+  criteria: [
+    {
+      id: "ev-log-coverage-quality",
+      aspect: "Cobertura y calidad de logs",
+      guidance: "Evalua si la evidencia contiene logs suficientes por equipo, con timestamps, severidad, facility/message-id, hostname/device-id y fuente clara. Si faltan logs o la ventana es insuficiente, clasificalo como visibility_gap, no como falla confirmada.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "ev-central-syslog-delivery",
+      aspect: "Envio y persistencia de syslog",
+      guidance: "Evalua indicios de logging local/remoto, perdida de mensajes, buffers saturados, ausencia de secuencias/timestamps o eventos que sugieran que el pipeline de logs no permite analisis forense confiable.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "ev-interface-link-flap",
+      aspect: "Flaps fisicos o line protocol",
+      guidance: "Agrupa eventos LINK/LINEPROTO/ETHPORT/ifDown por interfaz y ventana. Solo marca recurrencia si hay multiples eventos o una secuencia temporal clara; correlaciona con errores, port-channel o vecinos cuando existan.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "ev-routing-adjacency-churn",
+      aspect: "Inestabilidad de vecinos de routing",
+      guidance: "Busca eventos OSPF, EIGRP, BGP o IS-IS de neighbor down/up, adjacency change, hold timer expired, reset o flap. Distingue mantenimiento aislado de recurrencia y cita vecinos/interfaces afectados.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "ev-stp-topology-changes",
+      aspect: "Cambios STP o eventos de capa 2",
+      guidance: "Agrupa TCN, root change, BPDU Guard, Loop Guard, Root Guard, inconsistency, errdisable por BPDU o cambios frecuentes de topology que indiquen inestabilidad L2.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "ev-port-channel-lacp",
+      aspect: "Port-channel, LACP y miembros degradados",
+      guidance: "Evalua eventos de bundle/member suspended, individual, hot-standby, mismatch, lacp timeout o port-channel down/up. Correlaciona miembro fisico, port-channel y vecino si aparece en evidencia.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "ev-ha-failover-events",
+      aspect: "Eventos de alta disponibilidad",
+      guidance: "Agrupa failover ASA, HSRP/VRRP/GLBP state change, vPC peer-link/keepalive, stack/supervisor switchover, SSO/NSF y eventos de standby/active. Diferencia cambio esperado de oscilacion.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "ev-admin-config-events",
+      aspect: "Cambios administrativos y auditoria",
+      guidance: "Evalua CONFIG_I, command accounting, login success/failure, privilege changes y cambios desde VTY/console. Marca riesgos cuando hay cambios frecuentes, origen no claro o fallas repetidas de autenticacion.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "ev-security-deny-events",
+      aspect: "Denegaciones o eventos de seguridad",
+      guidance: "Para ASA/firewall y ACLs, agrupa denies, drops, embryonic/connection limit, spoofing, scanning o threat-detection por origen/destino/servicio. No conviertas denies normales en incidente sin volumen, recurrencia o contexto.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "ev-vpn-crypto-events",
+      aspect: "VPN, IKE/IPsec y sesiones remotas",
+      guidance: "Evalua flaps de tunnel, IKE/IPsec negotiation failure, peer unreachable, auth failure, rekey loops o desconexiones masivas. Aplica principalmente a ASA y routers con VPN.",
+      appliesTo: ["ios", "ios-xe", "asa"]
+    },
+    {
+      id: "ev-hardware-environment",
+      aspect: "Hardware, energia y ambiente",
+      guidance: "Busca power supply, fan, temperature, transceiver, module, supervisor, stack, ASIC o sensor alarms. Prioriza eventos que afecten redundancia, capacidad o continuidad del servicio.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "ev-system-resource-stability",
+      aspect: "Recursos del sistema y estabilidad de procesos",
+      guidance: "Evalua CPUHOG, memory allocation failure, process crash, watchdog, traceback, reload, core dump o proceso reiniciado. Correlaciona con eventos de control-plane o perdida de servicio.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "ev-ntp-time-integrity",
+      aspect: "Integridad temporal de eventos",
+      guidance: "Identifica saltos de hora, NTP sync/loss, timestamps inconsistentes o logs sin fecha completa. Si la inconsistencia impide correlacion, reporta visibility_gap o validation_required.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "ev-errdisable-access-events",
+      aspect: "Errdisable y protecciones de acceso",
+      guidance: "Agrupa eventos errdisable por causa: bpduguard, port-security, link-flap, storm-control, udld, channel-misconfig o security violation. Distingue proteccion efectiva de recurrencia operacional.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "ev-asa-failover-interface",
+      aspect: "ASA - failover, interfaces y contextos",
+      guidance: "Evalua cambios active/standby, failover communication, monitored interface failed, interface up/down, context changes y syslog classes de HA. Cita message-id cuando este disponible.",
+      appliesTo: ["asa"]
+    },
+    {
+      id: "ev-nxos-vpc-fex-fabric",
+      aspect: "NX-OS - vPC, FEX y fabric",
+      guidance: "Evalua vPC peer-link/keepalive, consistency check, orphan ports, FEX offline/online, fabric module, linecard o supervisor events. Agrupa por dominio vPC/FEX y ventana.",
+      appliesTo: ["nxos"]
+    },
+    {
+      id: "ev-noise-vs-signal",
+      aspect: "Separacion de ruido operativo y senal",
+      guidance: "No eleves eventos informativos aislados a hallazgo. Prioriza patrones con recurrencia, severidad alta, impacto en servicio, multiples entidades afectadas o correlacion con otra evidencia.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "ev-evidence-conflict",
+      aspect: "Conflictos entre logs y estado observado",
+      guidance: "Detecta contradicciones entre logs y estado/configuracion: un evento dice down pero el estado final esta up, o logs sugieren vecinos flapping sin evidencia actual. Usa validation_required cuando falte ventana completa.",
+      appliesTo: ["all"]
+    }
+  ],
+  expected: [
+    {
+      id: "expected-ev-log-visibility-gap",
+      title: "Brecha de visibilidad por logs insuficientes",
+      description: "La evidencia no incluye logs, ventana temporal suficiente, timestamps confiables, message-id o fuente clara para evaluar eventos del equipo.",
+      severityHint: "low",
+      exampleRationale: "El paquete de evidencia no permite confirmar recurrencia ni correlacion temporal; corresponde solicitar logs completos antes de concluir una falla.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-ev-syslog-delivery-gap",
+      title: "Pipeline de syslog insuficiente para trazabilidad",
+      description: "Logs sin envio central, sin source-interface/device-id claro, con buffer limitado o signos de perdida/overwrite que reducen trazabilidad forense.",
+      severityHint: "medium",
+      exampleRationale: "La evidencia sugiere que eventos relevantes podrian perderse o no correlacionarse entre equipos por limitaciones de logging.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-ev-interface-flap-recurring",
+      title: "Flaps recurrentes de interfaz o line protocol",
+      description: "Multiples eventos de up/down o link/line protocol en la misma interfaz, port-channel o grupo de enlaces dentro de una ventana.",
+      severityHint: "medium",
+      exampleRationale: "Los logs muestran cambios repetidos de estado para la misma interfaz, lo que sugiere inestabilidad fisica, optica, peer o negociacion.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "expected-ev-routing-neighbor-churn",
+      title: "Vecinos de routing con inestabilidad recurrente",
+      description: "Eventos repetidos OSPF/EIGRP/BGP/IS-IS de adjacency down/up, hold timer, reset o neighbor state change.",
+      severityHint: "high",
+      exampleRationale: "La secuencia de logs indica perdida recurrente de adyacencia para un vecino o interfaz, con posible impacto en convergencia y disponibilidad.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "expected-ev-stp-instability",
+      title: "Inestabilidad STP o cambios frecuentes de topologia",
+      description: "TCN/root change/BPDU Guard/Loop Guard/Root Guard o inconsistency events repetidos en VLANs o interfaces.",
+      severityHint: "medium",
+      exampleRationale: "Los eventos de spanning-tree se repiten en la misma zona L2, indicando posible loop, switch no autorizado o borde mal clasificado.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "expected-ev-port-channel-degraded",
+      title: "Port-channel degradado o miembros inestables",
+      description: "Eventos LACP/port-channel de miembro suspendido, individual, mismatch, down/up o bundle inconsistente.",
+      severityHint: "medium",
+      exampleRationale: "Los logs muestran degradacion o cambios de membresia del port-channel, reduciendo redundancia/capacidad y pudiendo causar microcortes.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "expected-ev-ha-state-churn",
+      title: "Alta disponibilidad con cambios de estado recurrentes",
+      description: "Failover ASA, HSRP/VRRP/GLBP, vPC peer-link/keepalive, stack o supervisor presentan cambios de estado repetidos o inesperados.",
+      severityHint: "high",
+      exampleRationale: "Los eventos de HA no parecen un unico mantenimiento; la repeticion sugiere riesgo de perdida de redundancia o failover no controlado.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "expected-ev-admin-change-anomaly",
+      title: "Cambios administrativos o accesos anormales en logs",
+      description: "CONFIG_I, command accounting, login failures, privilege changes o accesos administrativos frecuentes/no atribuidos.",
+      severityHint: "medium",
+      exampleRationale: "Los logs evidencian cambios o intentos de acceso que requieren validacion de autorizacion, ventana de cambio y usuario/origen.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "expected-ev-auth-failure-burst",
+      title: "Rafaga de fallas de autenticacion administrativa",
+      description: "Multiples login failures, AAA rejects, SSH authentication failures o intentos desde el mismo origen o hacia varios equipos.",
+      severityHint: "high",
+      exampleRationale: "La concentracion de fallas de autenticacion sugiere ataque, credenciales mal configuradas o integracion AAA degradada.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "expected-ev-security-deny-burst",
+      title: "Denegaciones de seguridad con patron recurrente",
+      description: "ASA/ACL/firewall logs muestran drops/denies repetidos por origen, destino, protocolo o servicio con potencial relevancia de seguridad.",
+      severityHint: "medium",
+      exampleRationale: "El patron de denegaciones supera ruido normal y merece revisar origen/destino, exposicion y controles de seguridad.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "expected-ev-vpn-tunnel-instability",
+      title: "VPN o tuneles criptograficos inestables",
+      description: "Eventos repetidos de IKE/IPsec tunnel down/up, negotiation failure, peer unreachable, auth failure o rekey loops.",
+      severityHint: "high",
+      exampleRationale: "Los logs muestran inestabilidad de tuneles o negociacion criptografica que puede afectar conectividad remota o sitio-a-sitio.",
+      appliesTo: ["ios", "ios-xe", "asa"]
+    },
+    {
+      id: "expected-ev-hardware-environment-alarm",
+      title: "Alarma de hardware o ambiente con impacto potencial",
+      description: "Eventos de fuente, ventilador, temperatura, transceiver, modulo, supervisor, stack o sensor que afectan redundancia o continuidad.",
+      severityHint: "high",
+      exampleRationale: "El evento involucra un componente critico o redundante y puede degradar disponibilidad si persiste o se repite.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "expected-ev-process-resource-instability",
+      title: "Proceso, CPU o memoria con eventos de estabilidad",
+      description: "CPUHOG, memory failure, process crash, watchdog, traceback, reload, core dump o reinicios de procesos relevantes.",
+      severityHint: "high",
+      exampleRationale: "Los logs evidencian inestabilidad del software o recursos del sistema que puede explicar degradacion o perdida de control-plane.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "expected-ev-time-sync-gap",
+      title: "Inconsistencia temporal limita correlacion de eventos",
+      description: "Saltos de reloj, NTP lost/sync, timestamps incompletos o diferencias horarias que impiden ordenar eventos entre dispositivos.",
+      severityHint: "low",
+      exampleRationale: "La linea temporal no es confiable; el hallazgo debe tratarse como brecha de validacion antes de inferir causalidad.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-ev-errdisable-recurring",
+      title: "Errdisable recurrente por proteccion de acceso",
+      description: "Eventos errdisable repetidos por bpduguard, port-security, storm-control, link-flap, udld o channel-misconfig.",
+      severityHint: "medium",
+      exampleRationale: "La proteccion esta actuando repetidamente en la misma interfaz o grupo, sugiriendo causa fisica, host no autorizado o error operacional.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "expected-ev-asa-failover-interface-risk",
+      title: "ASA con eventos de failover o interfaz monitoreada",
+      description: "Logs ASA de failover, monitored interface failed, active/standby change o perdida de comunicacion entre pares.",
+      severityHint: "high",
+      exampleRationale: "Los message-id/clases de ASA indican cambio de rol o degradacion de interfaz monitoreada que puede comprometer continuidad perimetral.",
+      appliesTo: ["asa"]
+    },
+    {
+      id: "expected-ev-nxos-vpc-fabric-risk",
+      title: "NX-OS con eventos vPC/FEX/fabric relevantes",
+      description: "vPC peer-link/keepalive, consistency check, orphan port, FEX offline o modulo fabric/linecard reporta eventos de riesgo.",
+      severityHint: "high",
+      exampleRationale: "La evidencia NX-OS apunta a degradacion de dominio vPC/FEX/fabric, con impacto potencial en redundancia o conectividad east-west.",
+      appliesTo: ["nxos"]
+    },
+    {
+      id: "expected-ev-evidence-conflict-validation",
+      title: "Conflicto entre logs y estado requiere validacion",
+      description: "Logs y estado/configuracion disponible apuntan a conclusiones distintas o la ventana no permite saber si el evento sigue activo.",
+      severityHint: "low",
+      exampleRationale: "El evento observado podria estar resuelto o ser parte de mantenimiento; se requiere validar estado actual y ventana completa.",
+      appliesTo: ["all"]
+    }
+  ],
+  exclusions: []
+};
+
 const severityOrder: Record<string, number> = {
   informational: 0,
   info: 0,

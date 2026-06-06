@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "./prisma.ts";
 import {
   defaultConfigurationScopePlaybook,
+  defaultEvidenceScopePlaybook,
   defaultSecurityScopePlaybook,
   emptyScopePlaybook,
   isSupportedScopePlaybookScopeId,
@@ -34,6 +35,7 @@ export async function getScopePlaybook(scopeId: string): Promise<ScopePlaybookSn
 function defaultScopePlaybook(scopeId: SupportedScopePlaybookScopeId): ScopePlaybook {
   if (scopeId === "configuration") return defaultConfigurationScopePlaybook;
   if (scopeId === "security") return defaultSecurityScopePlaybook;
+  if (scopeId === "evidence") return defaultEvidenceScopePlaybook;
   return emptyScopePlaybook(scopeId);
 }
 
