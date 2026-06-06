@@ -211,24 +211,51 @@ html.dark .text-rose-900 {
 .assessment-tab-scroll {
   scrollbar-gutter: stable;
   padding-bottom: 8px;
+  scroll-behavior: smooth;
+  scroll-padding-inline: 16px;
+  scroll-snap-type: x mandatory;
+  scrollbar-color: hsl(220 16% 52% / 0.55) hsl(220 18% 94%);
+  scrollbar-width: thin;
+}
+
+.assessment-tab-snap-item {
+  scroll-snap-align: center;
+  scroll-snap-stop: always;
 }
 
 .assessment-tab-scroll::-webkit-scrollbar {
-  height: 10px;
+  height: 8px;
 }
 
 .assessment-tab-scroll::-webkit-scrollbar-track {
-  background: hsl(var(--muted));
+  background: hsl(220 18% 94%);
   border-radius: 999px;
   margin: 0 8px;
 }
 
 .assessment-tab-scroll::-webkit-scrollbar-thumb {
-  background: hsl(var(--primary) / 0.55);
-  border: 2px solid hsl(var(--muted));
+  background: hsl(220 16% 52% / 0.55);
+  border: 2px solid hsl(220 18% 94%);
   border-radius: 999px;
 }
 
 .assessment-tab-scroll::-webkit-scrollbar-thumb:hover {
-  background: hsl(var(--primary) / 0.75);
+  background: hsl(220 16% 42% / 0.72);
+}
+
+html.dark .assessment-tab-scroll {
+  scrollbar-color: hsl(214 16% 64% / 0.62) hsl(222 20% 18%);
+}
+
+html.dark .assessment-tab-scroll::-webkit-scrollbar-track {
+  background: hsl(222 20% 18%);
+}
+
+html.dark .assessment-tab-scroll::-webkit-scrollbar-thumb {
+  background: hsl(214 16% 64% / 0.62);
+  border-color: hsl(222 20% 18%);
+}
+
+html.dark .assessment-tab-scroll::-webkit-scrollbar-thumb:hover {
+  background: hsl(214 18% 76% / 0.74);
 }

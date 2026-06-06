@@ -2906,6 +2906,15 @@ function ExecutiveDashboardPill({ summary }: { summary?: ExecutiveRiskDashboard 
 function AssessmentTabRail({ activeTab, onTabChange }: { activeTab: Tab; onTabChange: (tab: Tab) => void }) {
   const activeIndex = tabs.indexOf(activeTab) + 1;
   const activeLabel = assessmentTabLabel(activeTab);
+  const tabButtonRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
+
+  useEffect(() => {
+    tabButtonRefs.current[activeTab]?.scrollIntoView({
+      behavior: "smooth",
+      block: "nearest",
+      inline: "center"
+    });
+  }, [activeTab]);
 
   return (
     <div className="overflow-hidden rounded-md border border-border bg-white shadow-subtle">
@@ -2928,8 +2937,11 @@ function AssessmentTabRail({ activeTab, onTabChange }: { activeTab: Tab; onTabCh
             return (
               <button
                 key={tab}
+                ref={(element) => {
+                  tabButtonRefs.current[tab] = element;
+                }}
                 className={cn(
-                  "flex h-11 shrink-0 items-center gap-2 rounded px-2.5 text-left text-xs font-medium transition",
+                  "assessment-tab-snap-item flex h-11 shrink-0 items-center gap-2 rounded px-2.5 text-left text-xs font-medium transition",
                   isActive ? "bg-primary text-primary-foreground shadow-subtle" : "text-muted-foreground hover:bg-muted/70 hover:text-foreground"
                 )}
                 onClick={() => onTabChange(tab)}
