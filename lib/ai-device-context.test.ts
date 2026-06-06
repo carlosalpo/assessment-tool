@@ -12,6 +12,7 @@ test("buildDeviceContext assembles identity, interactions and own facts for one 
   assert.equal(deviceContext.identity.hostname, "core-01");
   assert.equal(deviceContext.identity.role, "core");
   assert.equal(deviceContext.identity.model, "C9500-48Y4C");
+  assert.equal(deviceContext.identity.osFamily, "ios-xe");
   assert.equal(deviceContext.identity.site, "HQ");
   assert.equal(deviceContext.identity.criticality, "critical");
 
@@ -129,7 +130,7 @@ function fixtureInput(): AssessmentAIContextInput {
     ],
     parsed: {
       devices: [
-        { id: "dev_core", hostname: "core-01", model: "C9500-48Y4C", serial: "FOC1", softwareVersion: "17.9.4", suggestedRole: "core", sourceFiles: ["core-01.log"], evidence: ["show version core"] },
+        { id: "dev_core", hostname: "core-01", model: "C9500-48Y4C", serial: "FOC1", softwareVersion: "Cisco IOS XE Software, Version 17.9.4", suggestedRole: "core", sourceFiles: ["core-01.log"], evidence: ["show version core"] },
         { id: "dev_dist", hostname: "dist-01", model: "C9300-48P", serial: "FOC2", softwareVersion: "17.6.5", suggestedRole: "distribution", sourceFiles: ["dist-01.log"], evidence: ["show version dist"] }
       ],
       interfaces: [

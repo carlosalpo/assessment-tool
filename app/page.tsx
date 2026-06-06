@@ -176,6 +176,7 @@ type EvaluationArea = "topology" | "configuration" | "security" | "lifecycle" | 
 type AIEvaluationSubtab = "evaluation" | "findings" | "settings";
 type AISettingsSubtab = "playbook" | "guidelines" | "debug";
 type PlaybookEditorSubtab = "criteria" | "expected" | "exclusions";
+type ScopePlaybookOsFamily = "all" | "ios" | "ios-xe" | "nxos" | "asa" | "unknown";
 type DeviceType = "switch" | "router" | "nexus-switch" | "aci" | "wireless-controller" | "firewall" | "other";
 type SortDirection = "asc" | "desc";
 type InventorySortKey = "included" | "hostname" | "managementIp" | "serial" | "model" | "deviceType" | "role" | "topologyLayer" | "priority";
@@ -453,6 +454,7 @@ type ScopePlaybookCriterion = {
   id: string;
   aspect: string;
   guidance: string;
+  appliesTo: ScopePlaybookOsFamily[];
 };
 
 type ScopePlaybookExpectedFinding = {
@@ -461,6 +463,7 @@ type ScopePlaybookExpectedFinding = {
   description: string;
   severityHint: RiskLevel;
   exampleRationale: string;
+  appliesTo: ScopePlaybookOsFamily[];
 };
 
 type ScopePlaybookExclusion = {
@@ -470,6 +473,7 @@ type ScopePlaybookExclusion = {
   findingTypeIn?: string[];
   reason: string;
   source: "manual" | "review_feedback";
+  appliesTo: ScopePlaybookOsFamily[];
 };
 
 type ScopePlaybookResponse = {
@@ -8676,6 +8680,7 @@ function ScopePlaybookAdminPanel({ currentUser }: { currentUser: AppUser }) {
     message: ""
   });
   const [activePlaybookSubtab, setActivePlaybookSubtab] = useState<PlaybookEditorSubtab>("criteria");
+  const [playbookFamilyFilter, setPlaybookFamilyFilter] = useState<ScopePlaybookOsFamily>("all");
   const playbookSubtabRefs = useRef<Partial<Record<PlaybookEditorSubtab, HTMLButtonElement | null>>>({});
 
   const loadPlaybook = useCallback(async () => {
@@ -8719,10 +8724,13 @@ function ScopePlaybookAdminPanel({ currentUser }: { currentUser: AppUser }) {
 
   if (!isAdmin) return null;
   const busy = status.state === "loading" || status.state === "saving";
+  const visibleCriteriaCount = draft.criteria.filter((item) => playbookItemVisibleForFamily(item, playbookFamilyFilter)).length;
+  const visibleExpectedCount = draft.expected.filter((item) => playbookItemVisibleForFamily(item, playbookFamilyFilter)).length;
+  const visibleExclusionCount = draft.exclusions.filter((item) => playbookItemVisibleForFamily(item, playbookFamilyFilter)).length;
   const playbookSubtabs = [
-    { id: "criteria" as const, label: "Criterios", count: draft.criteria.length, panelId: "scope-playbook-subtab-panel-criteria" },
-    { id: "expected" as const, label: "Hallazgos esperados", count: draft.expected.length, panelId: "scope-playbook-subtab-panel-expected" },
-    { id: "exclusions" as const, label: "Exclusiones", count: draft.exclusions.length, panelId: "scope-playbook-subtab-panel-exclusions" }
+    { id: "criteria" as const, label: "Criterios", count: visibleCriteriaCount, panelId: "scope-playbook-subtab-panel-criteria" },
+    { id: "expected" as const, label: "Hallazgos esperados", count: visibleExpectedCount, panelId: "scope-playbook-subtab-panel-expected" },
+    { id: "exclusions" as const, label: "Exclusiones", count: visibleExclusionCount, panelId: "scope-playbook-subtab-panel-exclusions" }
   ];
 
   function handlePlaybookSubtabKeyDown(event: React.KeyboardEvent<HTMLButtonElement>, currentIndex: number) {
@@ -8745,20 +8753,20 @@ function ScopePlaybookAdminPanel({ currentUser }: { currentUser: AppUser }) {
     if (activePlaybookSubtab === "criteria") {
       setDraft((current) => ({
         ...current,
-        criteria: [...current.criteria, { id: uid("criterion"), aspect: "", guidance: "" }]
+        criteria: [...current.criteria, { id: uid("criterion"), aspect: "", guidance: "", appliesTo: ["all"] }]
       }));
       return;
     }
     if (activePlaybookSubtab === "expected") {
       setDraft((current) => ({
         ...current,
-        expected: [...current.expected, { id: uid("expected"), title: "", description: "", severityHint: "medium", exampleRationale: "" }]
+        expected: [...current.expected, { id: uid("expected"), title: "", description: "", severityHint: "medium", exampleRationale: "", appliesTo: ["all"] }]
       }));
       return;
     }
     setDraft((current) => ({
       ...current,
-      exclusions: [...current.exclusions, { id: uid("exclusion"), keywords: [], reason: "", source: "manual" }]
+      exclusions: [...current.exclusions, { id: uid("exclusion"), keywords: [], reason: "", source: "manual", appliesTo: ["all"] }]
     }));
   }
 
@@ -8839,6 +8847,18 @@ function ScopePlaybookAdminPanel({ currentUser }: { currentUser: AppUser }) {
             Agregar
           </Button>
         </div>
+        <label className="flex flex-wrap items-center gap-2 text-xs font-medium text-muted-foreground">
+          Ver items de:
+          <select
+            className="h-9 rounded-md border border-border bg-white px-3 text-sm text-foreground"
+            value={playbookFamilyFilter}
+            onChange={(event) => setPlaybookFamilyFilter(event.target.value as ScopePlaybookOsFamily)}
+          >
+            {playbookOsFamilyOptions.map((family) => (
+              <option key={family} value={family}>{playbookOsFamilyLabel(family)}</option>
+            ))}
+          </select>
+        </label>
 
         <div
           id="scope-playbook-subtab-panel-criteria"
@@ -8850,6 +8870,7 @@ function ScopePlaybookAdminPanel({ currentUser }: { currentUser: AppUser }) {
           <PlaybookCriteriaEditor
             values={draft.criteria}
             disabled={busy}
+            familyFilter={playbookFamilyFilter}
             onChange={(criteria) => setDraft((current) => ({ ...current, criteria }))}
           />
         </div>
@@ -8864,6 +8885,7 @@ function ScopePlaybookAdminPanel({ currentUser }: { currentUser: AppUser }) {
           <PlaybookExpectedEditor
             values={draft.expected}
             disabled={busy}
+            familyFilter={playbookFamilyFilter}
             onChange={(expected) => setDraft((current) => ({ ...current, expected }))}
           />
         </div>
@@ -8878,6 +8900,7 @@ function ScopePlaybookAdminPanel({ currentUser }: { currentUser: AppUser }) {
           <PlaybookExclusionEditor
             values={draft.exclusions}
             disabled={busy}
+            familyFilter={playbookFamilyFilter}
             onChange={(exclusions) => setDraft((current) => ({ ...current, exclusions }))}
           />
         </div>
@@ -8889,10 +8912,12 @@ function ScopePlaybookAdminPanel({ currentUser }: { currentUser: AppUser }) {
 function PlaybookCriteriaEditor({
   values,
   disabled,
+  familyFilter,
   onChange
 }: {
   values: ScopePlaybookCriterion[];
   disabled: boolean;
+  familyFilter: ScopePlaybookOsFamily;
   onChange: (values: ScopePlaybookCriterion[]) => void;
 }) {
   function update(index: number, patch: Partial<ScopePlaybookCriterion>) {
@@ -8901,9 +8926,10 @@ function PlaybookCriteriaEditor({
   return (
     <div>
       <div className="space-y-2">
-        {values.map((item, index) => (
-          <div key={item.id} className="grid gap-2 rounded-md border border-border bg-muted/20 p-2 md:grid-cols-[180px_1fr_auto]">
+        {values.map((item, index) => playbookItemVisibleForFamily(item, familyFilter) && (
+          <div key={item.id} className="grid gap-2 rounded-md border border-border bg-muted/20 p-2 md:grid-cols-[170px_220px_1fr_auto]">
             <Input value={item.aspect} disabled={disabled} placeholder="Aspecto" onChange={(event) => update(index, { aspect: event.target.value })} />
+            <PlaybookAppliesToSelector value={item.appliesTo} disabled={disabled} onChange={(appliesTo) => update(index, { appliesTo })} />
             <Textarea value={item.guidance} disabled={disabled} className="min-h-20" placeholder="Guia de evaluacion" onChange={(event) => update(index, { guidance: event.target.value })} />
             <Button size="icon" variant="ghost" title="Quitar criterio" disabled={disabled} onClick={() => onChange(values.filter((_, itemIndex) => itemIndex !== index))}>
               <Trash2 size={14} />
@@ -8918,10 +8944,12 @@ function PlaybookCriteriaEditor({
 function PlaybookExpectedEditor({
   values,
   disabled,
+  familyFilter,
   onChange
 }: {
   values: ScopePlaybookExpectedFinding[];
   disabled: boolean;
+  familyFilter: ScopePlaybookOsFamily;
   onChange: (values: ScopePlaybookExpectedFinding[]) => void;
 }) {
   function update(index: number, patch: Partial<ScopePlaybookExpectedFinding>) {
@@ -8930,8 +8958,8 @@ function PlaybookExpectedEditor({
   return (
     <div>
       <div className="space-y-2">
-        {values.map((item, index) => (
-          <div key={item.id} className="grid gap-2 rounded-md border border-border bg-muted/20 p-2 lg:grid-cols-[1fr_130px_1fr_auto]">
+        {values.map((item, index) => playbookItemVisibleForFamily(item, familyFilter) && (
+          <div key={item.id} className="grid gap-2 rounded-md border border-border bg-muted/20 p-2 lg:grid-cols-[1fr_130px_220px_1fr_auto]">
             <Input value={item.title} disabled={disabled} placeholder="Titulo esperado" onChange={(event) => update(index, { title: event.target.value })} />
             <select
               className="h-10 rounded-md border border-border bg-white px-3 text-sm"
@@ -8941,6 +8969,7 @@ function PlaybookExpectedEditor({
             >
               {riskLevelsForEditor.map((risk) => <option key={risk} value={risk}>{risk}</option>)}
             </select>
+            <PlaybookAppliesToSelector value={item.appliesTo} disabled={disabled} onChange={(appliesTo) => update(index, { appliesTo })} />
             <Textarea value={item.description} disabled={disabled} className="min-h-20" placeholder="Descripcion" onChange={(event) => update(index, { description: event.target.value })} />
             <Button size="icon" variant="ghost" title="Quitar esperado" disabled={disabled} onClick={() => onChange(values.filter((_, itemIndex) => itemIndex !== index))}>
               <Trash2 size={14} />
@@ -8948,7 +8977,7 @@ function PlaybookExpectedEditor({
             <Textarea
               value={item.exampleRationale}
               disabled={disabled}
-              className="min-h-16 lg:col-span-3"
+              className="min-h-16 lg:col-span-4"
               placeholder="Ejemplo de racional"
               onChange={(event) => update(index, { exampleRationale: event.target.value })}
             />
@@ -8962,10 +8991,12 @@ function PlaybookExpectedEditor({
 function PlaybookExclusionEditor({
   values,
   disabled,
+  familyFilter,
   onChange
 }: {
   values: ScopePlaybookExclusion[];
   disabled: boolean;
+  familyFilter: ScopePlaybookOsFamily;
   onChange: (values: ScopePlaybookExclusion[]) => void;
 }) {
   function update(index: number, patch: Partial<ScopePlaybookExclusion>) {
@@ -8974,8 +9005,8 @@ function PlaybookExclusionEditor({
   return (
     <div>
       <div className="space-y-2">
-        {values.map((item, index) => (
-          <div key={item.id} className="grid gap-2 rounded-md border border-border bg-muted/20 p-2 lg:grid-cols-[1fr_150px_1fr_120px_auto]">
+        {values.map((item, index) => playbookItemVisibleForFamily(item, familyFilter) && (
+          <div key={item.id} className="grid gap-2 rounded-md border border-border bg-muted/20 p-2 lg:grid-cols-[1fr_150px_1fr_220px_120px_auto]">
             <Input
               value={item.keywords.join(", ")}
               disabled={disabled}
@@ -8997,6 +9028,7 @@ function PlaybookExclusionEditor({
               placeholder="finding_type incluidos"
               onChange={(event) => update(index, { findingTypeIn: splitCsv(event.target.value) })}
             />
+            <PlaybookAppliesToSelector value={item.appliesTo} disabled={disabled} onChange={(appliesTo) => update(index, { appliesTo })} />
             <Badge tone={item.source === "review_feedback" ? "info" : "neutral"}>{item.source === "review_feedback" ? "Revision" : "Manual"}</Badge>
             <Button size="icon" variant="ghost" title="Quitar exclusion" disabled={disabled} onClick={() => onChange(values.filter((_, itemIndex) => itemIndex !== index))}>
               <Trash2 size={14} />
@@ -9004,7 +9036,7 @@ function PlaybookExclusionEditor({
             <Textarea
               value={item.reason}
               disabled={disabled}
-              className="min-h-16 lg:col-span-4"
+              className="min-h-16 lg:col-span-5"
               placeholder="Motivo"
               onChange={(event) => update(index, { reason: event.target.value })}
             />
@@ -9013,6 +9045,111 @@ function PlaybookExclusionEditor({
       </div>
     </div>
   );
+}
+
+function PlaybookAppliesToSelector({
+  value,
+  disabled,
+  onChange
+}: {
+  value: ScopePlaybookOsFamily[];
+  disabled: boolean;
+  onChange: (value: ScopePlaybookOsFamily[]) => void;
+}) {
+  const normalized = normalizePlaybookAppliesTo(value);
+  return (
+    <div className="rounded-md border border-border bg-white px-2 py-1">
+      <p className="text-[11px] font-medium text-muted-foreground">Aplica a</p>
+      <div className="mt-1 flex flex-wrap gap-1">
+        {playbookOsFamilyOptions.map((family) => {
+          const checked = normalized.includes(family);
+          return (
+            <label
+              key={family}
+              className={cn(
+                "inline-flex h-7 cursor-pointer items-center gap-1 rounded border px-2 text-xs",
+                checked ? "border-primary bg-primary/10 text-primary" : "border-border bg-muted/30 text-muted-foreground"
+              )}
+            >
+              <input
+                type="checkbox"
+                className="sr-only"
+                checked={checked}
+                disabled={disabled}
+                onChange={() => onChange(togglePlaybookAppliesTo(normalized, family))}
+              />
+              {playbookOsFamilyLabel(family)}
+            </label>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function playbookItemVisibleForFamily(item: { appliesTo?: ScopePlaybookOsFamily[] }, family: ScopePlaybookOsFamily) {
+  if (family === "all") return true;
+  const appliesTo = normalizePlaybookAppliesTo(item.appliesTo);
+  return appliesTo.includes("all") || appliesTo.includes(family);
+}
+
+function normalizePlaybookAppliesTo(value: ScopePlaybookOsFamily[] | undefined): ScopePlaybookOsFamily[] {
+  const valid = new Set(playbookOsFamilyOptions);
+  const normalized = Array.from(new Set((Array.isArray(value) ? value : []).filter((family) => valid.has(family))));
+  return normalized.length > 0 ? normalized : ["all"];
+}
+
+function togglePlaybookAppliesTo(current: ScopePlaybookOsFamily[], family: ScopePlaybookOsFamily): ScopePlaybookOsFamily[] {
+  if (family === "all") return ["all"];
+  const withoutAll = current.filter((item) => item !== "all");
+  const next = withoutAll.includes(family) ? withoutAll.filter((item) => item !== family) : [...withoutAll, family];
+  return next.length > 0 ? next : ["all"];
+}
+
+function playbookOsFamilyLabel(family: ScopePlaybookOsFamily) {
+  if (family === "ios-xe") return "IOS-XE";
+  if (family === "ios") return "IOS";
+  if (family === "nxos") return "NX-OS";
+  if (family === "asa") return "ASA";
+  if (family === "unknown") return "Desconocido";
+  return "Todos";
+}
+
+function inferFindingOsFamilies(finding: Finding, record: AssessmentRecord): ScopePlaybookOsFamily[] {
+  const assetKeys = new Set(finding.affectedAssets.map((asset) => asset.toLowerCase()));
+  const families = new Set<ScopePlaybookOsFamily>();
+  const parsedDevices = Array.isArray(record.parsed.devices) ? record.parsed.devices : [];
+
+  for (const device of parsedDevices as any[]) {
+    if (assetKeys.has(String(device.hostname ?? "").toLowerCase()) || assetKeys.has(String(device.id ?? "").toLowerCase())) {
+      const family = uiDeviceOsFamily(device);
+      if (family !== "unknown") families.add(family);
+    }
+  }
+
+  for (const asset of record.targetInventory as any[]) {
+    if (assetKeys.has(String(asset.hostname ?? "").toLowerCase()) || assetKeys.has(String(asset.id ?? "").toLowerCase())) {
+      const family = uiDeviceOsFamily(asset);
+      if (family !== "unknown") families.add(family);
+    }
+  }
+
+  return families.size > 0 ? Array.from(families) : ["all"];
+}
+
+function uiDeviceOsFamily(device: { softwareVersion?: unknown; platform?: unknown; model?: unknown }): ScopePlaybookOsFamily {
+  const software = `${device.softwareVersion ?? ""} ${device.platform ?? ""}`.toLowerCase();
+  const model = String(device.model ?? "").toLowerCase();
+  return detectUiOsFamily(software) ?? detectUiOsFamily(model) ?? "unknown";
+}
+
+function detectUiOsFamily(value: string): ScopePlaybookOsFamily | null {
+  if (!value.trim()) return null;
+  if (value.includes("ios-xe") || value.includes("ios xe")) return "ios-xe";
+  if (value.includes("nx-os") || value.includes("nx os") || value.includes("nexus") || /\bn[975]k\b/.test(value)) return "nxos";
+  if (value.includes("adaptive security") || /\basa\b/.test(value) || /\bfpr\b/.test(value)) return "asa";
+  if (value.includes("ios") && !value.includes("xe")) return "ios";
+  return null;
 }
 
 function AIDebugAdminPanel({ record, currentUser }: { record: AssessmentRecord; currentUser: AppUser }) {
@@ -9334,7 +9471,7 @@ function AIReviewPanel({
     if (!currentUser || finding.category !== "configuration") return;
     setReviewSuppressionStatus({ state: "saving", message: "Creando exclusion en playbook..." });
     try {
-      await appendReviewSuppressionToScopePlaybook(finding, currentUser);
+      await appendReviewSuppressionToScopePlaybook(finding, currentUser, record);
       onUpdateFinding(finding.id, { status: "discarded" });
       setReviewSuppressionStatus({ state: "idle", message: "Exclusion agregada al playbook de Configuracion." });
     } catch (error) {
@@ -12826,6 +12963,7 @@ function summarizeRejectedFindings(value: unknown) {
 }
 
 const riskLevelsForEditor: RiskLevel[] = ["critical", "high", "medium", "low", "info"];
+const playbookOsFamilyOptions: ScopePlaybookOsFamily[] = ["all", "ios", "ios-xe", "nxos", "asa"];
 
 function shortHash(value: string) {
   return value ? value.slice(0, 8) : "sin hash";
@@ -12917,7 +13055,8 @@ async function updateScopePlaybook(
   return payload as ScopePlaybookResponse;
 }
 
-async function appendReviewSuppressionToScopePlaybook(finding: Finding, currentUser: AppUser): Promise<ScopePlaybookResponse> {
+async function appendReviewSuppressionToScopePlaybook(finding: Finding, currentUser: AppUser, record: AssessmentRecord): Promise<ScopePlaybookResponse> {
+  const appliesTo = inferFindingOsFamilies(finding, record);
   const response = await fetch("/api/ai-analysis/playbook", {
     method: "POST",
     headers: {
@@ -12930,6 +13069,7 @@ async function appendReviewSuppressionToScopePlaybook(finding: Finding, currentU
         title: finding.title,
         finding_type: finding.aiMetadata?.findingType
       },
+      appliesTo,
       reason: "Hallazgo descartado en revision; suprimir similares.",
       updatedBy: currentUser.email
     })

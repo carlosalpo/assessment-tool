@@ -8,6 +8,7 @@ import type {
   TopologyRelationshipFact
 } from "./ai-analysis.ts";
 import type { AIScopeId } from "./ai-scope-strategy.ts";
+import { deviceOsFamily, type OsFamily } from "./scope-playbook.ts";
 
 const batchOverheadTokens = 900;
 const maxNeighbors = 12;
@@ -34,6 +35,7 @@ export type DeviceContext = {
     hostname: string;
     role: string;
     model: string;
+    osFamily: OsFamily;
     site: string;
     criticality: AIContextDevice["criticality"] | "unknown";
     lifecycleStatus: AIContextDevice["lifecycleStatus"] | "unknown";
@@ -84,6 +86,7 @@ export function buildDeviceContext(context: AssessmentAIContext, deviceId: strin
       hostname: device?.hostname ?? deviceId,
       role: device?.role ?? "unknown",
       model: device?.model ?? "unknown",
+      osFamily: deviceOsFamily(device),
       site: device?.site ?? "unknown",
       criticality: device?.criticality ?? "unknown",
       lifecycleStatus: device?.lifecycleStatus ?? "unknown",

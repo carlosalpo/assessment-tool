@@ -86,7 +86,8 @@ function ruleFromBody(body: any): ExclusionRule {
   return deriveReviewFeedbackExclusionRule({
     title,
     findingType: body?.finding?.finding_type ?? body?.findingType ?? null,
-    reason: body?.reason ?? "Hallazgo descartado en revision; suprimir similares."
+    reason: body?.reason ?? "Hallazgo descartado en revision; suprimir similares.",
+    appliesTo: body?.appliesTo
   });
 }
 

@@ -28,7 +28,7 @@ import {
   usesPatternQuery
 } from "./ai-scope-schemas.ts";
 import { buildAssessmentAIContext } from "./ai-analysis.ts";
-import { isPerDeviceEnabled, planDeviceBatches } from "./ai-device-context.ts";
+import { buildDeviceContext, isPerDeviceEnabled, planDeviceBatches } from "./ai-device-context.ts";
 import { engineForScope } from "./ai-scope-engine.ts";
 import {
   buildLifecycleFindings,
@@ -50,6 +50,9 @@ import {
   applyExclusions,
   buildPlaybookPromptSection,
   isScopePlaybookEnabled,
+  resolvePlaybookForOsFamilies,
+  type DeviceOsLookup,
+  type OsFamily,
   type ScopePlaybook
 } from "./scope-playbook.ts";
 import {
@@ -933,6 +936,15 @@ async function runPerDeviceScopeAIAnalysis(
 
   const partitionResults = [];
   for (const batch of batches) {
+    const batchDeviceContexts = batch.deviceHostnames.map((hostname) => buildDeviceContext(context, hostname));
+    const batchOsFamilies = new Set<OsFamily>(batchDeviceContexts.map((deviceContext) => deviceContext.identity.osFamily));
+    const batchPlaybook = input.scopeId === "configuration" && input.scopePlaybook
+      ? resolvePlaybookForOsFamilies(input.scopePlaybook, batchOsFamilies)
+      : input.scopePlaybook ?? null;
+    const batchSystemPrompt = input.scopeId === "configuration" && batchPlaybook
+      ? buildScopePlaybookSystemPrompt(input.scopeId, batchPlaybook)
+      : systemPrompt;
+    const batchDeviceOsByName = deviceOsLookupFromDeviceContexts(batchDeviceContexts);
     const batchPacket = buildAIScopePacket({
       record: input.record,
       scopeId: input.scopeId,
@@ -944,8 +956,9 @@ async function runPerDeviceScopeAIAnalysis(
       jobId: input.jobId,
       assessmentId: input.assessmentId,
       debugCapture: input.debugCapture,
-      systemPrompt,
-      scopePlaybook: input.scopePlaybook ?? null
+      systemPrompt: batchSystemPrompt,
+      scopePlaybook: batchPlaybook,
+      deviceOsByName: batchDeviceOsByName
     });
     partitionResults.push({
       ...partitionResult,
@@ -1813,7 +1826,7 @@ async function callOpenAIForScopeAnalysis(
   previousArtifacts: any[],
   apiKey: string,
   model: string,
-  debug?: { jobId: string; assessmentId: string; debugCapture: boolean; systemPrompt?: string; scopePlaybook?: ScopePlaybook | null }
+  debug?: { jobId: string; assessmentId: string; debugCapture: boolean; systemPrompt?: string; scopePlaybook?: ScopePlaybook | null; deviceOsByName?: DeviceOsLookup }
 ) {
   if (!apiKey) {
     throw new Error("OpenAI API key no esta configurada para el motor persistente.");
@@ -1852,6 +1865,7 @@ async function callOpenAIForScopeAnalysis(
               "Incluye remediation_category con una de las 4 categorias accionables; usa pending_validation solo si no aplica remediacion o falta validacion del arquitecto."
             ],
             aiScopePacket: scopePacket,
+            ...(debug?.deviceOsByName ? { deviceOsFamilies: serializeDeviceOsLookup(debug.deviceOsByName) } : {}),
             previousArtifacts: compactPreviousArtifacts(previousArtifacts),
             audit
           })
@@ -1899,7 +1913,7 @@ async function callOpenAIForScopeAnalysis(
       });
       capturedFailure = true;
       if (response.status === 401 || response.status === 403 || deterministicScopeFindings.length === 0) throw new Error(message);
-      return deterministicScopeAnalysisFallback(scopeId, deterministicScopeFindings, message, debug?.scopePlaybook ?? null);
+      return deterministicScopeAnalysisFallback(scopeId, deterministicScopeFindings, message, debug?.scopePlaybook ?? null, debug?.deviceOsByName);
     }
     const parsed = JSON.parse(extractResponseText(payload) || "{\"findings\":[],\"recommendations\":[]}");
     const validation = validateScopeAnalysisResult(parsed, scopePacket);
@@ -1918,7 +1932,7 @@ async function callOpenAIForScopeAnalysis(
       rejectedFindings: validation.rejectedFindings
     });
     const mergedFindings = mergeScopeFindings(validation.validFindings, deterministicScopeFindings);
-    const exclusionResult = applyScopePlaybookExclusions(scopeId, mergedFindings, debug?.scopePlaybook ?? null);
+    const exclusionResult = applyScopePlaybookExclusions(scopeId, mergedFindings, debug?.scopePlaybook ?? null, debug?.deviceOsByName);
     return {
       ...parsed,
       phase: "scope_analysis",
@@ -1949,7 +1963,7 @@ async function callOpenAIForScopeAnalysis(
     }
     if (deterministicScopeFindings.length === 0) throw error;
     const message = error instanceof Error ? error.message : "OpenAI no respondio durante scope_analysis.";
-    return deterministicScopeAnalysisFallback(scopeId, deterministicScopeFindings, message, debug?.scopePlaybook ?? null);
+    return deterministicScopeAnalysisFallback(scopeId, deterministicScopeFindings, message, debug?.scopePlaybook ?? null, debug?.deviceOsByName);
   } finally {
     clearTimeout(timeout);
     if (cancelPoll) clearInterval(cancelPoll);
@@ -2073,8 +2087,8 @@ async function captureSynthesisInteraction(
   });
 }
 
-function deterministicScopeAnalysisFallback(scopeId: AIAnalysisScopeId, findings: any[], reason: string, playbook?: ScopePlaybook | null) {
-  const exclusionResult = applyScopePlaybookExclusions(scopeId, findings, playbook ?? null);
+function deterministicScopeAnalysisFallback(scopeId: AIAnalysisScopeId, findings: any[], reason: string, playbook?: ScopePlaybook | null, deviceOsByName?: DeviceOsLookup) {
+  const exclusionResult = applyScopePlaybookExclusions(scopeId, findings, playbook ?? null, deviceOsByName);
   return {
     phase: "scope_analysis",
     scopeId,
@@ -2351,15 +2365,38 @@ export function buildScopePlaybookSystemPrompt(scopeId: AIAnalysisScopeId, playb
     playbookSection,
     "",
     "Usa criterios y hallazgos esperados como rubrica de enfoque, no como permiso para inventar evidencia.",
+    "Aplica cada criterio y tipo esperado solo a equipos cuyo SO este incluido en su appliesTo o cuando appliesTo incluya all; el SO de cada equipo esta en deviceOsFamilies/contexto del lote.",
     "Las exclusiones del playbook se aplican despues de la validacion; aun asi evita generar hallazgos que sean claramente ruido segun el playbook."
   ].join("\n");
 }
 
-function applyScopePlaybookExclusions(scopeId: AIAnalysisScopeId, findings: any[], playbook?: ScopePlaybook | null) {
+function applyScopePlaybookExclusions(scopeId: AIAnalysisScopeId, findings: any[], playbook?: ScopePlaybook | null, deviceOsByName?: DeviceOsLookup) {
   if (!playbook || scopeId !== "configuration" || !isScopePlaybookEnabled()) {
     return { kept: findings, suppressed: [] as ReturnType<typeof applyExclusions>["suppressed"] };
   }
-  return applyExclusions(findings, playbook.exclusions);
+  return applyExclusions(findings, playbook.exclusions, { deviceOsByName });
+}
+
+function deviceOsLookupFromDeviceContexts(deviceContexts: Array<ReturnType<typeof buildDeviceContext>>): Map<string, OsFamily> {
+  const lookup = new Map<string, OsFamily>();
+  for (const deviceContext of deviceContexts) {
+    const osFamily = deviceContext.identity.osFamily;
+    [deviceContext.deviceId, deviceContext.identity.id, deviceContext.identity.hostname]
+      .filter(Boolean)
+      .forEach((key) => {
+        lookup.set(key, osFamily);
+        lookup.set(key.toLowerCase(), osFamily);
+      });
+  }
+  return lookup;
+}
+
+function serializeDeviceOsLookup(lookup: DeviceOsLookup) {
+  const entries = lookup instanceof Map ? Array.from(lookup.entries()) : Object.entries(lookup);
+  return entries.reduce<Record<string, OsFamily>>((acc, [device, osFamily]) => {
+    acc[device] = osFamily;
+    return acc;
+  }, {});
 }
 
 export function isDesignRubricEnabled() {

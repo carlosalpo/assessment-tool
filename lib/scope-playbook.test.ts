@@ -4,6 +4,9 @@ import { hashScopeInput } from "./ai-analysis-jobs.ts";
 import {
   applyExclusions,
   buildPlaybookPromptSection,
+  deviceOsFamily,
+  normalizeScopePlaybook,
+  resolveDevicePlaybook,
   type ExclusionRule,
   type ScopePlaybook
 } from "./scope-playbook.ts";
@@ -38,7 +41,8 @@ test("applyExclusions suppresses findings matching keywords severityBelow and fi
     severityBelow: "medium",
     findingTypeIn: ["probable_issue"],
     reason: "STP low signal accepted as local standard.",
-    source: "manual"
+    source: "manual",
+    appliesTo: ["all"]
   }];
 
   const result = applyExclusions(findings, exclusions);
@@ -74,10 +78,85 @@ test("applyExclusions matches rules with partial conditions and keeps all withou
     id: "suppress-vty",
     keywords: ["line", "vty"],
     reason: "Known management exception.",
-    source: "manual"
+    source: "manual",
+    appliesTo: ["all"]
   }]);
   assert.deepEqual(keywordOnly.kept.map((item) => item.finding_id), ["cfg_ospf"]);
   assert.deepEqual(keywordOnly.suppressed.map((item) => item.ruleId), ["suppress-vty"]);
+});
+
+test("deviceOsFamily separates ios-xe ios nxos asa unknown and uses model fallback", () => {
+  assert.equal(deviceOsFamily({ softwareVersion: "Cisco IOS XE Software, Version 17.9", platform: "", model: "C9300" }), "ios-xe");
+  assert.equal(deviceOsFamily({ softwareVersion: "Cisco IOS Software, C6500 Software", platform: "", model: "WS-C6500" }), "ios");
+  assert.equal(deviceOsFamily({ softwareVersion: "Cisco NX-OS Software 10.2", platform: "", model: "C93180YC" }), "nxos");
+  assert.equal(deviceOsFamily({ softwareVersion: "", platform: "", model: "N9K-C93180YC-FX" }), "nxos");
+  assert.equal(deviceOsFamily({ softwareVersion: "Cisco Adaptive Security Appliance Software Version 9.16", platform: "", model: "ASA5525" }), "asa");
+  assert.equal(deviceOsFamily({ softwareVersion: "", platform: "", model: "FPR-2110" }), "asa");
+  assert.equal(deviceOsFamily({ softwareVersion: "", platform: "", model: "mystery-box" }), "unknown");
+});
+
+test("resolveDevicePlaybook returns all plus matching OS family items", () => {
+  const playbook = normalizeScopePlaybook({
+    scopeId: "configuration",
+    criteria: [
+      { id: "all-criterion", aspect: "Common", guidance: "Common", appliesTo: ["all"] },
+      { id: "asa-criterion", aspect: "ASA", guidance: "ASA", appliesTo: ["asa"] },
+      { id: "nxos-criterion", aspect: "NX-OS", guidance: "NX-OS", appliesTo: ["nxos"] }
+    ],
+    expected: [
+      { id: "all-expected", title: "Common", description: "Common", severityHint: "medium", exampleRationale: "", appliesTo: ["all"] },
+      { id: "nxos-expected", title: "NX-OS", description: "NX-OS", severityHint: "medium", exampleRationale: "", appliesTo: ["nxos"] }
+    ],
+    exclusions: [
+      { id: "all-exclusion", keywords: ["common"], reason: "Common", source: "manual", appliesTo: ["all"] },
+      { id: "asa-exclusion", keywords: ["asa"], reason: "ASA", source: "manual", appliesTo: ["asa"] }
+    ]
+  });
+
+  assert.deepEqual(resolveDevicePlaybook(playbook, "asa").criteria.map((item) => item.id), ["all-criterion", "asa-criterion"]);
+  assert.deepEqual(resolveDevicePlaybook(playbook, "nxos").criteria.map((item) => item.id), ["all-criterion", "nxos-criterion"]);
+  assert.deepEqual(resolveDevicePlaybook(playbook, "asa").expected.map((item) => item.id), ["all-expected"]);
+  assert.deepEqual(resolveDevicePlaybook(playbook, "asa").exclusions.map((item) => item.id), ["all-exclusion", "asa-exclusion"]);
+});
+
+test("applyExclusions is OS-aware when device OS lookup is provided", () => {
+  const findings = [
+    finding({
+      finding_id: "asa_mgmt",
+      title: "Management deviation",
+      technical_rationale: "legacy management exception",
+      related_devices: ["asa-01"]
+    }),
+    finding({
+      finding_id: "ios_mgmt",
+      title: "Management deviation",
+      technical_rationale: "legacy management exception",
+      related_devices: ["ios-01"]
+    })
+  ];
+  const result = applyExclusions(findings, [{
+    id: "asa-management",
+    keywords: ["management", "legacy"],
+    reason: "ASA exception only.",
+    source: "manual",
+    appliesTo: ["asa"]
+  }], { deviceOsByName: { "asa-01": "asa", "ios-01": "ios" } });
+
+  assert.deepEqual(result.suppressed.map((item) => item.finding.finding_id), ["asa_mgmt"]);
+  assert.deepEqual(result.kept.map((item) => item.finding_id), ["ios_mgmt"]);
+});
+
+test("legacy playbook items without appliesTo normalize to all", () => {
+  const normalized = normalizeScopePlaybook({
+    scopeId: "configuration",
+    criteria: [{ id: "legacy-criterion", aspect: "Legacy", guidance: "Legacy" }],
+    expected: [{ id: "legacy-expected", title: "Legacy", description: "", severityHint: "low", exampleRationale: "" }],
+    exclusions: [{ id: "legacy-exclusion", keywords: ["legacy"], reason: "Legacy", source: "manual" }]
+  } as any);
+
+  assert.deepEqual(normalized.criteria[0].appliesTo, ["all"]);
+  assert.deepEqual(normalized.expected[0].appliesTo, ["all"]);
+  assert.deepEqual(normalized.exclusions[0].appliesTo, ["all"]);
 });
 
 test("buildPlaybookPromptSection includes criteria and expected findings", () => {
@@ -126,14 +205,16 @@ function playbook(): Pick<ScopePlaybook, "criteria" | "expected"> {
     criteria: [{
       id: "criterion-stp",
       aspect: "Spanning-tree",
-      guidance: "Revisar raiz STP, PortFast y BPDU Guard."
+      guidance: "Revisar raiz STP, PortFast y BPDU Guard.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
     }],
     expected: [{
       id: "expected-stp",
       title: "STP root no deseado",
       description: "Root bridge inesperado para el dominio de capa 2.",
       severityHint: "medium",
-      exampleRationale: "La prioridad observada no coincide con el rol esperado del equipo."
+      exampleRationale: "La prioridad observada no coincide con el rol esperado del equipo.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
     }]
   };
 }
