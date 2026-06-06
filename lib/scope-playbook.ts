@@ -60,19 +60,103 @@ export const defaultConfigurationScopePlaybook: ScopePlaybook = {
     {
       id: "cfg-spanning-tree",
       aspect: "Spanning-tree y switching",
-      guidance: "Evalua STP root/priority, PortFast/BPDU Guard, trunking, VLANs, port-channel y consistencia de capa 2 contra el rol del equipo.",
+      guidance: "Evalua modo STP, root/secondary root por VLAN, prioridad no default en equipos core/distribucion, consistencia de VLANs y coherencia con el rol del equipo.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "cfg-stp-edge-protection",
+      aspect: "Proteccion STP en puertos edge",
+      guidance: "Verifica PortFast/edge-port solo en puertos de acceso hacia hosts y BPDU Guard habilitado globalmente o por interfaz; detecta BPDU Filter usado para ocultar BPDUs salvo excepcion documentada.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "cfg-stp-root-loop-guard",
+      aspect: "Root Guard, Loop Guard y proteccion contra loops",
+      guidance: "Evalua Root Guard en puertos hacia acceso/edge donde no debe aparecer un root superior, Loop Guard en enlaces no-designated/root/alternate criticos y coherencia con el diseno STP.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "cfg-udld",
+      aspect: "UDLD en enlaces de fibra o punto a punto",
+      guidance: "Evalua UDLD normal/aggressive en enlaces switch-switch, fibra, uplinks, port-channel members y enlaces donde una falla unidireccional podria producir loops o blackholing.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "cfg-trunk-hardening",
+      aspect: "Hardening de trunks y VLANs",
+      guidance: "Evalua native VLAN no usada, tagging de native VLAN donde aplique, DTP deshabilitado, lista allowed VLAN explicita, pruning razonado y ausencia de VLAN 1 para trafico de usuario/gestion.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "cfg-access-port-controls",
+      aspect: "Controles de puertos de acceso",
+      guidance: "Evalua switchport mode access, VLAN asignada, PortFast/BPDU Guard, storm-control, deshabilitacion de puertos no usados y descripcion de interfaces de acceso criticas.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "cfg-port-channel",
+      aspect: "Port-channel, LACP y consistencia de miembros",
+      guidance: "Evalua que los EtherChannel/port-channel usen LACP cuando sea posible, tengan miembros consistentes en velocidad/duplex/trunk/VLAN/STP, y no mezclen configuraciones incompatibles.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "cfg-vpc-mlag-stack",
+      aspect: "vPC/MLAG/StackWise/Virtual Switching",
+      guidance: "En Nexus evalua vPC domain, peer-link, peer-keepalive, orphan ports, consistency parameters y role priority; en Catalyst evalua StackWise/StackWise Virtual/VSS y dual-active detection si hay evidencia.",
       appliesTo: ["ios", "ios-xe", "nxos"]
     },
     {
       id: "cfg-routing-protocols",
       aspect: "Protocolos de routing",
-      guidance: "Evalua OSPF, BGP, EIGRP, rutas estaticas, redistribucion, timers, vecinos y consistencia entre configuracion y estado observado.",
+      guidance: "Evalua OSPF, BGP, EIGRP, rutas estaticas, redistribucion, timers, vecinos, passive-interface, summarization y consistencia entre configuracion y estado observado.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "cfg-routing-redistribution",
+      aspect: "Redistribucion y control de rutas",
+      guidance: "Evalua redistribucion entre protocolos con route-map/prefix-list/tagging, filtros de entrada/salida, rutas por defecto condicionadas y riesgo de leaks o loops de routing.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "cfg-routing-adjacency-hardening",
+      aspect: "Proteccion de adyacencias de routing",
+      guidance: "Evalua autenticacion OSPF/EIGRP/BGP cuando aplique, TTL security/GTSM para eBGP, vecinos explicitamente definidos, interfaces pasivas y control de origen de sesiones.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "cfg-first-hop-redundancy",
+      aspect: "Redundancia de gateway",
+      guidance: "Evalua HSRP/VRRP/GLBP con prioridades intencionales, preempt controlado, tracking de uplinks/rutas criticas y consistencia de VIPs entre pares.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "cfg-management-plane",
+      aspect: "Plano de administracion",
+      guidance: "Evalua SSH en lugar de Telnet, AAA/TACACS/RADIUS, usuarios locales de respaldo, access-class/ACL de gestion, exec-timeout, privilegios, banners y ausencia de servicios inseguros innecesarios.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "cfg-snmp",
+      aspect: "SNMP y telemetria basica",
+      guidance: "Evalua preferencia por SNMPv3, comunidades SNMPv2 restringidas por ACL cuando existan, traps relevantes, contact/location y ausencia de comunidades por defecto o lectura amplia.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "cfg-logging",
+      aspect: "Logging y timestamps",
+      guidance: "Evalua service timestamps/logging timestamps, logging buffered razonable, syslog remoto, severidad adecuada, origen de logs, persistencia y consistencia con NTP/timezone.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "cfg-ntp-time",
+      aspect: "NTP, timezone y reloj",
+      guidance: "Evalua NTP con servidores definidos, autenticacion cuando aplique, timezone/clock summer-time coherente, source-interface y ausencia de equipos sin sincronizacion horaria.",
       appliesTo: ["all"]
     },
     {
       id: "cfg-cdp-lldp",
       aspect: "Descubrimiento CDP/LLDP",
-      guidance: "Evalua si CDP/LLDP esta habilitado o deshabilitado de forma coherente con politicas de visibilidad, seguridad y soporte operacional.",
+      guidance: "Evalua CDP/LLDP como decision explicita: deshabilitado en bordes no confiables, Internet/perimetro y puertos de usuario; permitido solo donde soporte operacion/topologia y exista justificacion.",
       appliesTo: ["ios", "ios-xe", "nxos"]
     },
     {
@@ -80,6 +164,48 @@ export const defaultConfigurationScopePlaybook: ScopePlaybook = {
       aspect: "Line VTY y administracion",
       guidance: "Evalua line vty, SSH/Telnet, AAA, SNMP, logging, NTP, banners y controles de administracion sin duplicar hallazgos de seguridad salvo que sean desviaciones operativas de configuracion.",
       appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "cfg-interface-description-standard",
+      aspect: "Estandar de interfaces y documentacion operacional",
+      guidance: "Evalua descripciones de interfaces, shutdown intencional en puertos no usados, coherencia de speed/duplex/MTU, MTU jumbo donde aplique y consistencia de nombres/roles.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "cfg-resiliency-features",
+      aspect: "Funciones de resiliencia de plataforma",
+      guidance: "Evalua NSF/SSO/NSR, graceful restart, BFD, object tracking, dual-active detection, supervisor redundancy y configuraciones HA soportadas por la plataforma cuando aparezcan en evidencia.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "cfg-qos-control-plane",
+      aspect: "QoS y control plane",
+      guidance: "Evalua CoPP/control-plane policing, QoS de control/voz/critical apps, trust boundary, service-policy aplicado y ausencia de politicas que puedan dejar sin proteccion el CPU.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "cfg-asa-management",
+      aspect: "ASA - administracion y acceso de gestion",
+      guidance: "Evalua SSH/ASDM/HTTP management restringido por interfaz y redes autorizadas, AAA, usuarios locales de respaldo, management-access, logging, NTP y SNMP seguro.",
+      appliesTo: ["asa"]
+    },
+    {
+      id: "cfg-asa-nat-acl-objects",
+      aspect: "ASA - NAT, ACLs y objetos",
+      guidance: "Evalua orden y especificidad de NAT/ACL, objetos duplicados u obsoletos, any/any innecesario, reglas sombra, nombres descriptivos y coherencia entre object-groups y politicas.",
+      appliesTo: ["asa"]
+    },
+    {
+      id: "cfg-asa-failover",
+      aspect: "ASA - failover y alta disponibilidad",
+      guidance: "Evalua failover active/standby o clustering cuando exista, interfaces de failover/stateful, monitoreo de interfaces, version/config sync y consistencia de parametros HA.",
+      appliesTo: ["asa"]
+    },
+    {
+      id: "cfg-nxos-features",
+      aspect: "NX-OS - feature set y servicios habilitados",
+      guidance: "Evalua feature enablement necesario y minimo, NX-OS management VRF, interface-vlan/hsrp/vpc/lacp/nxapi segun uso, y servicios habilitados sin consumo evidente.",
+      appliesTo: ["nxos"]
     },
     {
       id: "cfg-standard-deviation",
@@ -98,6 +224,70 @@ export const defaultConfigurationScopePlaybook: ScopePlaybook = {
       appliesTo: ["ios", "ios-xe", "nxos"]
     },
     {
+      id: "expected-stp-default-root",
+      title: "Root STP no controlado o prioridad default",
+      description: "VLANs sin root/backup root predecible o switches de acceso/periferia con prioridad capaz de disputar el root bridge.",
+      severityHint: "medium",
+      exampleRationale: "El equipo conserva prioridad STP default o una prioridad no alineada al rol, por lo que una reconvergencia puede elegir un root no deseado.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "expected-bpdu-guard-missing",
+      title: "Puertos edge sin BPDU Guard efectivo",
+      description: "Puertos de acceso/PortFast sin BPDU Guard global o por interfaz, exponiendo el dominio L2 a switches no autorizados.",
+      severityHint: "medium",
+      exampleRationale: "La configuracion muestra PortFast/edge sin proteccion BPDU Guard equivalente, lo que puede permitir loops por conexion accidental de un switch.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "expected-bpdu-filter-risk",
+      title: "BPDU Filter usado en puertos sin excepcion clara",
+      description: "BPDU Filter oculta BPDUs y puede impedir que STP detecte una topologia peligrosa si se usa fuera de casos controlados.",
+      severityHint: "high",
+      exampleRationale: "La evidencia muestra BPDU Filter aplicado donde no hay justificacion de excepcion, reduciendo la capacidad de STP para proteger contra loops.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "expected-root-loop-guard-gap",
+      title: "Falta de Root Guard o Loop Guard en enlaces criticos",
+      description: "Enlaces hacia acceso, distribucion o topologias redundantes sin guardas STP apropiadas para prevenir root no deseado o loops por BPDUs perdidos.",
+      severityHint: "medium",
+      exampleRationale: "La configuracion no evidencia Root Guard/Loop Guard en puertos donde el rol del equipo sugiere que deberia proteger la topologia STP.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "expected-udld-gap",
+      title: "UDLD ausente en enlaces punto a punto criticos",
+      description: "Enlaces de fibra, uplinks o miembros de port-channel sin UDLD normal/aggressive donde una falla unidireccional tendria impacto.",
+      severityHint: "medium",
+      exampleRationale: "El enlace critico no muestra UDLD habilitado, por lo que una falla unidireccional podria derivar en blackholing o loop de capa 2.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "expected-trunk-hardening-gap",
+      title: "Trunk con controles VLAN incompletos",
+      description: "Trunks con native VLAN default/no etiquetada, allowed VLAN amplia, DTP activo o uso innecesario de VLAN 1.",
+      severityHint: "medium",
+      exampleRationale: "La evidencia muestra trunking permisivo o defaults de VLAN que amplian el dominio de falla y dificultan control operacional.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "expected-port-channel-inconsistency",
+      title: "Inconsistencia en port-channel o LACP",
+      description: "Miembros de port-channel con parametros incompatibles, LACP ausente donde se espera negociacion, o trunk/VLAN/STP distinto entre miembros.",
+      severityHint: "medium",
+      exampleRationale: "Los miembros del agregado no comparten parametros criticos, lo que puede causar suspension, balanceo incorrecto o degradacion de redundancia.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "expected-vpc-stack-ha-deviation",
+      title: "Desviacion en vPC/StackWise/VSS o HA de switching",
+      description: "Parametros HA de switching incompletos o inconsistentes: peer-link/keepalive, role priority, orphan ports, dual-active detection o consistencia de stack.",
+      severityHint: "high",
+      exampleRationale: "La configuracion HA del par/sistema no evidencia controles esperados para evitar split-brain, perdida de peer o aislamiento de miembros.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
       id: "expected-routing-deviation",
       title: "Desviacion en routing o control plane",
       description: "Protocolos, vecinos, rutas, redistribucion o timers configurados de forma incompleta o inconsistente.",
@@ -106,12 +296,116 @@ export const defaultConfigurationScopePlaybook: ScopePlaybook = {
       appliesTo: ["all"]
     },
     {
+      id: "expected-route-leak-risk",
+      title: "Riesgo de route leak por redistribucion sin control",
+      description: "Redistribucion entre protocolos o rutas default sin filtros, tags, route-map o limites claros.",
+      severityHint: "high",
+      exampleRationale: "La evidencia muestra redistribucion amplia sin controles visibles, elevando el riesgo de fuga de rutas o loops de control-plane.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "expected-routing-neighbor-protection-gap",
+      title: "Vecinos de routing sin proteccion o alcance controlado",
+      description: "Sesiones OSPF/EIGRP/BGP sin autenticacion, interfaces no pasivas o vecinos BGP sin restricciones esperadas.",
+      severityHint: "medium",
+      exampleRationale: "La configuracion permite adyacencias o sesiones de routing sin controles que limiten origen, autenticacion o alcance operacional.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "expected-fhrp-tracking-gap",
+      title: "Gateway redundante sin tracking efectivo",
+      description: "HSRP/VRRP/GLBP sin tracking de uplinks/rutas criticas, prioridades inconsistentes o preempt no alineado al diseno.",
+      severityHint: "medium",
+      exampleRationale: "La configuracion FHRP no evidencia tracking de condiciones de salida, por lo que el gateway activo puede mantenerse aun sin conectividad util.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
       id: "expected-management-deviation",
       title: "Desviacion de administracion y gestion",
       description: "Configuracion de line vty, AAA, SNMP, logging o NTP que reduce mantenibilidad o control operativo.",
       severityHint: "medium",
       exampleRationale: "La evidencia de running-config muestra parametros de administracion que no siguen el estandar operativo esperado.",
       appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "expected-legacy-management-service",
+      title: "Servicio de administracion inseguro o no restringido",
+      description: "Telnet, HTTP plano, SNMP comunitario amplio, line vty sin ACL o gestion permitida desde redes no acotadas.",
+      severityHint: "high",
+      exampleRationale: "La configuracion expone administracion sin controles suficientes de protocolo, origen o autenticacion centralizada.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-cdp-lldp-exposure",
+      title: "CDP/LLDP expuesto fuera de enlaces confiables",
+      description: "CDP o LLDP habilitado en interfaces de usuario, perimetro, Internet, DMZ o enlaces donde revela informacion innecesaria.",
+      severityHint: "medium",
+      exampleRationale: "El protocolo de descubrimiento esta habilitado en una interfaz que no parece requerirlo para operacion y puede revelar plataforma, version o vecinos.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "expected-logging-ntp-gap",
+      title: "Logging o sincronizacion horaria incompleta",
+      description: "Logs sin timestamps, sin syslog remoto, severidad insuficiente, NTP ausente o timezone inconsistente.",
+      severityHint: "medium",
+      exampleRationale: "La evidencia no muestra configuracion suficiente para correlacionar eventos de forma confiable durante troubleshooting o investigacion.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-snmp-weakness",
+      title: "SNMP debil o sin restriccion adecuada",
+      description: "Uso de SNMPv2/community sin ACL, comunidades genericas, ausencia de SNMPv3 o traps relevantes.",
+      severityHint: "medium",
+      exampleRationale: "La configuracion SNMP observada depende de comunidades o carece de restricciones visibles de origen, aumentando riesgo de exposicion o baja trazabilidad.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-unused-interface-risk",
+      title: "Interfaces no usadas sin control operacional",
+      description: "Interfaces sin descripcion, no administrativamente apagadas o con parametros default que pueden habilitar conexiones no controladas.",
+      severityHint: "low",
+      exampleRationale: "La configuracion no evidencia shutdown/descripcion/estandar en puertos no usados o ambiguos, reduciendo control operacional.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-control-plane-policy-gap",
+      title: "Control plane sin politica de proteccion visible",
+      description: "Ausencia de CoPP/control-plane policing, service-policy o controles equivalentes para proteger CPU ante trafico de control inesperado.",
+      severityHint: "medium",
+      exampleRationale: "La configuracion no muestra proteccion del control plane en una plataforma donde el rol o exposicion la haria recomendable.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "expected-asa-management-exposure",
+      title: "ASA con gestion no suficientemente restringida",
+      description: "SSH/ASDM/HTTP/SNMP/logging/NTP en ASA configurados sin origen acotado, autenticacion robusta o parametros operativos esperados.",
+      severityHint: "high",
+      exampleRationale: "La configuracion ASA permite o sugiere gestion desde origenes amplios o sin controles operativos suficientes.",
+      appliesTo: ["asa"]
+    },
+    {
+      id: "expected-asa-policy-hygiene",
+      title: "ASA con higiene deficiente de NAT/ACL/objetos",
+      description: "Objetos duplicados, reglas any/any, NAT/ACL sombra, object-groups obsoletos o politica dificil de auditar.",
+      severityHint: "medium",
+      exampleRationale: "La evidencia muestra reglas u objetos que reducen claridad, pueden ocultar permisos excesivos o dificultan operacion segura del firewall.",
+      appliesTo: ["asa"]
+    },
+    {
+      id: "expected-asa-failover-gap",
+      title: "ASA sin failover consistente o monitoreo HA incompleto",
+      description: "Configuracion failover incompleta, interfaces no monitoreadas, stateful failover ausente donde se espera o diferencias entre pares.",
+      severityHint: "high",
+      exampleRationale: "La evidencia de HA/failover no muestra controles suficientes para continuidad o sincronizacion confiable entre firewalls.",
+      appliesTo: ["asa"]
+    },
+    {
+      id: "expected-nxos-feature-drift",
+      title: "NX-OS con features habilitados sin uso evidente",
+      description: "Features NX-OS habilitados sin configuracion asociada, servicios de administracion innecesarios o VRF de gestion inconsistente.",
+      severityHint: "low",
+      exampleRationale: "El equipo Nexus tiene features/servicios activos que no parecen estar respaldados por configuracion o necesidad operacional en la evidencia.",
+      appliesTo: ["nxos"]
     },
     {
       id: "expected-cross-device-standard",

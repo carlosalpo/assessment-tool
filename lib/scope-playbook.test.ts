@@ -8,6 +8,7 @@ import {
 import {
   applyExclusions,
   buildPlaybookPromptSection,
+  defaultConfigurationScopePlaybook,
   deviceOsFamily,
   isSupportedScopePlaybookScopeId,
   normalizeScopePlaybook,
@@ -172,6 +173,15 @@ test("buildPlaybookPromptSection includes criteria and expected findings", () =>
   assert.match(section, /Tipos de hallazgo esperados/);
   assert.match(section, /STP root no deseado/);
   assert.match(section, /Ejemplo de racional/);
+});
+
+test("default configuration playbook covers key platform best-practice areas", () => {
+  assert.ok(defaultConfigurationScopePlaybook.criteria.length >= 20);
+  assert.ok(defaultConfigurationScopePlaybook.expected.length >= 20);
+  assert.ok(defaultConfigurationScopePlaybook.criteria.some((item) => item.id === "cfg-udld" && item.appliesTo.includes("nxos")));
+  assert.ok(defaultConfigurationScopePlaybook.criteria.some((item) => item.id === "cfg-asa-management" && item.appliesTo.includes("asa")));
+  assert.ok(defaultConfigurationScopePlaybook.expected.some((item) => item.id === "expected-cdp-lldp-exposure"));
+  assert.ok(defaultConfigurationScopePlaybook.expected.some((item) => item.id === "expected-asa-policy-hygiene"));
 });
 
 test("playbook API allowlist accepts the four command-output scopes and rejects others", () => {
