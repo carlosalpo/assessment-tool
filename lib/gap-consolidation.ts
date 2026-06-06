@@ -34,13 +34,19 @@ export function dataGapSubject(finding: any): DataGapSubject | null {
 
   if (!text) return null;
 
+  if (hasRealProblemCue(text)) return null;
   if (/\bautoreferenciad\w*\b/.test(text) || /\bself[-\s]?neighbor\b/.test(text)) return "parsing_artifact";
 
+  const subject = dataGapSubjectFromText(text);
+  if (!subject || !hasDataAbsenceCue(text)) return null;
+  return subject;
+}
+
+function dataGapSubjectFromText(text: string): DataGapSubject | null {
   if (
     /\bneighbor coverage\b/.test(text) ||
     /\bcobertura de vecinos\b/.test(text) ||
-    /\bbaja cobertura\b/.test(text) ||
-    (/\b(cdp|lldp)\b/.test(text) && hasGapIndicator(text))
+    /\b(cdp|lldp)\b/.test(text)
   ) {
     return "neighbor_coverage";
   }
@@ -48,24 +54,12 @@ export function dataGapSubject(finding: any): DataGapSubject | null {
   if (
     /\bperformance metrics\b/.test(text) ||
     /\bhistorical performance data\b/.test(text) ||
-    /\bmetricas? (de )?(rendimiento|performance)\b/.test(text) ||
-    /\bsin metricas\b/.test(text) ||
-    (/\b(rendimiento|performance)\b/.test(text) && hasGapIndicator(text))
+    /\bmetricas? (de )?(rendimiento|performance)\b/.test(text)
   ) {
     return "performance_metrics";
   }
 
-  if (
-    /\bvisibilidad faltante\b/.test(text) ||
-    /\bfalta (de )?visibilidad\b/.test(text) ||
-    /\bsin monitoreo\b/.test(text) ||
-    /\bmissing monitoring\b/.test(text) ||
-    /\bmonitoring gap\b/.test(text) ||
-    (/\b(monitoreo|monitoring|visibilidad)\b/.test(text) && hasGapIndicator(text))
-  ) {
-    return "monitoring_gap";
-  }
-
+  if (/\b(monitoreo|monitoring|visibilidad)\b/.test(text)) return "monitoring_gap";
   return null;
 }
 
@@ -150,8 +144,12 @@ function buildConsolidatedFinding(group: GapGroup) {
   };
 }
 
-function hasGapIndicator(text: string) {
-  return /\b(falta|faltan|faltante|insuficient\w*|sin|missing|lack|lacks|no se encontro|no hay|ausencia|gap|brecha|cobertura|coverage|visibilidad|recoleccion)\b/.test(text);
+function hasDataAbsenceCue(text: string) {
+  return /\b(lack of|without|insufficient|missing|not collected|no disponible|falta de|falta|faltan|faltante|insuficient\w*|sin (metricas|datos|cobertura|monitoreo|visibilidad)|baja cobertura|no se (recolect|captur)\w*|ausencia|gap|brecha)\b/.test(text);
+}
+
+function hasRealProblemCue(text: string) {
+  return /\b(inestabil\w*|instability|exposici\w*|exposure|weak|inadequate|degrad\w*|misconfig\w*|vulnerab\w*|insegur\w*|flap\w*|down\b|error\w*|drop\w*|saturaci\w*)\b/.test(text);
 }
 
 function isCompositeFinding(finding: any) {

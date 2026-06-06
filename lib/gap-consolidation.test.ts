@@ -30,6 +30,41 @@ test("dataGapSubject classifies known data-gap subjects and ignores real finding
   })), null);
 });
 
+test("dataGapSubject avoids BankCo false positives for real findings", () => {
+  assert.equal(dataGapSubject(finding({
+    title: "Exposicion de estado de configuracion para servicios administrativos",
+    technical_rationale: "El estado expone servicios administrativos y requiere control de seguridad."
+  })), null);
+  assert.equal(dataGapSubject(finding({
+    title: "Inestabilidad en Los Vecinos de Enrutamiento",
+    technical_rationale: "Los vecinos de routing presentan inestabilidad operacional observada."
+  })), null);
+});
+
+test("dataGapSubject still detects genuine data collection gaps", () => {
+  assert.equal(dataGapSubject(finding({
+    title: "Critical Devices without Performance Metrics",
+    technical_rationale: "Historical performance data was not collected for critical devices."
+  })), "performance_metrics");
+  assert.equal(dataGapSubject(finding({
+    title: "Insufficient Neighbor Coverage",
+    technical_rationale: "The collection has insufficient neighbor coverage for topology validation."
+  })), "neighbor_coverage");
+  assert.equal(dataGapSubject(finding({
+    title: "Lack of LLDP Visibility for Neighbor Devices",
+    technical_rationale: "LLDP neighbor data is missing from the evidence set."
+  })), "neighbor_coverage");
+});
+
+test("dataGapSubject is deterministic for the same title and rationale", () => {
+  const input = finding({
+    title: "Critical Devices without Performance Metrics",
+    technical_rationale: "Historical performance data was not collected for critical devices."
+  });
+  const results = Array.from({ length: 5 }, () => dataGapSubject(input));
+  assert.deepEqual(results, ["performance_metrics", "performance_metrics", "performance_metrics", "performance_metrics", "performance_metrics"]);
+});
+
 test("normalizeGapFindings retags data gaps and leaves real and composite findings unchanged", () => {
   const gap = finding({
     finding_id: "gap_raw",
