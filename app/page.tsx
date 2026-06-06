@@ -187,6 +187,7 @@ type TopologyView = "relations" | "graph";
 type EvaluationArea = "topology" | "configuration" | "security" | "lifecycle" | "operations" | "logs";
 type AIEvaluationSubtab = "evaluation" | "findings" | "settings";
 type AISettingsSubtab = "playbook" | "guidelines" | "debug";
+type PlaybookScopeId = "configuration" | "security" | "evidence" | "performance";
 type PlaybookEditorSubtab = "criteria" | "expected" | "exclusions";
 type ScopePlaybookOsFamily = "all" | "ios" | "ios-xe" | "nxos" | "asa" | "unknown";
 type DeviceType = "switch" | "router" | "nexus-switch" | "aci" | "wireless-controller" | "firewall" | "other";
@@ -8067,7 +8068,7 @@ function AISettingsAdminTabs({ record, currentUser }: { record: AssessmentRecord
   const [activeSettingsSubtab, setActiveSettingsSubtab] = useState<AISettingsSubtab>("playbook");
   const settingsSubtabRefs = useRef<Partial<Record<AISettingsSubtab, HTMLButtonElement | null>>>({});
   const settingsSubtabs = [
-    { id: "playbook" as const, label: "Playbook - Configuracion", panelId: "ai-settings-subtab-panel-playbook" },
+    { id: "playbook" as const, label: "Playbooks", panelId: "ai-settings-subtab-panel-playbook" },
     { id: "guidelines" as const, label: "Guidelines de diseno - Topologia", panelId: "ai-settings-subtab-panel-guidelines" },
     { id: "debug" as const, label: "Debug OpenAI", panelId: "ai-settings-subtab-panel-debug" }
   ];
@@ -8119,7 +8120,7 @@ function AISettingsAdminTabs({ record, currentUser }: { record: AssessmentRecord
       </div>
 
       <div id="ai-settings-subtab-panel-playbook" role="tabpanel" aria-labelledby="ai-settings-subtab-playbook" hidden={activeSettingsSubtab !== "playbook"}>
-        <ScopePlaybookAdminPanel currentUser={currentUser} />
+        <ScopePlaybooksAdminPanel currentUser={currentUser} />
       </div>
 
       <div id="ai-settings-subtab-panel-guidelines" role="tabpanel" aria-labelledby="ai-settings-subtab-guidelines" hidden={activeSettingsSubtab !== "guidelines"}>
@@ -8945,7 +8946,107 @@ function TopologyDesignGuidelinesAdminPanel({ record, currentUser }: { record: A
   );
 }
 
-function ScopePlaybookAdminPanel({ currentUser }: { currentUser: AppUser }) {
+const playbookScopeTabs: Array<{ id: PlaybookScopeId; label: string; description: string }> = [
+  { id: "configuration", label: "Configuraciones", description: "Criterios y exclusiones para configuracion de equipos." },
+  { id: "security", label: "Seguridad", description: "Hardening, exposiciones administrativas y controles de seguridad." },
+  { id: "evidence", label: "Logs y Eventos", description: "Eventos, logs, recurrencia y brechas de evidencia operacional." },
+  { id: "performance", label: "Performance Análisis", description: "Metricas, capacidad, errores, drops y gaps de performance." }
+];
+
+function ScopePlaybooksAdminPanel({ currentUser }: { currentUser: AppUser }) {
+  const [activeScope, setActiveScope] = useState<PlaybookScopeId>("configuration");
+  const scopeTabRefs = useRef<Partial<Record<PlaybookScopeId, HTMLButtonElement | null>>>({});
+
+  function handleScopeTabKeyDown(event: React.KeyboardEvent<HTMLButtonElement>, currentIndex: number) {
+    if (!["ArrowRight", "ArrowLeft", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const lastIndex = playbookScopeTabs.length - 1;
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? lastIndex
+        : event.key === "ArrowRight"
+          ? currentIndex === lastIndex ? 0 : currentIndex + 1
+          : currentIndex === 0 ? lastIndex : currentIndex - 1;
+    const nextScope = playbookScopeTabs[nextIndex].id;
+    setActiveScope(nextScope);
+    window.requestAnimationFrame(() => scopeTabRefs.current[nextScope]?.focus());
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <ClipboardList size={16} className="text-primary" />
+          <div>
+            <h2 className="text-sm font-semibold">Playbooks</h2>
+            <p className="text-xs text-muted-foreground">Ajustes globales por ambito de salidas de comando.</p>
+          </div>
+        </div>
+        <Badge tone="info">Global</Badge>
+      </div>
+      <div className="space-y-4">
+        <div className="flex gap-1 overflow-x-auto border-b border-border pt-1" role="tablist" aria-label="Ambitos de playbook">
+          {playbookScopeTabs.map((tab, index) => {
+            const selected = activeScope === tab.id;
+            return (
+              <button
+                key={tab.id}
+                ref={(element) => {
+                  scopeTabRefs.current[tab.id] = element;
+                }}
+                id={`scope-playbook-scope-tab-${tab.id}`}
+                type="button"
+                role="tab"
+                aria-selected={selected}
+                aria-controls={`scope-playbook-scope-panel-${tab.id}`}
+                tabIndex={selected ? 0 : -1}
+                className={cn(
+                  "-mb-px inline-flex h-10 shrink-0 items-center rounded-t-md border px-3 text-sm font-medium outline-none transition focus:ring-2 focus:ring-primary/70",
+                  selected
+                    ? "border-border border-b-background bg-background text-foreground shadow-sm"
+                    : "border-transparent bg-muted/30 text-muted-foreground hover:border-border hover:bg-background/70 hover:text-foreground"
+                )}
+                onClick={() => setActiveScope(tab.id)}
+                onKeyDown={(event) => handleScopeTabKeyDown(event, index)}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
+        {playbookScopeTabs.map((scope) => (
+          <div
+            key={scope.id}
+            id={`scope-playbook-scope-panel-${scope.id}`}
+            role="tabpanel"
+            aria-labelledby={`scope-playbook-scope-tab-${scope.id}`}
+            hidden={activeScope !== scope.id}
+          >
+            <ScopePlaybookAdminPanel
+              currentUser={currentUser}
+              scopeId={scope.id}
+              scopeLabel={scope.label}
+              scopeDescription={scope.description}
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ScopePlaybookAdminPanel({
+  currentUser,
+  scopeId,
+  scopeLabel,
+  scopeDescription
+}: {
+  currentUser: AppUser;
+  scopeId: PlaybookScopeId;
+  scopeLabel: string;
+  scopeDescription: string;
+}) {
   const isAdmin = canManageUsers(currentUser);
   const [playbook, setPlaybook] = useState<ScopePlaybookResponse["playbook"] | null>(null);
   const [draft, setDraft] = useState<Pick<ScopePlaybookResponse["playbook"], "criteria" | "expected" | "exclusions">>({
@@ -8964,7 +9065,7 @@ function ScopePlaybookAdminPanel({ currentUser }: { currentUser: AppUser }) {
   const loadPlaybook = useCallback(async () => {
     if (!isAdmin) return;
     try {
-      const response = await fetchScopePlaybook(currentUser);
+      const response = await fetchScopePlaybook(scopeId, currentUser);
       setPlaybook(response.playbook);
       setDraft({
         criteria: response.playbook.criteria,
@@ -8975,7 +9076,7 @@ function ScopePlaybookAdminPanel({ currentUser }: { currentUser: AppUser }) {
     } catch (error) {
       setStatus({ state: "error", message: error instanceof Error ? error.message : "No se pudo cargar el playbook." });
     }
-  }, [currentUser, isAdmin]);
+  }, [currentUser, isAdmin, scopeId]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -8987,7 +9088,7 @@ function ScopePlaybookAdminPanel({ currentUser }: { currentUser: AppUser }) {
   async function savePlaybook() {
     setStatus({ state: "saving", message: "Guardando playbook..." });
     try {
-      const response = await updateScopePlaybook(draft, currentUser);
+      const response = await updateScopePlaybook(scopeId, draft, currentUser);
       setPlaybook(response.playbook);
       setDraft({
         criteria: response.playbook.criteria,
@@ -9006,9 +9107,9 @@ function ScopePlaybookAdminPanel({ currentUser }: { currentUser: AppUser }) {
   const visibleExpectedCount = draft.expected.filter((item) => playbookItemVisibleForFamily(item, playbookFamilyFilter)).length;
   const visibleExclusionCount = draft.exclusions.filter((item) => playbookItemVisibleForFamily(item, playbookFamilyFilter)).length;
   const playbookSubtabs = [
-    { id: "criteria" as const, label: "Criterios", count: visibleCriteriaCount, panelId: "scope-playbook-subtab-panel-criteria" },
-    { id: "expected" as const, label: "Hallazgos esperados", count: visibleExpectedCount, panelId: "scope-playbook-subtab-panel-expected" },
-    { id: "exclusions" as const, label: "Exclusiones", count: visibleExclusionCount, panelId: "scope-playbook-subtab-panel-exclusions" }
+    { id: "criteria" as const, label: "Criterios", count: visibleCriteriaCount, panelId: `scope-playbook-${scopeId}-subtab-panel-criteria` },
+    { id: "expected" as const, label: "Hallazgos esperados", count: visibleExpectedCount, panelId: `scope-playbook-${scopeId}-subtab-panel-expected` },
+    { id: "exclusions" as const, label: "Exclusiones", count: visibleExclusionCount, panelId: `scope-playbook-${scopeId}-subtab-panel-exclusions` }
   ];
 
   function handlePlaybookSubtabKeyDown(event: React.KeyboardEvent<HTMLButtonElement>, currentIndex: number) {
@@ -9055,12 +9156,12 @@ function ScopePlaybookAdminPanel({ currentUser }: { currentUser: AppUser }) {
           <ClipboardList size={16} className="text-primary" />
           <div>
             <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-sm font-semibold">Playbook - Configuracion</h2>
+              <h2 className="text-sm font-semibold">Playbook - {scopeLabel}</h2>
               <Badge tone="neutral">{playbook ? shortHash(playbook.hash) : "Cargando"}</Badge>
               <Badge tone="info">Global</Badge>
             </div>
             <p className="text-xs text-muted-foreground">
-              {playbook?.updatedAt ? `Actualizado ${formatDate(playbook.updatedAt)} por ${playbook.updatedBy ?? "admin"}` : "Criterios, hallazgos esperados y exclusiones para el scope configuration."}
+              {playbook?.updatedAt ? `Actualizado ${formatDate(playbook.updatedAt)} por ${playbook.updatedBy ?? "admin"}` : scopeDescription}
             </p>
           </div>
         </div>
@@ -9090,7 +9191,7 @@ function ScopePlaybookAdminPanel({ currentUser }: { currentUser: AppUser }) {
           </div>
         )}
         <div className="flex flex-wrap items-end justify-between gap-2 border-b border-border pt-1">
-          <div className="flex gap-1 overflow-x-auto" role="tablist" aria-label="Secciones del playbook de configuracion">
+          <div className="flex gap-1 overflow-x-auto" role="tablist" aria-label={`Secciones del playbook de ${scopeLabel}`}>
             {playbookSubtabs.map((tab, index) => {
               const selected = activePlaybookSubtab === tab.id;
               return (
@@ -9099,7 +9200,7 @@ function ScopePlaybookAdminPanel({ currentUser }: { currentUser: AppUser }) {
                   ref={(element) => {
                     playbookSubtabRefs.current[tab.id] = element;
                   }}
-                  id={`scope-playbook-subtab-${tab.id}`}
+                  id={`scope-playbook-${scopeId}-subtab-${tab.id}`}
                   type="button"
                   role="tab"
                   aria-selected={selected}
@@ -9139,9 +9240,9 @@ function ScopePlaybookAdminPanel({ currentUser }: { currentUser: AppUser }) {
         </label>
 
         <div
-          id="scope-playbook-subtab-panel-criteria"
+          id={`scope-playbook-${scopeId}-subtab-panel-criteria`}
           role="tabpanel"
-          aria-labelledby="scope-playbook-subtab-criteria"
+          aria-labelledby={`scope-playbook-${scopeId}-subtab-criteria`}
           className="rounded-b-md rounded-tr-md border border-t-0 border-border bg-background p-3"
           hidden={activePlaybookSubtab !== "criteria"}
         >
@@ -9154,9 +9255,9 @@ function ScopePlaybookAdminPanel({ currentUser }: { currentUser: AppUser }) {
         </div>
 
         <div
-          id="scope-playbook-subtab-panel-expected"
+          id={`scope-playbook-${scopeId}-subtab-panel-expected`}
           role="tabpanel"
-          aria-labelledby="scope-playbook-subtab-expected"
+          aria-labelledby={`scope-playbook-${scopeId}-subtab-expected`}
           className="rounded-b-md rounded-tr-md border border-t-0 border-border bg-background p-3"
           hidden={activePlaybookSubtab !== "expected"}
         >
@@ -9169,9 +9270,9 @@ function ScopePlaybookAdminPanel({ currentUser }: { currentUser: AppUser }) {
         </div>
 
         <div
-          id="scope-playbook-subtab-panel-exclusions"
+          id={`scope-playbook-${scopeId}-subtab-panel-exclusions`}
           role="tabpanel"
-          aria-labelledby="scope-playbook-subtab-exclusions"
+          aria-labelledby={`scope-playbook-${scopeId}-subtab-exclusions`}
           className="rounded-b-md rounded-tr-md border border-t-0 border-border bg-background p-3"
           hidden={activePlaybookSubtab !== "exclusions"}
         >
@@ -9746,12 +9847,13 @@ function AIReviewPanel({
   const canAppendReviewSuppression = Boolean(currentUser && canManageUsers(currentUser));
 
   async function suppressLikeFinding(finding: Finding) {
-    if (!currentUser || finding.category !== "configuration") return;
+    const playbookScopeId = playbookScopeIdForFinding(finding);
+    if (!currentUser || !playbookScopeId) return;
     setReviewSuppressionStatus({ state: "saving", message: "Creando exclusion en playbook..." });
     try {
-      await appendReviewSuppressionToScopePlaybook(finding, currentUser, record);
+      await appendReviewSuppressionToScopePlaybook(playbookScopeId, finding, currentUser, record);
       onUpdateFinding(finding.id, { status: "discarded" });
-      setReviewSuppressionStatus({ state: "idle", message: "Exclusion agregada al playbook de Configuracion." });
+      setReviewSuppressionStatus({ state: "idle", message: `Exclusion agregada al playbook de ${playbookScopeLabel(playbookScopeId)}.` });
     } catch (error) {
       setReviewSuppressionStatus({ state: "error", message: error instanceof Error ? error.message : "No se pudo crear la exclusion." });
     }
@@ -9832,7 +9934,7 @@ function AIReviewPanel({
                 key={findingRenderKey(finding, index)}
                 finding={finding}
                 onChange={(patch) => onUpdateFinding(finding.id, patch)}
-                onSuppressLike={canAppendReviewSuppression && finding.category === "configuration" ? () => void suppressLikeFinding(finding) : undefined}
+                onSuppressLike={canAppendReviewSuppression && playbookScopeIdForFinding(finding) ? () => void suppressLikeFinding(finding) : undefined}
                 suppressLikeBusy={reviewSuppressionStatus.state === "saving"}
               />
             ))}
@@ -13294,8 +13396,8 @@ async function deleteTopologyDesignGuideline(scopeKey: string, currentUser: AppU
   return payload as TopologyDesignGuidelineResponse;
 }
 
-async function fetchScopePlaybook(currentUser: AppUser): Promise<ScopePlaybookResponse> {
-  const response = await fetch("/api/ai-analysis/playbook?scopeId=configuration", {
+async function fetchScopePlaybook(scopeId: PlaybookScopeId, currentUser: AppUser): Promise<ScopePlaybookResponse> {
+  const response = await fetch(`/api/ai-analysis/playbook?scopeId=${encodeURIComponent(scopeId)}`, {
     cache: "no-store",
     headers: { "x-user-email": currentUser.email }
   });
@@ -13305,6 +13407,7 @@ async function fetchScopePlaybook(currentUser: AppUser): Promise<ScopePlaybookRe
 }
 
 async function updateScopePlaybook(
+  scopeId: PlaybookScopeId,
   draft: Pick<ScopePlaybookResponse["playbook"], "criteria" | "expected" | "exclusions">,
   currentUser: AppUser
 ): Promise<ScopePlaybookResponse> {
@@ -13315,7 +13418,7 @@ async function updateScopePlaybook(
       "x-user-email": currentUser.email
     },
     body: JSON.stringify({
-      scopeId: "configuration",
+      scopeId,
       criteria: draft.criteria,
       expected: draft.expected,
       exclusions: draft.exclusions,
@@ -13327,7 +13430,7 @@ async function updateScopePlaybook(
   return payload as ScopePlaybookResponse;
 }
 
-async function appendReviewSuppressionToScopePlaybook(finding: Finding, currentUser: AppUser, record: AssessmentRecord): Promise<ScopePlaybookResponse> {
+async function appendReviewSuppressionToScopePlaybook(scopeId: PlaybookScopeId, finding: Finding, currentUser: AppUser, record: AssessmentRecord): Promise<ScopePlaybookResponse> {
   const appliesTo = inferFindingOsFamilies(finding, record);
   const response = await fetch("/api/ai-analysis/playbook", {
     method: "POST",
@@ -13336,7 +13439,7 @@ async function appendReviewSuppressionToScopePlaybook(finding: Finding, currentU
       "x-user-email": currentUser.email
     },
     body: JSON.stringify({
-      scopeId: "configuration",
+      scopeId,
       finding: {
         title: finding.title,
         finding_type: finding.aiMetadata?.findingType
@@ -13349,6 +13452,22 @@ async function appendReviewSuppressionToScopePlaybook(finding: Finding, currentU
   const payload = await response.json();
   if (!response.ok) throw new Error(payload?.error || "No se pudo crear la exclusion.");
   return payload as ScopePlaybookResponse;
+}
+
+function playbookScopeIdForFinding(finding: Finding): PlaybookScopeId | null {
+  const serviceOffer = String(finding.serviceOffer ?? "").toLowerCase();
+  if (serviceOffer.includes("configuracion") || serviceOffer.includes("configuration")) return "configuration";
+  if (serviceOffer.includes("seguridad") || serviceOffer.includes("security")) return "security";
+  if (serviceOffer.includes("evidencia") || serviceOffer.includes("evidence") || serviceOffer.includes("logs")) return "evidence";
+  if (serviceOffer.includes("performance")) return "performance";
+  if (finding.aiMetadata?.domain === "performance") return "performance";
+  if (finding.category === "configuration") return "configuration";
+  if (finding.category === "security") return "security";
+  return null;
+}
+
+function playbookScopeLabel(scopeId: PlaybookScopeId) {
+  return playbookScopeTabs.find((tab) => tab.id === scopeId)?.label ?? scopeId;
 }
 
 function designGuidelineSourceLabel(source: DesignGuidelineSource) {

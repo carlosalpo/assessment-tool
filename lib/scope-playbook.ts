@@ -2,6 +2,14 @@ import { createHash } from "node:crypto";
 import type { RiskLevel } from "./types.ts";
 
 export type OsFamily = "all" | "ios" | "ios-xe" | "nxos" | "asa" | "unknown";
+export type SupportedScopePlaybookScopeId = "configuration" | "security" | "evidence" | "performance";
+
+export const supportedScopePlaybookScopeIds: SupportedScopePlaybookScopeId[] = [
+  "configuration",
+  "security",
+  "evidence",
+  "performance"
+];
 
 export type Criterion = {
   id: string;
@@ -130,13 +138,26 @@ export function isScopePlaybookEnabled() {
   return process.env.AI_SCOPE_PLAYBOOK === "1";
 }
 
+export function isSupportedScopePlaybookScopeId(scopeId: string): scopeId is SupportedScopePlaybookScopeId {
+  return supportedScopePlaybookScopeIds.includes(scopeId as SupportedScopePlaybookScopeId);
+}
+
+export function emptyScopePlaybook(scopeId: SupportedScopePlaybookScopeId): ScopePlaybook {
+  return {
+    scopeId,
+    criteria: [],
+    expected: [],
+    exclusions: []
+  };
+}
+
 export function buildPlaybookPromptSection(playbook: Pick<ScopePlaybook, "criteria" | "expected">) {
   const criteria = normalizeCriteria(playbook.criteria);
   const expected = normalizeExpected(playbook.expected);
   if (criteria.length === 0 && expected.length === 0) return "";
 
   return [
-    "Scope Playbook - Configuracion:",
+    `Scope Playbook${"scopeId" in playbook ? ` - ${(playbook as Pick<ScopePlaybook, "scopeId">).scopeId}` : ""}:`,
     "Evalua estos aspectos:",
     ...criteria.map((criterion) => `- ${criterion.aspect} [appliesTo: ${criterion.appliesTo.join(", ")}]: ${criterion.guidance}`),
     "Tipos de hallazgo esperados (referencia, no inventes si falta evidencia):",

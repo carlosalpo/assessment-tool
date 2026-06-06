@@ -2,6 +2,8 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "./prisma.ts";
 import {
   defaultConfigurationScopePlaybook,
+  emptyScopePlaybook,
+  isSupportedScopePlaybookScopeId,
   normalizeScopePlaybook,
   scopePlaybookHash,
   type ExclusionRule,
@@ -13,21 +15,24 @@ export type ScopePlaybookSnapshot = ScopePlaybook & {
 };
 
 export async function getScopePlaybook(scopeId: string): Promise<ScopePlaybookSnapshot> {
+  if (!isSupportedScopePlaybookScopeId(scopeId)) throw new Error(`Scope playbook no soportado: ${scopeId}.`);
   const record = await prisma.scopePlaybook.findUnique({ where: { scopeId } });
-  if (!record && scopeId === "configuration") {
+  if (!record) {
+    const initialPlaybook = scopeId === "configuration"
+      ? defaultConfigurationScopePlaybook
+      : emptyScopePlaybook(scopeId);
     const seeded = await prisma.scopePlaybook.upsert({
       where: { scopeId },
-      create: scopePlaybookToPrisma(defaultConfigurationScopePlaybook),
+      create: scopePlaybookToPrisma(initialPlaybook),
       update: {}
     });
     return scopePlaybookSnapshot(seeded);
   }
-  if (!record) throw new Error(`Playbook no encontrado para ${scopeId}.`);
   return scopePlaybookSnapshot(record);
 }
 
 export async function upsertScopePlaybook(input: ScopePlaybook & { updatedBy?: string | null }): Promise<ScopePlaybookSnapshot> {
-  if (input.scopeId !== "configuration") throw new Error("El prototipo solo permite editar el playbook de configuration.");
+  if (!isSupportedScopePlaybookScopeId(input.scopeId)) throw new Error(`Scope playbook no soportado: ${input.scopeId}.`);
   const playbook = normalizeScopePlaybook(input);
   const record = await prisma.scopePlaybook.upsert({
     where: { scopeId: playbook.scopeId },
@@ -47,7 +52,7 @@ export async function appendScopePlaybookExclusion(input: {
   rule: ExclusionRule;
   updatedBy?: string | null;
 }): Promise<ScopePlaybookSnapshot> {
-  if (input.scopeId !== "configuration") throw new Error("El prototipo solo permite exclusiones en configuration.");
+  if (!isSupportedScopePlaybookScopeId(input.scopeId)) throw new Error(`Scope playbook no soportado: ${input.scopeId}.`);
   const current = await getScopePlaybook(input.scopeId);
   return upsertScopePlaybook({
     ...current,

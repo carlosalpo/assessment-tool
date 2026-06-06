@@ -1,12 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { hashScopeInput } from "./ai-analysis-jobs.ts";
+import {
+  applyScopePlaybookExclusions,
+  buildScopePlaybookSystemPrompt,
+  hashScopeInput
+} from "./ai-analysis-jobs.ts";
 import {
   applyExclusions,
   buildPlaybookPromptSection,
   deviceOsFamily,
+  isSupportedScopePlaybookScopeId,
   normalizeScopePlaybook,
   resolveDevicePlaybook,
+  supportedScopePlaybookScopeIds,
   type ExclusionRule,
   type ScopePlaybook
 } from "./scope-playbook.ts";
@@ -168,22 +174,83 @@ test("buildPlaybookPromptSection includes criteria and expected findings", () =>
   assert.match(section, /Ejemplo de racional/);
 });
 
-test("configuration input hash changes with playbook hash only when flag is enabled", () => {
+test("playbook API allowlist accepts the four command-output scopes and rejects others", () => {
+  assert.deepEqual(supportedScopePlaybookScopeIds, ["configuration", "security", "evidence", "performance"]);
+  assert.equal(isSupportedScopePlaybookScopeId("configuration"), true);
+  assert.equal(isSupportedScopePlaybookScopeId("security"), true);
+  assert.equal(isSupportedScopePlaybookScopeId("evidence"), true);
+  assert.equal(isSupportedScopePlaybookScopeId("performance"), true);
+  assert.equal(isSupportedScopePlaybookScopeId("operations"), false);
+  assert.equal(isSupportedScopePlaybookScopeId("topology"), false);
+});
+
+test("scope playbook prompt is injected for all supported per-device scopes", () => {
+  const previous = process.env.AI_SCOPE_PLAYBOOK;
+  try {
+    process.env.AI_SCOPE_PLAYBOOK = "1";
+    for (const scopeId of supportedScopePlaybookScopeIds) {
+      const prompt = buildScopePlaybookSystemPrompt(scopeId, normalizeScopePlaybook({
+        scopeId,
+        criteria: [{ id: `${scopeId}-criterion`, aspect: `${scopeId} aspect`, guidance: `${scopeId} guidance`, appliesTo: ["all"] }],
+        expected: [{ id: `${scopeId}-expected`, title: `${scopeId} expected`, description: "Expected", severityHint: "medium", exampleRationale: "Rationale", appliesTo: ["all"] }],
+        exclusions: []
+      }));
+      assert.match(prompt ?? "", new RegExp(`${scopeId} aspect`));
+      assert.match(prompt ?? "", new RegExp(`${scopeId} expected`));
+    }
+  } finally {
+    process.env.AI_SCOPE_PLAYBOOK = previous;
+  }
+});
+
+test("scope playbook exclusions apply for security evidence and performance with appliesTo", () => {
+  const previous = process.env.AI_SCOPE_PLAYBOOK;
+  try {
+    process.env.AI_SCOPE_PLAYBOOK = "1";
+    for (const scopeId of ["security", "evidence", "performance"] as const) {
+      const playbook = normalizeScopePlaybook({
+        scopeId,
+        exclusions: [{
+          id: `${scopeId}-ios-suppress`,
+          keywords: ["known", "noise"],
+          reason: "Known noise for IOS only.",
+          source: "manual",
+          appliesTo: ["ios"]
+        }]
+      });
+      const result = applyScopePlaybookExclusions(scopeId, [
+        finding({ finding_id: `${scopeId}_ios`, title: "Known signal", technical_rationale: "Known noise.", related_devices: ["ios-01"] }),
+        finding({ finding_id: `${scopeId}_asa`, title: "Known signal", technical_rationale: "Known noise.", related_devices: ["asa-01"] })
+      ], playbook, { "ios-01": "ios", "asa-01": "asa" });
+
+      assert.deepEqual(result.suppressed.map((item) => item.finding.finding_id), [`${scopeId}_ios`]);
+      assert.deepEqual(result.kept.map((item) => item.finding_id), [`${scopeId}_asa`]);
+    }
+  } finally {
+    process.env.AI_SCOPE_PLAYBOOK = previous;
+  }
+});
+
+test("supported scope input hash changes with playbook hash only when flag is enabled", () => {
   const previous = process.env.AI_SCOPE_PLAYBOOK;
   try {
     process.env.AI_SCOPE_PLAYBOOK = "";
-    const offA = hashScopeInput(record(), "configuration", { scopePlaybookHash: "playbook-a" });
-    const offB = hashScopeInput(record(), "configuration", { scopePlaybookHash: "playbook-b" });
-    assert.equal(offA, offB);
+    for (const scopeId of supportedScopePlaybookScopeIds) {
+      const offA = hashScopeInput(record(), scopeId, { scopePlaybookHash: "playbook-a" });
+      const offB = hashScopeInput(record(), scopeId, { scopePlaybookHash: "playbook-b" });
+      assert.equal(offA, offB);
+    }
 
     process.env.AI_SCOPE_PLAYBOOK = "1";
-    const onA = hashScopeInput(record(), "configuration", { scopePlaybookHash: "playbook-a" });
-    const onB = hashScopeInput(record(), "configuration", { scopePlaybookHash: "playbook-b" });
-    assert.notEqual(onA, onB);
+    for (const scopeId of supportedScopePlaybookScopeIds) {
+      const onA = hashScopeInput(record(), scopeId, { scopePlaybookHash: "playbook-a" });
+      const onB = hashScopeInput(record(), scopeId, { scopePlaybookHash: "playbook-b" });
+      assert.notEqual(onA, onB);
+    }
 
-    const securityA = hashScopeInput(record(), "security", { scopePlaybookHash: "playbook-a" });
-    const securityB = hashScopeInput(record(), "security", { scopePlaybookHash: "playbook-b" });
-    assert.equal(securityA, securityB);
+    const topologyA = hashScopeInput(record(), "topology", { scopePlaybookHash: "playbook-a" });
+    const topologyB = hashScopeInput(record(), "topology", { scopePlaybookHash: "playbook-b" });
+    assert.equal(topologyA, topologyB);
   } finally {
     process.env.AI_SCOPE_PLAYBOOK = previous;
   }

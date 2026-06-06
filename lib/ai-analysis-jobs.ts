@@ -50,10 +50,13 @@ import {
   applyExclusions,
   buildPlaybookPromptSection,
   isScopePlaybookEnabled,
+  isSupportedScopePlaybookScopeId,
   resolvePlaybookForOsFamilies,
+  supportedScopePlaybookScopeIds,
   type DeviceOsLookup,
   type OsFamily,
-  type ScopePlaybook
+  type ScopePlaybook,
+  type SupportedScopePlaybookScopeId
 } from "./scope-playbook.ts";
 import {
   getScopePlaybook,
@@ -144,10 +147,12 @@ type DesignRubricContext = {
   guidelinesHash: string;
 };
 
-type ScopePlaybookContext = {
+type ScopePlaybookContextEntry = {
   playbook: ScopePlaybookSnapshot;
   playbookHash: string;
 };
+
+type ScopePlaybookContext = Partial<Record<SupportedScopePlaybookScopeId, ScopePlaybookContextEntry>>;
 
 type StaleJobPrismaClient = {
   aiAnalysisJob: {
@@ -943,10 +948,10 @@ async function runPerDeviceScopeAIAnalysis(
   for (const batch of batches) {
     const batchDeviceContexts = batch.deviceHostnames.map((hostname) => buildDeviceContext(context, hostname));
     const batchOsFamilies = new Set<OsFamily>(batchDeviceContexts.map((deviceContext) => deviceContext.identity.osFamily));
-    const batchPlaybook = input.scopeId === "configuration" && input.scopePlaybook
+    const batchPlaybook = isSupportedScopePlaybookScopeId(input.scopeId) && input.scopePlaybook
       ? resolvePlaybookForOsFamilies(input.scopePlaybook, batchOsFamilies)
       : input.scopePlaybook ?? null;
-    const batchSystemPrompt = input.scopeId === "configuration" && batchPlaybook
+    const batchSystemPrompt = isSupportedScopePlaybookScopeId(input.scopeId) && batchPlaybook
       ? buildScopePlaybookSystemPrompt(input.scopeId, batchPlaybook)
       : systemPrompt;
     const batchDeviceOsByName = deviceOsLookupFromDeviceContexts(batchDeviceContexts);
@@ -2367,7 +2372,7 @@ export function buildDesignRubricSystemPrompt(basePrompt: string, guidelines: Re
 }
 
 export function buildScopePlaybookSystemPrompt(scopeId: AIAnalysisScopeId, playbook?: ScopePlaybook | null) {
-  if (!playbook || scopeId !== "configuration" || !isScopePlaybookEnabled()) return undefined;
+  if (!playbook || !isSupportedScopePlaybookScopeId(scopeId) || engineForScope(scopeId) !== "ai-per-device" || !isScopePlaybookEnabled()) return undefined;
   const playbookSection = buildPlaybookPromptSection(playbook);
   if (!playbookSection) return undefined;
   return [
@@ -2381,8 +2386,8 @@ export function buildScopePlaybookSystemPrompt(scopeId: AIAnalysisScopeId, playb
   ].join("\n");
 }
 
-function applyScopePlaybookExclusions(scopeId: AIAnalysisScopeId, findings: any[], playbook?: ScopePlaybook | null, deviceOsByName?: DeviceOsLookup) {
-  if (!playbook || scopeId !== "configuration" || !isScopePlaybookEnabled()) {
+export function applyScopePlaybookExclusions(scopeId: AIAnalysisScopeId, findings: any[], playbook?: ScopePlaybook | null, deviceOsByName?: DeviceOsLookup) {
+  if (!playbook || !isSupportedScopePlaybookScopeId(scopeId) || engineForScope(scopeId) !== "ai-per-device" || !isScopePlaybookEnabled()) {
     return { kept: findings, suppressed: [] as ReturnType<typeof applyExclusions>["suppressed"] };
   }
   return applyExclusions(findings, playbook.exclusions, { deviceOsByName });
@@ -3159,7 +3164,7 @@ export function hashScopeInput(record: any, scopeId: AIAnalysisScopeId, options?
       ...(isDeterministicLifecycleEnabled() && scopeId === "lifecycle" ? { deterministicLifecycle: true } : {}),
       ...(isDeterministicOperationsEnabled() && scopeId === "operations" ? { deterministicOperations: true } : {}),
       ...(usesDesignRubric(scopeId) && options?.designGuidelinesHash ? { designGuidelinesHash: options.designGuidelinesHash } : {}),
-      ...(isScopePlaybookEnabled() && scopeId === "configuration" && options?.scopePlaybookHash ? { scopePlaybookHash: options.scopePlaybookHash } : {}),
+      ...(isScopePlaybookEnabled() && isSupportedScopePlaybookScopeId(scopeId) && options?.scopePlaybookHash ? { scopePlaybookHash: options.scopePlaybookHash } : {}),
       engineVersion,
       client: context.client,
       assessment: context.assessment,
@@ -3170,16 +3175,19 @@ export function hashScopeInput(record: any, scopeId: AIAnalysisScopeId, options?
 }
 
 async function loadScopePlaybookContext(): Promise<ScopePlaybookContext> {
-  const playbook = await getScopePlaybook("configuration");
-  return {
-    playbook,
-    playbookHash: playbook.hash
-  };
+  const entries = await Promise.all(supportedScopePlaybookScopeIds.map(async (scopeId) => {
+    const playbook = await getScopePlaybook(scopeId);
+    return [scopeId, {
+      playbook,
+      playbookHash: playbook.hash
+    }] as const;
+  }));
+  return Object.fromEntries(entries) as ScopePlaybookContext;
 }
 
 function scopePlaybookForScope(scopeId: AIAnalysisScopeId, context: ScopePlaybookContext | null) {
-  if (!context || scopeId !== "configuration" || !isScopePlaybookEnabled()) return null;
-  return context;
+  if (!context || !isSupportedScopePlaybookScopeId(scopeId) || engineForScope(scopeId) !== "ai-per-device" || !isScopePlaybookEnabled()) return null;
+  return context[scopeId] ?? null;
 }
 
 async function loadDesignRubricContext(assessmentId: string): Promise<DesignRubricContext> {
