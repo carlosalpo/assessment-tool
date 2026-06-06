@@ -519,8 +519,11 @@ function AmbitoNode({
       )}
     >
       {state.status === "running" ? <span className="mk-topbar absolute inset-x-0 top-0 h-1" aria-hidden="true" /> : null}
+      <span className="absolute right-4 top-4 z-10">
+        <StatusBadge status={state.status} />
+      </span>
 
-      <div className="flex items-start gap-3">
+      <div className="flex items-start gap-3 pr-32">
         <span
           className={cn(
             "flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border",
@@ -535,16 +538,11 @@ function AmbitoNode({
         </span>
 
         <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-start justify-between gap-2">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-semibold text-muted-foreground">{scope.order}</span>
-                <h3 className="text-sm font-semibold text-foreground">{scope.label}</h3>
-              </div>
-              <p className="mt-1 max-w-2xl text-xs leading-5 text-muted-foreground">{scope.description}</p>
-            </div>
-            <StatusBadge status={state.status} />
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold text-muted-foreground">{scope.order}</span>
+            <h3 className="text-sm font-semibold text-foreground">{scope.label}</h3>
           </div>
+          <p className="mt-1 max-w-2xl text-xs leading-5 text-muted-foreground">{scope.description}</p>
         </div>
       </div>
 
