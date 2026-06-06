@@ -6,22 +6,31 @@ import {
   AlertTriangle,
   ArrowDown,
   ArrowLeft,
+  ArrowRight,
   ArrowUp,
   ArrowUpDown,
   Bot,
   Building2,
+  CalendarClock,
   Check,
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Circle,
   ClipboardList,
   Copy,
+  Activity,
   FileCode2,
   FileArchive,
   FileDown,
   FileText,
+  Cpu,
   GitBranch,
+  GitMerge,
   LayoutDashboard,
+  Layers,
   LoaderCircle,
+  Lock,
   LogOut,
   Moon,
   Network,
@@ -34,11 +43,14 @@ import {
   Server,
   Settings2,
   ShieldCheck,
+  Sparkles,
+  ScrollText,
   Sun,
   Trash2,
   Upload,
   UserPlus,
   Users,
+  Wrench,
   MoreHorizontal,
   X,
   ZoomIn,
@@ -926,6 +938,7 @@ export default function HomePage() {
 
   useEffect(() => {
     if (!isHydrated) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Migrates persisted finding IDs once after hydration.
     setRecords((current) => {
       let changed = false;
       const nextRecords = current.map((record) => {
@@ -7775,7 +7788,8 @@ function AiEvaluationTab({
   const [scopeFindingFilter, setScopeFindingFilter] = useState<EvaluationArea | null>(null);
   const [activeSubtab, setActiveSubtab] = useState<AIEvaluationSubtab>("evaluation");
   const subtabRefs = useRef<Partial<Record<AIEvaluationSubtab, HTMLButtonElement | null>>>({});
-  const pipelineStages = buildPipelineView(aiAnalysisStatus, latestJob).filter((stage) => shouldShowPipelineStage(stage, record, aiAnalysisStatus, latestJob));
+  const pipelineStages = buildPipelineView(aiAnalysisStatus, latestJob);
+  const engineJob = activeJob ?? latestJob;
   const aiFindingsToReviewCount = record.parsed.findings.filter((finding) => finding.aiMetadata && finding.status === "ai_suggested").length;
   const aiSubtabs = [
     { id: "evaluation" as const, label: "Evaluacion", count: null, active: Boolean(activeJob) },
@@ -7784,10 +7798,12 @@ function AiEvaluationTab({
   ];
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Reset the internal AI subtab when switching assessments.
     setActiveSubtab("evaluation");
   }, [record.id]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Non-admin users cannot remain on the admin-only settings subtab.
     if (!isAdmin && activeSubtab === "settings") setActiveSubtab("evaluation");
   }, [activeSubtab, isAdmin]);
 
@@ -7853,169 +7869,166 @@ function AiEvaluationTab({
           className="space-y-4"
         >
           <Panel>
-        <PanelHeader className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <Bot size={16} className="text-primary" />
-            <div>
-              <h2 className="text-sm font-semibold">Evaluacion AI por ambito</h2>
-              <p className="text-xs text-muted-foreground">Ejecuta analisis con ChatGPT API usando solo inventario, evidencia y parsing disponibles.</p>
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button variant="secondary" onClick={() => onResetEvaluation("complete")} disabled={!hasAnyAnalysis || hasRunningAnalysis}>
-              <RotateCcw size={16} />
-              Limpiar todo
-            </Button>
-            <Button onClick={() => onRunEvaluation("complete")} disabled={hasRunningAnalysis}>
-              <PlayCircle size={16} />
-              Evaluacion completa
-            </Button>
-            {activeJob && (
-              <Button variant="secondary" onClick={() => onCancelAnalysisJob(activeJob.id)}>
-                <X size={16} />
-                Cancelar evaluacion
-              </Button>
-            )}
-            <Button variant="ghost" onClick={() => setShowFullBreakdown((current) => !current)}>
-              {showFullBreakdown ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-              Desglose completo
-            </Button>
-          </div>
-        </PanelHeader>
-        <PanelBody className="space-y-3">
-          <AIEvaluationPipeline stages={pipelineStages} />
-          {showFullBreakdown && (
-            <FullEvaluationScopeBreakdown
-              record={record}
-              aiAnalysisStatus={aiAnalysisStatus}
-              latestJob={latestJob}
-            />
-          )}
-          {(activeJob ?? latestJob) && (
-            <AIAnalysisJobStatusPanel
-              job={(activeJob ?? latestJob)!}
-              onCancelAnalysisJob={onCancelAnalysisJob}
-              onRetryAnalysisJob={onRetryAnalysisJob}
-            />
-          )}
-          <div className="grid gap-3 md:grid-cols-2">
-          {evaluationAreas.map((area) => {
-            const scopeId = evaluationAreaToAIScope(area.id);
-            const scopeStatus = aiAnalysisStatus?.scopes.find((scope) => scope.id === scopeId);
-            const latestScopeJob = latestJob?.mode === "scope" && latestJob.scopeId === scopeId ? latestJob : undefined;
-            const isScopeRunning = isScopeJobActive(scopeId, aiAnalysisStatus, latestJob);
-            const isCurrentScopeExecuting = isScopeCurrentlyExecuting(scopeId, latestJob);
-            const areaFindings = record.parsed.findings.filter((finding) => finding.category === areaToCategory(area.id));
-            const canResetArea = hasScopeDisplayActivity(scopeId, aiAnalysisStatus, latestJob, areaFindings);
-            const displayedStatus = statusForScopeDisplay(scopeId, aiAnalysisStatus, latestJob);
-            const displayedStatusLabel = humanizeScopeStatus(displayedStatus);
-            const scopeProgress = scopeProgressFromStatus(scopeId, aiAnalysisStatus, latestJob);
-            const scopeMessage = scopeStatusMessage(scopeId, displayedStatus, scopeStatus, latestScopeJob ?? latestJob);
-            const findingSummary = summarizeAreaFindings(areaFindings);
-            const scopeDisplay = aiScopeDisplayOrder.find((scope) => scope.id === scopeId);
-            const detailOpen = Boolean(expandedAreaDetails[area.id]);
-            const findingsFilterActive = scopeFindingFilter === area.id;
-            const operationsInterviewBlocked = area.id === "operations" && !isOperationalAssessmentComplete(record.operationalAssessment);
-            const evaluationDisabledReason = operationsInterviewBlocked ? "Completa las entrevistas del Tab 11 primero" : undefined;
-            return (
-              <div
-                key={area.id}
-                className={cn(
-                  "relative overflow-hidden rounded-md border p-3 transition-shadow",
-                  isCurrentScopeExecuting ? "border-primary/50 bg-primary/5 shadow-sm" : "border-border"
-                )}
-              >
-                {isCurrentScopeExecuting && <div className="absolute inset-x-0 top-0 h-1 animate-pulse bg-primary" />}
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      {isCurrentScopeExecuting && <LoaderCircle size={14} className="animate-spin text-primary" />}
-                      <p className="text-sm font-semibold">{area.label}</p>
-                      {isCurrentScopeExecuting && <AIWorkingIndicator label="Trabajando" />}
-                    </div>
-                      <p className="mt-1 text-xs text-muted-foreground">{area.description}</p>
-                    </div>
-                  <span title={displayedStatusLabel.tooltip}>
-                    <AnimatedStatusBadge
-                      active={isCurrentScopeExecuting}
-                      label={displayedStatusLabel.label}
-                      tone={scopeStatusTone(displayedStatus)}
-                    />
-                  </span>
-                </div>
-                <div className="mt-3 h-2 rounded-full bg-muted">
-                  <div className="relative h-2 overflow-hidden rounded-full">
-                    <div className="h-2 rounded-full bg-primary" style={{ width: `${scopeProgress}%` }} />
-                    {isCurrentScopeExecuting && <div className="absolute inset-y-0 left-0 w-1/3 animate-pulse rounded-full bg-white/50" />}
-                  </div>
-                </div>
-                <p className="mt-2 text-xs text-muted-foreground">
-                  {scopeProgress}% · {scopeMessage}
-                </p>
-                <CompactFindingSummary summary={findingSummary} />
-                <div className="mt-2 flex flex-wrap gap-3">
-                  <button
-                    type="button"
-                    className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
-                    onClick={() => setExpandedAreaDetails((current) => ({ ...current, [area.id]: !current[area.id] }))}
-                  >
-                    {detailOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                    Ver detalle
-                  </button>
-                  <button
-                    type="button"
-                    className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
-                    onClick={() => toggleScopeFindingFilterFromEvaluation(area.id)}
-                  >
-                    <Search size={14} />
-                    {findingsFilterActive ? "Ocultar filtro" : "Ver hallazgos"}
-                  </button>
-                </div>
-                {detailOpen && scopeDisplay && (
-                  <ScopeDetailPanel
-                    scope={scopeDisplay}
-                    summary={findingSummary}
-                    status={displayedStatus}
-                    steps={aiAnalysisStatus?.jobs.flatMap((job) => job.steps).filter((step) => step.scopeId === scopeId) ?? []}
-                    currentPhase={latestJob?.currentPhase ?? null}
-                  />
-                )}
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <span title={evaluationDisabledReason}>
-                    <Button size="sm" onClick={() => onRunEvaluation(area.id)} disabled={isScopeRunning || hasRunningAnalysis || operationsInterviewBlocked}>
-                      <PlayCircle size={14} />
-                      Evaluar
-                    </Button>
-                  </span>
-                  <CardOverflowMenu
-                    label={`Acciones de ${area.label}`}
-                    actions={[
-                      {
-                        label: "Forzar re-evaluación",
-                        onSelect: () => onRunEvaluation(area.id, { forceReevaluate: true }),
-                        disabled: isScopeRunning || hasRunningAnalysis || operationsInterviewBlocked
-                      },
-                      {
-                        label: "Reset",
-                        onSelect: () => onResetEvaluation(area.id),
-                        disabled: !canResetArea || isScopeRunning
-                      }
-                    ]}
-                  />
+            <PanelHeader className="flex flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-start gap-3">
+                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-primary/40 bg-primary/10 text-primary">
+                  <Bot size={20} />
+                </span>
+                <div>
+                  <h2 className="text-lg font-semibold text-foreground">Evaluación AI</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Ejecuta la evaluación completa o analiza cada ámbito de forma independiente.
+                  </p>
                 </div>
               </div>
-            );
-          })}
-          {performanceEnabled && (
-            <PerformanceAnalysisRunCard
-              record={record}
-              onProcessPerformance={onProcessPerformance}
-              onRunPerformanceAi={onRunPerformanceAi}
-              onResetPerformance={onResetPerformance}
-            />
-          )}
-          </div>
-        </PanelBody>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button variant="secondary" size="sm" onClick={() => onResetEvaluation("complete")} disabled={!hasAnyAnalysis || hasRunningAnalysis}>
+                  <RotateCcw size={16} />
+                  Limpiar todo
+                </Button>
+                <Button size="sm" onClick={() => onRunEvaluation("complete")} disabled={hasRunningAnalysis}>
+                  <PlayCircle size={16} />
+                  Evaluación completa
+                </Button>
+                {activeJob && (
+                  <Button variant="danger" size="sm" onClick={() => onCancelAnalysisJob(activeJob.id)}>
+                    <X size={16} />
+                    Cancelar evaluación
+                  </Button>
+                )}
+                <Button variant="ghost" size="sm" onClick={() => setShowFullBreakdown((current) => !current)}>
+                  {showFullBreakdown ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                  Desglose completo
+                </Button>
+              </div>
+            </PanelHeader>
+            <PanelBody className="space-y-5 p-4 sm:p-5">
+              <EvaluationStageRail stages={pipelineStages} activeJob={activeJob} />
+              {engineJob && (
+                <EvaluationEngineStrip
+                  job={engineJob}
+                  onCancelAnalysisJob={onCancelAnalysisJob}
+                  onRetryAnalysisJob={onRetryAnalysisJob}
+                />
+              )}
+              {showFullBreakdown && (
+                <FullEvaluationScopeBreakdown
+                  record={record}
+                  aiAnalysisStatus={aiAnalysisStatus}
+                  latestJob={latestJob}
+                />
+              )}
+              <section className="rounded-xl border border-border bg-muted/10 p-4" aria-labelledby="map-workspace-title">
+                <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+                  <div>
+                    <h3 id="map-workspace-title" className="text-base font-semibold text-foreground">
+                      Map · Análisis por ámbito
+                    </h3>
+                    <p className="text-sm text-muted-foreground">Cada ámbito puede ejecutarse de forma independiente.</p>
+                  </div>
+                  <Badge tone="neutral" className="w-fit">
+                    6 fases por ámbito
+                  </Badge>
+                </div>
+                <div className="grid gap-3 lg:grid-cols-2">
+                  {evaluationAreas.map((area, index) => {
+                    const scopeId = evaluationAreaToAIScope(area.id);
+                    const scopeStatus = aiAnalysisStatus?.scopes.find((scope) => scope.id === scopeId);
+                    const latestScopeJob = latestJob?.mode === "scope" && latestJob.scopeId === scopeId ? latestJob : undefined;
+                    const isScopeRunning = isScopeJobActive(scopeId, aiAnalysisStatus, latestJob);
+                    const isCurrentScopeExecuting = isScopeCurrentlyExecuting(scopeId, latestJob);
+                    const areaFindings = record.parsed.findings.filter((finding) => finding.category === areaToCategory(area.id));
+                    const canResetArea = hasScopeDisplayActivity(scopeId, aiAnalysisStatus, latestJob, areaFindings);
+                    const displayedStatus = statusForScopeDisplay(scopeId, aiAnalysisStatus, latestJob);
+                    const scopeProgress = scopeProgressFromStatus(scopeId, aiAnalysisStatus, latestJob);
+                    const scopeMessage = scopeStatusMessage(scopeId, displayedStatus, scopeStatus, latestScopeJob ?? latestJob);
+                    const findingSummary = summarizeAreaFindings(areaFindings);
+                    const scopeDisplay = aiScopeDisplayOrder.find((scope) => scope.id === scopeId);
+                    const detailOpen = Boolean(expandedAreaDetails[area.id]);
+                    const findingsFilterActive = scopeFindingFilter === area.id;
+                    const operationsInterviewBlocked = area.id === "operations" && !isOperationalAssessmentComplete(record.operationalAssessment);
+                    const evaluationDisabledReason = operationsInterviewBlocked ? "Completa las entrevistas del Tab 11 primero" : undefined;
+
+                    return (
+                      <EvaluationAmbitoNode
+                        key={area.id}
+                        order={index + 1}
+                        label={area.label}
+                        description={area.description}
+                        icon={evaluationAreaIcon(area.id)}
+                        status={displayedStatus}
+                        active={isCurrentScopeExecuting}
+                        progress={scopeProgress}
+                        message={scopeMessage}
+                        findingSummary={findingSummary}
+                        blockedMessage={operationsInterviewBlocked ? evaluationDisabledReason : undefined}
+                        detailOpen={detailOpen}
+                        onToggleDetail={() => setExpandedAreaDetails((current) => ({ ...current, [area.id]: !current[area.id] }))}
+                        onViewFindings={() => toggleScopeFindingFilterFromEvaluation(area.id)}
+                        findingsFilterActive={findingsFilterActive}
+                        detail={scopeDisplay ? (
+                          <ScopeDetailPanel
+                            scope={scopeDisplay}
+                            summary={findingSummary}
+                            status={displayedStatus}
+                            steps={aiAnalysisStatus?.jobs.flatMap((job) => job.steps).filter((step) => step.scopeId === scopeId) ?? []}
+                            currentPhase={latestJob?.currentPhase ?? null}
+                          />
+                        ) : null}
+                        actions={(
+                          <>
+                            <span title={evaluationDisabledReason}>
+                              <Button size="sm" onClick={() => onRunEvaluation(area.id)} disabled={isScopeRunning || hasRunningAnalysis || operationsInterviewBlocked}>
+                                <PlayCircle size={14} />
+                                Evaluar
+                              </Button>
+                            </span>
+                            <CardOverflowMenu
+                              label={`Acciones de ${area.label}`}
+                              actions={[
+                                {
+                                  label: "Forzar re-evaluación",
+                                  onSelect: () => onRunEvaluation(area.id, { forceReevaluate: true }),
+                                  disabled: isScopeRunning || hasRunningAnalysis || operationsInterviewBlocked
+                                },
+                                {
+                                  label: "Reset",
+                                  onSelect: () => onResetEvaluation(area.id),
+                                  disabled: !canResetArea || isScopeRunning
+                                }
+                              ]}
+                            />
+                          </>
+                        )}
+                      />
+                    );
+                  })}
+                  {performanceEnabled && (
+                    <PerformanceAnalysisRunCard
+                      record={record}
+                      order={evaluationAreas.length + 1}
+                      onProcessPerformance={onProcessPerformance}
+                      onRunPerformanceAi={onRunPerformanceAi}
+                      onResetPerformance={onResetPerformance}
+                    />
+                  )}
+                </div>
+              </section>
+              <section
+                className="flex flex-wrap items-center gap-x-5 gap-y-3 border-t border-border pt-4"
+                aria-label="Leyenda de estados"
+              >
+                <LegendItem
+                  icon={CheckCircle2}
+                  label="Completado"
+                  className="border-emerald-300/40 bg-emerald-400/10 text-emerald-300"
+                />
+                <LegendItem icon={LoaderCircle} label="En curso" className="border-primary/50 bg-primary/10 text-primary" />
+                <LegendItem icon={Circle} label="En cola" className="border-amber-300/40 bg-amber-400/10 text-amber-300" />
+                <LegendItem icon={Circle} label="Pendiente" className="border-border bg-muted/40 text-muted-foreground" />
+                <LegendItem icon={Lock} label="Bloqueado" className="border-rose-300/40 bg-rose-400/10 text-rose-300" />
+              </section>
+            </PanelBody>
           </Panel>
         </div>
       )}
@@ -8181,33 +8194,386 @@ function CardOverflowMenu({
   );
 }
 
-function AIEvaluationPipeline({ stages }: { stages: PipelineViewStage[] }) {
+const completedPipelineStatuses = new Set(["completed", "complete", "skipped", "skipped_existing_result"]);
+const failedPipelineStatuses = new Set(["failed", "blocked", "error", "timeout", "cancelled"]);
+
+function isCompletedPipelineStatus(status: string | undefined) {
+  return Boolean(status && completedPipelineStatuses.has(status));
+}
+
+function isFailedPipelineStatus(status: string | undefined) {
+  return Boolean(status && failedPipelineStatuses.has(status));
+}
+
+function EvaluationStageCard({ stage, showCurrentPill }: { stage: PipelineViewStage; showCurrentPill: boolean }) {
+  const statusLabel = humanizeScopeStatus(stage.status);
+  const Icon = stage.active
+    ? LoaderCircle
+    : isCompletedPipelineStatus(stage.status)
+      ? CheckCircle2
+      : stage.stage === "map"
+        ? Layers
+        : stage.stage === "reduce"
+          ? GitMerge
+          : Sparkles;
+  const title = stage.stage === "map"
+    ? "Map · Análisis por ámbito"
+    : stage.stage === "reduce"
+      ? "Reduce · Correlación"
+      : "Synthesize · Salida";
+  const subtitle = stage.stage === "map"
+    ? `${stage.total} ámbitos · evidencia + inventario`
+    : stage.stage === "reduce"
+      ? "Hallazgos cruzados entre ámbitos"
+      : "Roadmap + resumen ejecutivo";
+
   return (
-    <div className="rounded-md border border-border bg-muted/20 p-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs font-semibold text-muted-foreground">Pipeline</span>
+    <div
+      className={cn(
+        "relative min-h-[148px] flex-1 rounded-xl border p-4 transition",
+        stage.active && "mk-glow border-primary bg-primary/10",
+        isCompletedPipelineStatus(stage.status) && !stage.active && "border-emerald-300/40 bg-emerald-400/10",
+        isFailedPipelineStatus(stage.status) && !stage.active && "border-rose-300/40 bg-rose-400/10",
+        !stage.active && !isCompletedPipelineStatus(stage.status) && !isFailedPipelineStatus(stage.status) && "border-border bg-muted/20 opacity-80"
+      )}
+    >
+      {showCurrentPill ? (
+        <span className="absolute -top-3 left-4 rounded-full border border-primary/50 bg-background px-2 py-0.5 text-[10px] font-semibold text-primary shadow-subtle">
+          ETAPA ACTUAL
+        </span>
+      ) : null}
+      <div className="flex h-full flex-col justify-between gap-4">
+        <div className="flex items-start gap-3">
+          <span
+            className={cn(
+              "flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border",
+              stage.active && "border-primary/50 bg-primary/15 text-primary",
+              isCompletedPipelineStatus(stage.status) && !stage.active && "border-emerald-300/40 bg-emerald-400/10 text-emerald-300",
+              isFailedPipelineStatus(stage.status) && !stage.active && "border-rose-300/40 bg-rose-400/10 text-rose-300",
+              !stage.active && !isCompletedPipelineStatus(stage.status) && !isFailedPipelineStatus(stage.status) && "border-border bg-background text-muted-foreground"
+            )}
+          >
+            <Icon className={cn("h-5 w-5", stage.active && "animate-spin")} />
+          </span>
+          <div className="min-w-0">
+            <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">{subtitle}</p>
+          </div>
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <span title={statusLabel.tooltip}>
+            <AnimatedStatusBadge
+              active={stage.active || isAnimatedStatus(stage.status)}
+              label={statusLabel.label}
+              tone={scopeStatusTone(stage.status)}
+            />
+          </span>
+          <span className="text-xs font-medium text-muted-foreground">
+            {stage.completed}/{stage.total}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EvaluationStageConnector({ status }: { status: "flow" | "charging" | "idle" }) {
+  return (
+    <div className="hidden w-16 shrink-0 items-center gap-2 md:flex" aria-hidden="true">
+      <span
+        className={cn(
+          "h-[3px] flex-1 rounded-full",
+          status === "flow" && "mk-conn mk-conn-flow",
+          status === "charging" && "mk-conn mk-conn-charging",
+          status === "idle" && "bg-border"
+        )}
+      />
+      <ArrowRight className={cn("h-4 w-4", status === "idle" ? "text-muted-foreground" : "text-primary")} />
+    </div>
+  );
+}
+
+function EvaluationStageRail({ stages, activeJob }: { stages: PipelineViewStage[]; activeJob?: AIAnalysisJobSnapshot }) {
+  const currentStageId = stages.find((stage) => stage.active)?.stage ?? (activeJob ? "map" : null);
+
+  return (
+    <section aria-label="Riel de proceso Map Reduce Synthesize">
+      <div className="flex flex-col gap-3 md:flex-row md:items-stretch">
         {stages.map((stage, index) => {
-          const statusLabel = humanizeScopeStatus(stage.status);
+          const nextStage = stages[index + 1];
+          const connectorStatus = isCompletedPipelineStatus(stage.status)
+            ? "flow"
+            : stage.active
+              ? "charging"
+              : "idle";
           return (
             <React.Fragment key={stage.stage}>
-              {index > 0 && <span className="text-xs text-muted-foreground">→</span>}
-              <div className={cn("flex flex-wrap items-center gap-2 rounded border px-2 py-1 text-xs", stage.active ? "border-primary bg-primary/10" : "border-border bg-background/60")}>
-                <span className="font-medium text-foreground">{stage.label}</span>
-                {stage.stage === "map" && <span className="text-muted-foreground">{stage.completed}/{stage.total} scopes</span>}
-                {stage.stage !== "map" && <span className="text-muted-foreground">{stage.completed}/{stage.total}</span>}
-                <span title={statusLabel.tooltip}>
-                  <AnimatedStatusBadge
-                    active={stage.active || isAnimatedStatus(stage.status)}
-                    label={statusLabel.label}
-                    tone={scopeStatusTone(stage.status)}
-                  />
-                </span>
-                {stage.active && <Badge tone="info">Etapa activa</Badge>}
-              </div>
+              <EvaluationStageCard stage={stage} showCurrentPill={currentStageId === stage.stage} />
+              {nextStage ? <EvaluationStageConnector status={connectorStatus} /> : null}
             </React.Fragment>
           );
         })}
       </div>
+    </section>
+  );
+}
+
+function EvaluationEngineStrip({
+  job,
+  onCancelAnalysisJob,
+  onRetryAnalysisJob
+}: {
+  job: AIAnalysisJobSnapshot;
+  onCancelAnalysisJob: (jobId: string) => void;
+  onRetryAnalysisJob: (jobId: string) => void;
+}) {
+  const completed = job.steps.filter((step) => step.status === "completed").length;
+  const skipped = job.steps.filter((step) => step.status === "skipped").length;
+  const failed = job.steps.filter((step) => step.status === "failed").length;
+  const jobStatusLabel = humanizeScopeStatus(job.status);
+  const isActive = isActiveAIJobStatus(job.status);
+  const canRetry = job.status === "failed" || job.status === "cancelled" || job.status === "partially_completed";
+
+  return (
+    <section
+      className={cn(
+        "flex flex-wrap items-center gap-x-4 gap-y-2 rounded-xl border border-border bg-muted/10 px-3 py-2",
+        isActive && job.progress < 100 && "mk-glow",
+        job.errorMessage && "border-rose-300/40 bg-rose-400/10"
+      )}
+      aria-label="Estado del motor"
+    >
+      <div className="flex items-center gap-2">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-primary/40 bg-primary/10 text-primary">
+          <Cpu className="h-4 w-4" />
+        </span>
+        <span className="text-sm font-medium text-foreground">Motor de análisis</span>
+        <span title={jobStatusLabel.tooltip}>
+          <AnimatedStatusBadge
+            active={isActive}
+            label={jobStatusLabel.label}
+            tone={scopeStatusTone(job.status)}
+          />
+        </span>
+      </div>
+
+      <div className="flex min-w-[10rem] flex-1 items-center gap-2 sm:flex-none">
+        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted sm:w-40 sm:flex-none">
+          <div
+            className={cn("relative h-full rounded-full", isActive ? "bg-primary" : "bg-emerald-400")}
+            style={{ width: `${job.progress}%` }}
+          >
+            {isActive ? <span className="mk-shimmer absolute inset-0" aria-hidden="true" /> : null}
+          </div>
+        </div>
+        <span className="text-xs font-medium text-foreground">{job.progress}%</span>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+        <span>{completed}/{job.steps.length} fases</span>
+        <span aria-hidden="true">·</span>
+        <span>{skipped} omitidas</span>
+        <span aria-hidden="true">·</span>
+        <span className={cn(failed > 0 && "text-rose-300")}>{failed} fallidas</span>
+        <span aria-hidden="true">·</span>
+        <span>act. {formatDate(job.updatedAt)}</span>
+        <span aria-hidden="true">·</span>
+        <span>{job.currentPhase ?? "Preparando siguiente fase"}</span>
+      </div>
+
+      {job.errorMessage ? <span className="text-xs text-rose-300">{job.errorMessage}</span> : null}
+
+      {(isActive || canRetry) ? (
+        <div className="ml-auto flex flex-wrap gap-2">
+          {isActive ? (
+            <Button variant="danger" size="sm" onClick={() => onCancelAnalysisJob(job.id)}>
+              <X size={14} />
+              Cancelar
+            </Button>
+          ) : null}
+          {canRetry ? (
+            <Button variant="secondary" size="sm" onClick={() => onRetryAnalysisJob(job.id)}>
+              <RotateCcw size={14} />
+              Reintentar
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function evaluationAreaIcon(area: EvaluationArea): React.ComponentType<{ className?: string; size?: number }> {
+  const icons: Record<EvaluationArea, React.ComponentType<{ className?: string; size?: number }>> = {
+    topology: Network,
+    configuration: Settings2,
+    security: ShieldCheck,
+    lifecycle: CalendarClock,
+    operations: Wrench,
+    logs: ScrollText
+  };
+  return icons[area];
+}
+
+function progressFillClass(status: string, active: boolean) {
+  if (active) return "bg-primary";
+  if (isCompletedPipelineStatus(status) || status === "ok" || status === "processed" || status === "ai_reviewed" || status === "validated") return "bg-emerald-400";
+  if (isFailedPipelineStatus(status)) return "bg-rose-400";
+  return "bg-primary";
+}
+
+function EvaluationAmbitoNode({
+  order,
+  label,
+  description,
+  icon: AreaIcon,
+  status,
+  active,
+  progress,
+  message,
+  findingSummary,
+  blockedMessage,
+  detailOpen,
+  onToggleDetail,
+  onViewFindings,
+  findingsFilterActive,
+  detail,
+  actions
+}: {
+  order: number;
+  label: string;
+  description: string;
+  icon: React.ComponentType<{ className?: string; size?: number }>;
+  status: string;
+  active: boolean;
+  progress: number;
+  message: string;
+  findingSummary: AreaFindingSummary;
+  blockedMessage?: string;
+  detailOpen?: boolean;
+  onToggleDetail?: () => void;
+  onViewFindings?: () => void;
+  findingsFilterActive?: boolean;
+  detail?: React.ReactNode;
+  actions: React.ReactNode;
+}) {
+  const statusLabel = humanizeScopeStatus(status);
+  const completed = isCompletedPipelineStatus(status) || status === "ok" || status === "processed" || status === "ai_reviewed" || status === "validated";
+  const queued = status === "queued";
+  const failed = isFailedPipelineStatus(status);
+  const Icon = active ? LoaderCircle : completed ? CheckCircle2 : AreaIcon;
+
+  return (
+    <article
+      className={cn(
+        "relative overflow-hidden rounded-xl border p-4 transition",
+        active && "mk-glow border-primary bg-primary/10",
+        completed && !active && "border-emerald-300/40 bg-emerald-400/[0.05]",
+        queued && !active && "border-amber-300/40 bg-amber-400/10",
+        failed && !active && "border-rose-300/40 bg-rose-400/[0.07]",
+        !active && !completed && !queued && !failed && "border-border"
+      )}
+    >
+      {active ? <span className="mk-topbar absolute inset-x-0 top-0 h-1" aria-hidden="true" /> : null}
+      <div className="flex items-start gap-3">
+        <span
+          className={cn(
+            "flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border",
+            active && "border-primary/50 bg-primary/15 text-primary",
+            completed && !active && "border-emerald-300/40 bg-emerald-400/10 text-emerald-300",
+            queued && !active && "border-amber-300/40 bg-amber-400/10 text-amber-300",
+            failed && !active && "border-rose-300/40 bg-rose-400/10 text-rose-300",
+            !active && !completed && !queued && !failed && "border-border bg-muted/40 text-muted-foreground"
+          )}
+        >
+          <Icon className={cn("h-5 w-5", active && "animate-spin")} />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-semibold text-muted-foreground">{String(order).padStart(2, "0")}</span>
+                <h3 className="text-sm font-semibold text-foreground">{label}</h3>
+                {active ? <AIWorkingIndicator label="Trabajando" /> : null}
+              </div>
+              <p className="mt-1 max-w-2xl text-xs leading-5 text-muted-foreground">{description}</p>
+            </div>
+            <span title={statusLabel.tooltip}>
+              <AnimatedStatusBadge
+                active={active}
+                label={statusLabel.label}
+                tone={scopeStatusTone(status)}
+              />
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-4">
+        {blockedMessage ? (
+          <div className="flex items-center gap-2 rounded-lg border border-rose-300/40 bg-rose-400/10 px-3 py-2 text-xs text-rose-300">
+            <Lock className="h-4 w-4 shrink-0" />
+            <span>{blockedMessage}</span>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+              <div
+                className={cn("relative h-full rounded-full transition-all", progressFillClass(status, active))}
+                style={{ width: `${progress}%` }}
+              >
+                {active ? <span className="mk-shimmer absolute inset-0" aria-hidden="true" /> : null}
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground">{progress}% · {message}</p>
+          </div>
+        )}
+      </div>
+
+      <CompactFindingSummary summary={findingSummary} />
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        {actions}
+        {onToggleDetail ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onToggleDetail}
+            aria-expanded={detailOpen}
+            className="text-muted-foreground"
+          >
+            {detailOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            Ver detalle
+          </Button>
+        ) : null}
+        {onViewFindings ? (
+          <Button variant="ghost" size="sm" onClick={onViewFindings} className="text-muted-foreground">
+            <Search size={14} />
+            {findingsFilterActive ? "Ocultar filtro" : "Ver hallazgos"}
+          </Button>
+        ) : null}
+      </div>
+
+      {detailOpen && detail ? <div className="mt-4 border-t border-border pt-4">{detail}</div> : null}
+    </article>
+  );
+}
+
+function LegendItem({
+  icon: Icon,
+  label,
+  className
+}: {
+  icon: React.ComponentType<{ className?: string; size?: number }>;
+  label: string;
+  className: string;
+}) {
+  return (
+    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+      <span className={cn("flex h-7 w-7 items-center justify-center rounded-lg border", className)}>
+        <Icon className="h-4 w-4" />
+      </span>
+      <span>{label}</span>
     </div>
   );
 }
@@ -8366,102 +8732,6 @@ function CompactFindingSummary({ summary, compact = false }: { summary: AreaFind
           Tipos: {findingTypeSummary.map((item) => `${findingTypeSummaryLabel[item.type] ?? item.type}: ${item.count}`).join(" · ")}
         </p>
       )}
-    </div>
-  );
-}
-
-function AIAnalysisJobStatusPanel({
-  job,
-  onCancelAnalysisJob,
-  onRetryAnalysisJob
-}: {
-  job: AIAnalysisJobSnapshot;
-  onCancelAnalysisJob: (jobId: string) => void;
-  onRetryAnalysisJob: (jobId: string) => void;
-}) {
-  const grouped = job.steps.reduce<Record<string, AIAnalysisJobSnapshot["steps"]>>((acc, step) => {
-    acc[step.scopeId] = [...(acc[step.scopeId] ?? []), step];
-    return acc;
-  }, {});
-  const failed = job.steps.filter((step) => step.status === "failed").length;
-  const skipped = job.steps.filter((step) => step.status === "skipped").length;
-  const completed = job.steps.filter((step) => step.status === "completed").length;
-  const jobStatusLabel = humanizeScopeStatus(job.status);
-  const isActive = isActiveAIJobStatus(job.status);
-
-  return (
-    <div className={cn("relative overflow-hidden rounded-md border border-primary/30 bg-primary/5 p-3", isActive && "shadow-sm")}>
-      {isActive && <div className="absolute inset-x-0 top-0 h-1 animate-pulse bg-primary" />}
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <div className="flex flex-wrap items-center gap-2">
-            {isActive && <LoaderCircle size={15} className="animate-spin text-primary" />}
-            <p className="text-sm font-semibold">Motor persistente de analisis AI</p>
-            <span title={jobStatusLabel.tooltip}>
-              <AnimatedStatusBadge
-                active={isActive}
-                label={jobStatusLabel.label}
-                tone={scopeStatusTone(job.status)}
-              />
-            </span>
-            <Badge tone="neutral">{job.mode === "full" ? "Evaluacion completa" : job.scopeId}</Badge>
-            {isActive && <AIWorkingIndicator />}
-          </div>
-          <p className="mt-1 text-xs text-muted-foreground">
-            {job.progress}% · {job.currentPhase ?? "Preparando siguiente fase"} · Actualizado {formatDate(job.updatedAt)}
-          </p>
-          {job.errorMessage && <p className="mt-1 text-xs text-rose-300">{job.errorMessage}</p>}
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {isActiveAIJobStatus(job.status) && (
-            <Button variant="secondary" size="sm" onClick={() => onCancelAnalysisJob(job.id)}>
-              <X size={14} />
-              Cancelar
-            </Button>
-          )}
-          {(job.status === "failed" || job.status === "cancelled" || job.status === "partially_completed") && (
-            <Button variant="secondary" size="sm" onClick={() => onRetryAnalysisJob(job.id)}>
-              <RotateCcw size={14} />
-              Reintentar
-            </Button>
-          )}
-        </div>
-      </div>
-      <div className="mt-3 h-2 rounded-full bg-muted">
-        <div className="relative h-2 overflow-hidden rounded-full">
-          <div className="h-2 rounded-full bg-primary" style={{ width: `${job.progress}%` }} />
-          {isActive && <div className="absolute inset-y-0 left-0 w-1/3 animate-pulse rounded-full bg-white/40" />}
-        </div>
-      </div>
-      <div className="mt-3 grid gap-2 text-xs md:grid-cols-4">
-        <MetricPanel label="Fases completadas" value={String(completed)} />
-        <MetricPanel label="Fases omitidas" value={String(skipped)} />
-        <MetricPanel label="Fases fallidas" value={String(failed)} />
-        <MetricPanel label="Total fases" value={String(job.steps.length)} />
-      </div>
-      <div className="mt-3 grid gap-2 md:grid-cols-2">
-        {Object.entries(grouped).slice(0, 8).map(([scopeId, steps]) => {
-          const active = steps.find((step) => step.status === "running");
-          const scopeProgress = scopeProgressFromStatus(scopeId, undefined, job);
-          const stepStatus = active?.status ?? steps.at(-1)?.status ?? "pending";
-          const stepStatusLabel = humanizeScopeStatus(stepStatus);
-          return (
-            <div key={scopeId} className="rounded border border-border bg-background/50 p-2">
-              <div className="flex items-center justify-between gap-2">
-                <p className="font-medium">{scopeLabel(scopeId as AIAnalysisScopeId)}</p>
-                <span title={`${stepStatusLabel.tooltip} Progreso: ${scopeProgress}%.`}>
-                  <AnimatedStatusBadge
-                    active={Boolean(active)}
-                    label={stepStatusLabel.label}
-                    tone={scopeStatusTone(stepStatus)}
-                  />
-                </span>
-              </div>
-              <p className="mt-1 text-muted-foreground">{active?.phaseName ?? steps.find((step) => step.status === "failed")?.errorMessage ?? "Fases en checkpoint persistente"}</p>
-            </div>
-          );
-        })}
-      </div>
     </div>
   );
 }
@@ -9579,17 +9849,18 @@ function AIReviewPanel({
 
 function PerformanceAnalysisRunCard({
   record,
+  order,
   onProcessPerformance,
   onRunPerformanceAi,
   onResetPerformance
 }: {
   record: AssessmentRecord;
+  order: number;
   onProcessPerformance: () => void;
   onRunPerformanceAi: () => void;
   onResetPerformance: () => void;
 }) {
   const progress = Math.max(record.performance.assessment.dataCoverageScore, record.performance.metrics.length > 0 ? 70 : 0);
-  const performanceStatusLabel = humanizeScopeStatus(record.performance.assessment.status);
   const performanceFindings = record.parsed.findings.filter((finding) => finding.serviceOffer === "Performance Analysis");
   const findingSummary = summarizeAreaFindings(performanceFindings);
   const processIsPrimary = record.performance.metrics.length === 0;
@@ -9607,42 +9878,35 @@ function PerformanceAnalysisRunCard({
         disabled: record.performance.findings.length === 0
       };
   return (
-    <div className="rounded-md border border-border p-3">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <p className="text-sm font-semibold">Performance Analysis</p>
-          <p className="mt-1 text-xs text-muted-foreground">Procesa evidencia de rendimiento, genera metricas, hallazgos con evidencia y contexto para AI.</p>
-        </div>
-        <span title={performanceStatusLabel.tooltip}>
-          <Badge tone={scopeStatusTone(record.performance.assessment.status)}>
-            {performanceStatusLabel.label}
-          </Badge>
-        </span>
-      </div>
-      <div className="mt-3 h-2 rounded-full bg-muted">
-        <div className="h-2 rounded-full bg-primary" style={{ width: `${progress}%` }} />
-      </div>
-      <p className="mt-2 text-xs text-muted-foreground">
-        {record.performance.metrics.length} metricas · {record.performance.findings.length} hallazgos · confianza {record.performance.assessment.confidenceScore}%
-      </p>
-      <CompactFindingSummary summary={findingSummary} />
-      <div className="mt-3 flex flex-wrap gap-2">
-        <Button size="sm" onClick={performancePrimaryAction.onClick} disabled={performancePrimaryAction.disabled}>
-          {performancePrimaryAction.icon}
-          {performancePrimaryAction.label}
-        </Button>
-        <CardOverflowMenu
-          label="Acciones de Performance"
-          actions={[
-            {
-              label: "Reset",
-              onSelect: onResetPerformance,
-              disabled: record.performance.evidenceFiles.length === 0 && record.performance.metrics.length === 0 && record.performance.findings.length === 0
-            }
-          ]}
-        />
-      </div>
-    </div>
+    <EvaluationAmbitoNode
+      order={order}
+      label="Performance Analysis"
+      description="Procesa evidencia de rendimiento, genera metricas, hallazgos con evidencia y contexto para AI."
+      icon={Activity}
+      status={record.performance.assessment.status}
+      active={isAnimatedStatus(record.performance.assessment.status)}
+      progress={progress}
+      message={`${record.performance.metrics.length} metricas · ${record.performance.findings.length} hallazgos · confianza ${record.performance.assessment.confidenceScore}%`}
+      findingSummary={findingSummary}
+      actions={(
+        <>
+          <Button size="sm" onClick={performancePrimaryAction.onClick} disabled={performancePrimaryAction.disabled}>
+            {performancePrimaryAction.icon}
+            {performancePrimaryAction.label}
+          </Button>
+          <CardOverflowMenu
+            label="Acciones de Performance"
+            actions={[
+              {
+                label: "Reset",
+                onSelect: onResetPerformance,
+                disabled: record.performance.evidenceFiles.length === 0 && record.performance.metrics.length === 0 && record.performance.findings.length === 0
+              }
+            ]}
+          />
+        </>
+      )}
+    />
   );
 }
 
