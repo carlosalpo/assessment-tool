@@ -46,6 +46,16 @@ import {
   topologyDesignGuidelineGlobalScopeKey,
   type ResolvedDesignGuidelines
 } from "./ai-design-guidelines.ts";
+import {
+  applyExclusions,
+  buildPlaybookPromptSection,
+  isScopePlaybookEnabled,
+  type ScopePlaybook
+} from "./scope-playbook.ts";
+import {
+  getScopePlaybook,
+  type ScopePlaybookSnapshot
+} from "./scope-playbook-store.ts";
 import { mapLegacyRemediation } from "./types.ts";
 
 export type AIAnalysisJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "partially_completed";
@@ -124,6 +134,11 @@ type RunAIAnalysisJobOptions = {
 type DesignRubricContext = {
   guidelines: ResolvedDesignGuidelines;
   guidelinesHash: string;
+};
+
+type ScopePlaybookContext = {
+  playbook: ScopePlaybookSnapshot;
+  playbookHash: string;
 };
 
 type StaleJobPrismaClient = {
@@ -479,6 +494,9 @@ export async function runAIAnalysisJob(jobId: string, options?: RunAIAnalysisJob
   const designRubric = isDesignRubricEnabled()
     ? await loadDesignRubricContext(job.assessmentId)
     : null;
+  const scopePlaybook = isScopePlaybookEnabled()
+    ? await loadScopePlaybookContext()
+    : null;
   let failedScopes = 0;
   let completedScopes = 0;
   let skippedScopes = 0;
@@ -488,7 +506,8 @@ export async function runAIAnalysisJob(jobId: string, options?: RunAIAnalysisJob
     if (cancelled) return;
 
     const inputHash = hashScopeInput(record, scopeId, {
-      designGuidelinesHash: designRubric?.guidelinesHash ?? null
+      designGuidelinesHash: designRubric?.guidelinesHash ?? null,
+      scopePlaybookHash: scopePlaybookForScope(scopeId, scopePlaybook)?.playbookHash ?? null
     });
     const existingResult = await prisma.aiScopeResult.findUnique({
       where: { assessmentId_scopeId: { assessmentId: job.assessmentId, scopeId } }
@@ -531,7 +550,8 @@ export async function runAIAnalysisJob(jobId: string, options?: RunAIAnalysisJob
           apiKey,
           debugCapture,
           designGuidelines: designRubric?.guidelines ?? null,
-          designGuidelinesHash: designRubric?.guidelinesHash ?? null
+          designGuidelinesHash: designRubric?.guidelinesHash ?? null,
+          scopePlaybook: scopePlaybookForScope(scopeId, scopePlaybook)?.playbook ?? null
         });
         if (await cancelIfRequested(jobId)) return;
         const artifact = await prisma.aiAnalysisArtifact.create({
@@ -664,6 +684,7 @@ type RunPhaseInput = {
   debugCapture: boolean;
   designGuidelines?: ResolvedDesignGuidelines | null;
   designGuidelinesHash?: string | null;
+  scopePlaybook?: ScopePlaybook | null;
 };
 
 async function runPhase(input: RunPhaseInput) {
@@ -713,6 +734,14 @@ async function runPhase(input: RunPhaseInput) {
           source: input.designGuidelines.source,
           sourceScopeKey: input.designGuidelines.sourceScopeKey,
           guidelinesHash: input.designGuidelinesHash
+        }
+      } : {}),
+      ...(input.scopePlaybook ? {
+        scopePlaybook: {
+          scopeId: input.scopePlaybook.scopeId,
+          criteriaCount: input.scopePlaybook.criteria.length,
+          expectedCount: input.scopePlaybook.expected.length,
+          exclusionCount: input.scopePlaybook.exclusions.length
         }
       } : {}),
       promptVersion: getPromptVersion(),
@@ -768,6 +797,7 @@ async function runPhase(input: RunPhaseInput) {
 
   if (input.phase === "scope_analysis") {
     const engine = engineForScope(input.scopeId);
+    const playbookSystemPrompt = buildScopePlaybookSystemPrompt(input.scopeId, input.scopePlaybook);
     switch (engine) {
       case "synthesis":
         if (isSynthesisStageEnabled() && patternForScope(input.scopeId) === "synthesis") {
@@ -780,13 +810,13 @@ async function runPhase(input: RunPhaseInput) {
           const systemPrompt = buildDesignRubricSystemPrompt(buildScopeSystemPrompt(input.scopeId), input.designGuidelines);
           return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model, systemPrompt);
         }
-        return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model);
+        return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model, playbookSystemPrompt);
       case "ai-per-device":
         // DOM-B: per-device packing.
         if (isPerDeviceEnabled()) {
-          return runPerDeviceScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model);
+          return runPerDeviceScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model, playbookSystemPrompt);
         }
-        return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model);
+        return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model, playbookSystemPrompt);
       case "deterministic-narrate":
         // DOM-D: deterministic.
         if (input.scopeId === "lifecycle" && isDeterministicLifecycleEnabled()) {
@@ -799,7 +829,7 @@ async function runPhase(input: RunPhaseInput) {
         ) {
           return runDeterministicOperationsScopeAnalysis(input, scopePacket, model);
         }
-        return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model);
+        return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model, playbookSystemPrompt);
     }
   }
 
@@ -810,6 +840,7 @@ async function runPhase(input: RunPhaseInput) {
     return {
       phase: input.phase,
       validatedFindings: evidenceValidation.validatedFindings,
+      suppressedFindings: Array.isArray(analysis.suppressedFindings) ? analysis.suppressedFindings : [],
       rejectedFindings: [
         ...(Array.isArray(analysis.rejectedFindings) ? analysis.rejectedFindings : []),
         ...evidenceValidation.rejectedFindings
@@ -820,6 +851,7 @@ async function runPhase(input: RunPhaseInput) {
 
   const validation = input.previousArtifacts.find((artifact) => artifact.phase === "validation") ?? {};
   const findings = validation.validatedFindings ?? [];
+  const suppressedFindings = Array.isArray(validation.suppressedFindings) ? validation.suppressedFindings : [];
   const scopeLabel = scope?.label ?? input.scopeId;
   return {
     phase: input.phase,
@@ -829,9 +861,11 @@ async function runPhase(input: RunPhaseInput) {
       ? `${scopeLabel}: ${findings.length} hallazgos soportados por evidencia listos para revision del arquitecto.`
       : `${scopeLabel}: sin hallazgos AI soportados por evidencia con la informacion disponible.`,
     findings,
+    suppressedFindings,
     recommendations: findings.flatMap((finding: any) => finding.remediation_steps ?? finding.recommendation ? [finding.recommendation].filter(Boolean) : []),
     dashboard: {
       findingCount: findings.length,
+      suppressedFindingCount: suppressedFindings.length,
       evidenceFiles: baseContext.sourceCounts.evidenceFiles,
       deviceCount: baseContext.sourceCounts.devices
     }
@@ -852,7 +886,8 @@ async function runCurrentScopeAIAnalysis(
       jobId: input.jobId,
       assessmentId: input.assessmentId,
       debugCapture: input.debugCapture,
-      systemPrompt
+      systemPrompt,
+      scopePlaybook: input.scopePlaybook ?? null
     });
   }
 
@@ -869,7 +904,8 @@ async function runCurrentScopeAIAnalysis(
       jobId: input.jobId,
       assessmentId: input.assessmentId,
       debugCapture: input.debugCapture,
-      systemPrompt
+      systemPrompt,
+      scopePlaybook: input.scopePlaybook ?? null
     });
     partitionResults.push({
       ...partitionResult,
@@ -886,12 +922,13 @@ async function runPerDeviceScopeAIAnalysis(
   scopePacket: ReturnType<typeof buildAIScopePacket>,
   priorScopeResults: Awaited<ReturnType<typeof loadPriorScopeResults>>,
   explicitMaxInputTokens: number | undefined,
-  model: string
+  model: string,
+  systemPrompt?: string
 ) {
   const context = buildAssessmentAIContext(input.record);
   const batches = planDeviceBatches(context, input.scopeId, scopePacket.budget.maxInputTokens);
   if (batches.length === 0) {
-    return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model);
+    return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model, systemPrompt);
   }
 
   const partitionResults = [];
@@ -906,7 +943,9 @@ async function runPerDeviceScopeAIAnalysis(
     const partitionResult = await callOpenAIForScopeAnalysis(input.scopeId, batchPacket, input.previousArtifacts, input.apiKey, model, {
       jobId: input.jobId,
       assessmentId: input.assessmentId,
-      debugCapture: input.debugCapture
+      debugCapture: input.debugCapture,
+      systemPrompt,
+      scopePlaybook: input.scopePlaybook ?? null
     });
     partitionResults.push({
       ...partitionResult,
@@ -1774,7 +1813,7 @@ async function callOpenAIForScopeAnalysis(
   previousArtifacts: any[],
   apiKey: string,
   model: string,
-  debug?: { jobId: string; assessmentId: string; debugCapture: boolean; systemPrompt?: string }
+  debug?: { jobId: string; assessmentId: string; debugCapture: boolean; systemPrompt?: string; scopePlaybook?: ScopePlaybook | null }
 ) {
   if (!apiKey) {
     throw new Error("OpenAI API key no esta configurada para el motor persistente.");
@@ -1860,7 +1899,7 @@ async function callOpenAIForScopeAnalysis(
       });
       capturedFailure = true;
       if (response.status === 401 || response.status === 403 || deterministicScopeFindings.length === 0) throw new Error(message);
-      return deterministicScopeAnalysisFallback(scopeId, deterministicScopeFindings, message);
+      return deterministicScopeAnalysisFallback(scopeId, deterministicScopeFindings, message, debug?.scopePlaybook ?? null);
     }
     const parsed = JSON.parse(extractResponseText(payload) || "{\"findings\":[],\"recommendations\":[]}");
     const validation = validateScopeAnalysisResult(parsed, scopePacket);
@@ -1879,6 +1918,7 @@ async function callOpenAIForScopeAnalysis(
       rejectedFindings: validation.rejectedFindings
     });
     const mergedFindings = mergeScopeFindings(validation.validFindings, deterministicScopeFindings);
+    const exclusionResult = applyScopePlaybookExclusions(scopeId, mergedFindings, debug?.scopePlaybook ?? null);
     return {
       ...parsed,
       phase: "scope_analysis",
@@ -1886,9 +1926,10 @@ async function callOpenAIForScopeAnalysis(
       pattern: usesPatternQuery(scopeId) ? patternForScope(scopeId) : "generic",
       audit,
       packetSummary: summarizeScopePacket(scopePacket),
-      findings: mergedFindings,
+      findings: exclusionResult.kept,
+      suppressedFindings: exclusionResult.suppressed,
       rejectedFindings: validation.rejectedFindings,
-      recommendations: Array.from(new Set([...(Array.isArray(parsed.recommendations) ? parsed.recommendations : []), ...deterministicScopeFindings.map((finding: any) => finding.recommendation).filter(Boolean)]))
+      recommendations: Array.from(new Set([...(Array.isArray(parsed.recommendations) ? parsed.recommendations : []), ...exclusionResult.kept.map((finding: any) => finding.recommendation).filter(Boolean)]))
     };
   } catch (error) {
     if (!capturedFailure) {
@@ -1908,7 +1949,7 @@ async function callOpenAIForScopeAnalysis(
     }
     if (deterministicScopeFindings.length === 0) throw error;
     const message = error instanceof Error ? error.message : "OpenAI no respondio durante scope_analysis.";
-    return deterministicScopeAnalysisFallback(scopeId, deterministicScopeFindings, message);
+    return deterministicScopeAnalysisFallback(scopeId, deterministicScopeFindings, message, debug?.scopePlaybook ?? null);
   } finally {
     clearTimeout(timeout);
     if (cancelPoll) clearInterval(cancelPoll);
@@ -2032,14 +2073,16 @@ async function captureSynthesisInteraction(
   });
 }
 
-function deterministicScopeAnalysisFallback(scopeId: AIAnalysisScopeId, findings: any[], reason: string) {
+function deterministicScopeAnalysisFallback(scopeId: AIAnalysisScopeId, findings: any[], reason: string, playbook?: ScopePlaybook | null) {
+  const exclusionResult = applyScopePlaybookExclusions(scopeId, findings, playbook ?? null);
   return {
     phase: "scope_analysis",
     scopeId,
     pattern: usesPatternQuery(scopeId) ? patternForScope(scopeId) : "generic",
     provider: "deterministic-fallback",
-    findings,
-    recommendations: Array.from(new Set(findings.map((finding: any) => finding.recommendation).filter(Boolean))),
+    findings: exclusionResult.kept,
+    suppressedFindings: exclusionResult.suppressed,
+    recommendations: Array.from(new Set(exclusionResult.kept.map((finding: any) => finding.recommendation).filter(Boolean))),
     limitations: [`OpenAI no completo la fase scope_analysis; se usaron candidatos determinísticos con evidencia. Detalle: ${reason}`]
   };
 }
@@ -2296,6 +2339,27 @@ export function buildDesignRubricSystemPrompt(basePrompt: string, guidelines: Re
     "Rubrica de evaluacion:",
     guidelines.content
   ].join("\n");
+}
+
+export function buildScopePlaybookSystemPrompt(scopeId: AIAnalysisScopeId, playbook?: ScopePlaybook | null) {
+  if (!playbook || scopeId !== "configuration" || !isScopePlaybookEnabled()) return undefined;
+  const playbookSection = buildPlaybookPromptSection(playbook);
+  if (!playbookSection) return undefined;
+  return [
+    buildScopeSystemPrompt(scopeId),
+    "",
+    playbookSection,
+    "",
+    "Usa criterios y hallazgos esperados como rubrica de enfoque, no como permiso para inventar evidencia.",
+    "Las exclusiones del playbook se aplican despues de la validacion; aun asi evita generar hallazgos que sean claramente ruido segun el playbook."
+  ].join("\n");
+}
+
+function applyScopePlaybookExclusions(scopeId: AIAnalysisScopeId, findings: any[], playbook?: ScopePlaybook | null) {
+  if (!playbook || scopeId !== "configuration" || !isScopePlaybookEnabled()) {
+    return { kept: findings, suppressed: [] as ReturnType<typeof applyExclusions>["suppressed"] };
+  }
+  return applyExclusions(findings, playbook.exclusions);
 }
 
 export function isDesignRubricEnabled() {
@@ -3024,7 +3088,7 @@ function chunkFromText(scopeId: AIAnalysisScopeId, index: number, text: string) 
   };
 }
 
-export function hashScopeInput(record: any, scopeId: AIAnalysisScopeId, options?: { designGuidelinesHash?: string | null }) {
+export function hashScopeInput(record: any, scopeId: AIAnalysisScopeId, options?: { designGuidelinesHash?: string | null; scopePlaybookHash?: string | null }) {
   const context = buildScopeContext(record, scopeId);
   return createHash("sha256")
     .update(stableStringify({
@@ -3037,6 +3101,7 @@ export function hashScopeInput(record: any, scopeId: AIAnalysisScopeId, options?
       ...(isDeterministicLifecycleEnabled() && scopeId === "lifecycle" ? { deterministicLifecycle: true } : {}),
       ...(isDeterministicOperationsEnabled() && scopeId === "operations" ? { deterministicOperations: true } : {}),
       ...(usesDesignRubric(scopeId) && options?.designGuidelinesHash ? { designGuidelinesHash: options.designGuidelinesHash } : {}),
+      ...(isScopePlaybookEnabled() && scopeId === "configuration" && options?.scopePlaybookHash ? { scopePlaybookHash: options.scopePlaybookHash } : {}),
       engineVersion,
       client: context.client,
       assessment: context.assessment,
@@ -3044,6 +3109,19 @@ export function hashScopeInput(record: any, scopeId: AIAnalysisScopeId, options?
       evidenceText: context.evidenceText
     }))
     .digest("hex");
+}
+
+async function loadScopePlaybookContext(): Promise<ScopePlaybookContext> {
+  const playbook = await getScopePlaybook("configuration");
+  return {
+    playbook,
+    playbookHash: playbook.hash
+  };
+}
+
+function scopePlaybookForScope(scopeId: AIAnalysisScopeId, context: ScopePlaybookContext | null) {
+  if (!context || scopeId !== "configuration" || !isScopePlaybookEnabled()) return null;
+  return context;
 }
 
 async function loadDesignRubricContext(assessmentId: string): Promise<DesignRubricContext> {

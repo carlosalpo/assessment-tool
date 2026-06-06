@@ -337,6 +337,15 @@ model TopologyDesignGuideline {
   updatedAt DateTime @updatedAt
 }
 
+model ScopePlaybook {
+  scopeId        String   @id
+  criteriaJson   Json
+  expectedJson   Json
+  exclusionsJson Json
+  updatedBy      String?
+  updatedAt      DateTime @updatedAt
+}
+
 model AiInteractionLog {
   id                   String   @id @default(cuid())
   jobId                String

@@ -446,6 +446,42 @@ type TopologyDesignGuidelineResponse = {
   deleted?: number;
 };
 
+type ScopePlaybookCriterion = {
+  id: string;
+  aspect: string;
+  guidance: string;
+};
+
+type ScopePlaybookExpectedFinding = {
+  id: string;
+  title: string;
+  description: string;
+  severityHint: RiskLevel;
+  exampleRationale: string;
+};
+
+type ScopePlaybookExclusion = {
+  id: string;
+  keywords: string[];
+  severityBelow?: RiskLevel;
+  findingTypeIn?: string[];
+  reason: string;
+  source: "manual" | "review_feedback";
+};
+
+type ScopePlaybookResponse = {
+  playbook: {
+    scopeId: string;
+    criteria: ScopePlaybookCriterion[];
+    expected: ScopePlaybookExpectedFinding[];
+    exclusions: ScopePlaybookExclusion[];
+    updatedBy: string | null;
+    updatedAt: string | null;
+    hash: string;
+  };
+  rule?: ScopePlaybookExclusion;
+};
+
 type RunEvaluationOptions = {
   forceReevaluate?: boolean;
 };
@@ -7888,9 +7924,11 @@ function AiEvaluationTab({
         </PanelBody>
       </Panel>
       {isAdmin && currentUser && <TopologyDesignGuidelinesAdminPanel record={record} currentUser={currentUser} />}
+      {isAdmin && currentUser && <ScopePlaybookAdminPanel currentUser={currentUser} />}
       {isAdmin && currentUser && <AIDebugAdminPanel record={record} currentUser={currentUser} />}
       <AIReviewPanel
         record={record}
+        currentUser={currentUser}
         scopeFindingFilter={scopeFindingFilter}
         onClearScopeFindingFilter={() => setScopeFindingFilter(null)}
         onUpdateFinding={onUpdateFinding}
@@ -8454,6 +8492,294 @@ function TopologyDesignGuidelinesAdminPanel({ record, currentUser }: { record: A
   );
 }
 
+function ScopePlaybookAdminPanel({ currentUser }: { currentUser: AppUser }) {
+  const isAdmin = canManageUsers(currentUser);
+  const [playbook, setPlaybook] = useState<ScopePlaybookResponse["playbook"] | null>(null);
+  const [draft, setDraft] = useState<Pick<ScopePlaybookResponse["playbook"], "criteria" | "expected" | "exclusions">>({
+    criteria: [],
+    expected: [],
+    exclusions: []
+  });
+  const [status, setStatus] = useState<{ state: "idle" | "loading" | "saving" | "error"; message: string }>({
+    state: "idle",
+    message: ""
+  });
+
+  const loadPlaybook = useCallback(async () => {
+    if (!isAdmin) return;
+    try {
+      const response = await fetchScopePlaybook(currentUser);
+      setPlaybook(response.playbook);
+      setDraft({
+        criteria: response.playbook.criteria,
+        expected: response.playbook.expected,
+        exclusions: response.playbook.exclusions
+      });
+      setStatus({ state: "idle", message: "" });
+    } catch (error) {
+      setStatus({ state: "error", message: error instanceof Error ? error.message : "No se pudo cargar el playbook." });
+    }
+  }, [currentUser, isAdmin]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadPlaybook();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [loadPlaybook]);
+
+  async function savePlaybook() {
+    setStatus({ state: "saving", message: "Guardando playbook..." });
+    try {
+      const response = await updateScopePlaybook(draft, currentUser);
+      setPlaybook(response.playbook);
+      setDraft({
+        criteria: response.playbook.criteria,
+        expected: response.playbook.expected,
+        exclusions: response.playbook.exclusions
+      });
+      setStatus({ state: "idle", message: "Playbook guardado." });
+    } catch (error) {
+      setStatus({ state: "error", message: error instanceof Error ? error.message : "No se pudo guardar el playbook." });
+    }
+  }
+
+  if (!isAdmin) return null;
+  const busy = status.state === "loading" || status.state === "saving";
+
+  return (
+    <Panel>
+      <PanelHeader className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <ClipboardList size={16} className="text-primary" />
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-sm font-semibold">Playbook - Configuracion</h2>
+              <Badge tone="neutral">{playbook ? shortHash(playbook.hash) : "Cargando"}</Badge>
+              <Badge tone="info">Global</Badge>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {playbook?.updatedAt ? `Actualizado ${formatDate(playbook.updatedAt)} por ${playbook.updatedBy ?? "admin"}` : "Criterios, hallazgos esperados y exclusiones para el scope configuration."}
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => {
+              setStatus({ state: "loading", message: "Cargando playbook..." });
+              void loadPlaybook();
+            }}
+            disabled={busy}
+          >
+            <RotateCcw size={14} />
+            Refrescar
+          </Button>
+          <Button size="sm" onClick={() => void savePlaybook()} disabled={busy}>
+            <Save size={14} />
+            Guardar
+          </Button>
+        </div>
+      </PanelHeader>
+      <PanelBody className="space-y-4">
+        {status.message && (
+          <div className={cn("rounded-md border px-3 py-2 text-xs", status.state === "error" ? "border-rose-500/40 bg-rose-500/10 text-rose-300" : "border-border bg-muted/40 text-muted-foreground")}>
+            {status.message}
+          </div>
+        )}
+        <PlaybookCriteriaEditor
+          values={draft.criteria}
+          disabled={busy}
+          onChange={(criteria) => setDraft((current) => ({ ...current, criteria }))}
+        />
+        <PlaybookExpectedEditor
+          values={draft.expected}
+          disabled={busy}
+          onChange={(expected) => setDraft((current) => ({ ...current, expected }))}
+        />
+        <PlaybookExclusionEditor
+          values={draft.exclusions}
+          disabled={busy}
+          onChange={(exclusions) => setDraft((current) => ({ ...current, exclusions }))}
+        />
+      </PanelBody>
+    </Panel>
+  );
+}
+
+function PlaybookCriteriaEditor({
+  values,
+  disabled,
+  onChange
+}: {
+  values: ScopePlaybookCriterion[];
+  disabled: boolean;
+  onChange: (values: ScopePlaybookCriterion[]) => void;
+}) {
+  function update(index: number, patch: Partial<ScopePlaybookCriterion>) {
+    onChange(values.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item));
+  }
+  return (
+    <div className="rounded-md border border-border p-3">
+      <PlaybookSectionHeader
+        title="Criterios"
+        count={values.length}
+        onAdd={() => onChange([...values, { id: uid("criterion"), aspect: "", guidance: "" }])}
+        disabled={disabled}
+      />
+      <div className="mt-3 space-y-2">
+        {values.map((item, index) => (
+          <div key={item.id} className="grid gap-2 rounded-md border border-border bg-muted/20 p-2 md:grid-cols-[180px_1fr_auto]">
+            <Input value={item.aspect} disabled={disabled} placeholder="Aspecto" onChange={(event) => update(index, { aspect: event.target.value })} />
+            <Textarea value={item.guidance} disabled={disabled} className="min-h-20" placeholder="Guia de evaluacion" onChange={(event) => update(index, { guidance: event.target.value })} />
+            <Button size="icon" variant="ghost" title="Quitar criterio" disabled={disabled} onClick={() => onChange(values.filter((_, itemIndex) => itemIndex !== index))}>
+              <Trash2 size={14} />
+            </Button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PlaybookExpectedEditor({
+  values,
+  disabled,
+  onChange
+}: {
+  values: ScopePlaybookExpectedFinding[];
+  disabled: boolean;
+  onChange: (values: ScopePlaybookExpectedFinding[]) => void;
+}) {
+  function update(index: number, patch: Partial<ScopePlaybookExpectedFinding>) {
+    onChange(values.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item));
+  }
+  return (
+    <div className="rounded-md border border-border p-3">
+      <PlaybookSectionHeader
+        title="Hallazgos esperados"
+        count={values.length}
+        onAdd={() => onChange([...values, { id: uid("expected"), title: "", description: "", severityHint: "medium", exampleRationale: "" }])}
+        disabled={disabled}
+      />
+      <div className="mt-3 space-y-2">
+        {values.map((item, index) => (
+          <div key={item.id} className="grid gap-2 rounded-md border border-border bg-muted/20 p-2 lg:grid-cols-[1fr_130px_1fr_auto]">
+            <Input value={item.title} disabled={disabled} placeholder="Titulo esperado" onChange={(event) => update(index, { title: event.target.value })} />
+            <select
+              className="h-10 rounded-md border border-border bg-white px-3 text-sm"
+              value={item.severityHint}
+              disabled={disabled}
+              onChange={(event) => update(index, { severityHint: event.target.value as RiskLevel })}
+            >
+              {riskLevelsForEditor.map((risk) => <option key={risk} value={risk}>{risk}</option>)}
+            </select>
+            <Textarea value={item.description} disabled={disabled} className="min-h-20" placeholder="Descripcion" onChange={(event) => update(index, { description: event.target.value })} />
+            <Button size="icon" variant="ghost" title="Quitar esperado" disabled={disabled} onClick={() => onChange(values.filter((_, itemIndex) => itemIndex !== index))}>
+              <Trash2 size={14} />
+            </Button>
+            <Textarea
+              value={item.exampleRationale}
+              disabled={disabled}
+              className="min-h-16 lg:col-span-3"
+              placeholder="Ejemplo de racional"
+              onChange={(event) => update(index, { exampleRationale: event.target.value })}
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PlaybookExclusionEditor({
+  values,
+  disabled,
+  onChange
+}: {
+  values: ScopePlaybookExclusion[];
+  disabled: boolean;
+  onChange: (values: ScopePlaybookExclusion[]) => void;
+}) {
+  function update(index: number, patch: Partial<ScopePlaybookExclusion>) {
+    onChange(values.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item));
+  }
+  return (
+    <div className="rounded-md border border-border p-3">
+      <PlaybookSectionHeader
+        title="Exclusiones"
+        count={values.length}
+        onAdd={() => onChange([...values, { id: uid("exclusion"), keywords: [], reason: "", source: "manual" }])}
+        disabled={disabled}
+      />
+      <div className="mt-3 space-y-2">
+        {values.map((item, index) => (
+          <div key={item.id} className="grid gap-2 rounded-md border border-border bg-muted/20 p-2 lg:grid-cols-[1fr_150px_1fr_120px_auto]">
+            <Input
+              value={item.keywords.join(", ")}
+              disabled={disabled}
+              placeholder="keywords separadas por coma"
+              onChange={(event) => update(index, { keywords: splitCsv(event.target.value) })}
+            />
+            <select
+              className="h-10 rounded-md border border-border bg-white px-3 text-sm"
+              value={item.severityBelow ?? ""}
+              disabled={disabled}
+              onChange={(event) => update(index, { severityBelow: event.target.value ? event.target.value as RiskLevel : undefined })}
+            >
+              <option value="">Sin umbral</option>
+              {riskLevelsForEditor.map((risk) => <option key={risk} value={risk}>Bajo {risk}</option>)}
+            </select>
+            <Input
+              value={(item.findingTypeIn ?? []).join(", ")}
+              disabled={disabled}
+              placeholder="finding_type incluidos"
+              onChange={(event) => update(index, { findingTypeIn: splitCsv(event.target.value) })}
+            />
+            <Badge tone={item.source === "review_feedback" ? "info" : "neutral"}>{item.source === "review_feedback" ? "Revision" : "Manual"}</Badge>
+            <Button size="icon" variant="ghost" title="Quitar exclusion" disabled={disabled} onClick={() => onChange(values.filter((_, itemIndex) => itemIndex !== index))}>
+              <Trash2 size={14} />
+            </Button>
+            <Textarea
+              value={item.reason}
+              disabled={disabled}
+              className="min-h-16 lg:col-span-4"
+              placeholder="Motivo"
+              onChange={(event) => update(index, { reason: event.target.value })}
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PlaybookSectionHeader({
+  title,
+  count,
+  onAdd,
+  disabled
+}: {
+  title: string;
+  count: number;
+  onAdd: () => void;
+  disabled: boolean;
+}) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="flex items-center gap-2">
+        <p className="text-sm font-semibold">{title}</p>
+        <Badge tone="neutral">{count}</Badge>
+      </div>
+      <Button size="sm" variant="secondary" onClick={onAdd} disabled={disabled}>
+        <Plus size={14} />
+        Agregar
+      </Button>
+    </div>
+  );
+}
+
 function AIDebugAdminPanel({ record, currentUser }: { record: AssessmentRecord; currentUser: AppUser }) {
   const isAdmin = canManageUsers(currentUser);
   const [setting, setSetting] = useState<AIDebugSetting | null>(null);
@@ -8706,21 +9032,37 @@ function DebugJsonBlock({
 
 function AIReviewPanel({
   record,
+  currentUser,
   scopeFindingFilter,
   onClearScopeFindingFilter,
   onUpdateFinding
 }: {
   record: AssessmentRecord;
+  currentUser: AppUser | null;
   scopeFindingFilter: EvaluationArea | null;
   onClearScopeFindingFilter: () => void;
   onUpdateFinding: (id: string, patch: Partial<Finding>) => void;
 }) {
   const [statusFilter, setStatusFilter] = useState<"all" | Finding["status"]>("all");
+  const [reviewSuppressionStatus, setReviewSuppressionStatus] = useState<{ state: "idle" | "saving" | "error"; message: string }>({ state: "idle", message: "" });
   const aiFindingsById = new Map(record.parsed.findings.filter((finding) => finding.aiMetadata).map((finding) => [finding.id, finding]));
   const areaFilteredFindings = filterFindingsByArea(Array.from(aiFindingsById.values()), scopeFindingFilter);
   const aiFindings = areaFilteredFindings.filter((finding) => statusFilter === "all" || finding.status === statusFilter);
   const acceptedCount = aiFindings.filter((finding) => finding.status === "accepted" || finding.status === "edited" || finding.status === "validated").length;
   const filterLabel = scopeFindingFilter ? evaluationAreaLabel(scopeFindingFilter) : null;
+  const canAppendReviewSuppression = Boolean(currentUser && canManageUsers(currentUser));
+
+  async function suppressLikeFinding(finding: Finding) {
+    if (!currentUser || finding.category !== "configuration") return;
+    setReviewSuppressionStatus({ state: "saving", message: "Creando exclusion en playbook..." });
+    try {
+      await appendReviewSuppressionToScopePlaybook(finding, currentUser);
+      onUpdateFinding(finding.id, { status: "discarded" });
+      setReviewSuppressionStatus({ state: "idle", message: "Exclusion agregada al playbook de Configuracion." });
+    } catch (error) {
+      setReviewSuppressionStatus({ state: "error", message: error instanceof Error ? error.message : "No se pudo crear la exclusion." });
+    }
+  }
 
   return (
     <Panel>
@@ -8757,6 +9099,11 @@ function AIReviewPanel({
             </Button>
           </div>
         )}
+        {reviewSuppressionStatus.message && (
+          <div className={cn("rounded-md border px-3 py-2 text-xs", reviewSuppressionStatus.state === "error" ? "border-rose-500/40 bg-rose-500/10 text-rose-300" : "border-border bg-muted/40 text-muted-foreground")}>
+            {reviewSuppressionStatus.message}
+          </div>
+        )}
         {record.aiAnalysis.limitations.length > 0 && (
           <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-950 dark:border-amber-500/50 dark:bg-amber-950/30 dark:text-amber-100">
             <p className="font-semibold">Limitaciones de analisis</p>
@@ -8788,7 +9135,13 @@ function AIReviewPanel({
         ) : (
           <div className="space-y-3">
             {aiFindings.map((finding, index) => (
-              <FindingRow key={findingRenderKey(finding, index)} finding={finding} onChange={(patch) => onUpdateFinding(finding.id, patch)} />
+              <FindingRow
+                key={findingRenderKey(finding, index)}
+                finding={finding}
+                onChange={(patch) => onUpdateFinding(finding.id, patch)}
+                onSuppressLike={canAppendReviewSuppression && finding.category === "configuration" ? () => void suppressLikeFinding(finding) : undefined}
+                suppressLikeBusy={reviewSuppressionStatus.state === "saving"}
+              />
             ))}
           </div>
         )}
@@ -11280,7 +11633,17 @@ async function downloadFinalReportDocument(record: AssessmentRecord, activeTempl
   downloadBlob(fileName, rendered);
 }
 
-function FindingRow({ finding, onChange }: { finding: Finding; onChange: (patch: Partial<Finding>) => void }) {
+function FindingRow({
+  finding,
+  onChange,
+  onSuppressLike,
+  suppressLikeBusy = false
+}: {
+  finding: Finding;
+  onChange: (patch: Partial<Finding>) => void;
+  onSuppressLike?: () => void;
+  suppressLikeBusy?: boolean;
+}) {
   const [editing, setEditing] = useState(false);
   const probability = probabilityForFinding(finding);
   const severity = severityForFinding(finding);
@@ -11321,6 +11684,14 @@ function FindingRow({ finding, onChange }: { finding: Finding; onChange: (patch:
           </Button>
         </div>
       </div>
+      {onSuppressLike && (
+        <div className="mt-3 flex justify-end">
+          <Button size="sm" variant="ghost" onClick={onSuppressLike} disabled={suppressLikeBusy || finding.status === "discarded"}>
+            <X size={13} />
+            Suprimir hallazgos como este
+          </Button>
+        </div>
+      )}
 
       <div className="mt-3 grid gap-3 md:grid-cols-[1fr_220px]">
         <div className="rounded-md bg-muted/50 p-3">
@@ -12176,6 +12547,12 @@ function summarizeRejectedFindings(value: unknown) {
   return { count: items.length, reasons };
 }
 
+const riskLevelsForEditor: RiskLevel[] = ["critical", "high", "medium", "low", "info"];
+
+function shortHash(value: string) {
+  return value ? value.slice(0, 8) : "sin hash";
+}
+
 async function fetchAIAnalysisStatus(assessmentId: string): Promise<AIAssessmentAnalysisStatus> {
   const response = await fetch(`/api/ai-analysis/assessments/${assessmentId}/status`, { cache: "no-store" });
   const payload = await response.json();
@@ -12227,6 +12604,61 @@ async function deleteTopologyDesignGuideline(scopeKey: string, currentUser: AppU
   const payload = await response.json();
   if (!response.ok) throw new Error(payload?.error || "No se pudo eliminar guideline de diseno.");
   return payload as TopologyDesignGuidelineResponse;
+}
+
+async function fetchScopePlaybook(currentUser: AppUser): Promise<ScopePlaybookResponse> {
+  const response = await fetch("/api/ai-analysis/playbook?scopeId=configuration", {
+    cache: "no-store",
+    headers: { "x-user-email": currentUser.email }
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload?.error || "No se pudo consultar el playbook.");
+  return payload as ScopePlaybookResponse;
+}
+
+async function updateScopePlaybook(
+  draft: Pick<ScopePlaybookResponse["playbook"], "criteria" | "expected" | "exclusions">,
+  currentUser: AppUser
+): Promise<ScopePlaybookResponse> {
+  const response = await fetch("/api/ai-analysis/playbook", {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      "x-user-email": currentUser.email
+    },
+    body: JSON.stringify({
+      scopeId: "configuration",
+      criteria: draft.criteria,
+      expected: draft.expected,
+      exclusions: draft.exclusions,
+      updatedBy: currentUser.email
+    })
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload?.error || "No se pudo guardar el playbook.");
+  return payload as ScopePlaybookResponse;
+}
+
+async function appendReviewSuppressionToScopePlaybook(finding: Finding, currentUser: AppUser): Promise<ScopePlaybookResponse> {
+  const response = await fetch("/api/ai-analysis/playbook", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-user-email": currentUser.email
+    },
+    body: JSON.stringify({
+      scopeId: "configuration",
+      finding: {
+        title: finding.title,
+        finding_type: finding.aiMetadata?.findingType
+      },
+      reason: "Hallazgo descartado en revision; suprimir similares.",
+      updatedBy: currentUser.email
+    })
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload?.error || "No se pudo crear la exclusion.");
+  return payload as ScopePlaybookResponse;
 }
 
 function designGuidelineSourceLabel(source: DesignGuidelineSource) {

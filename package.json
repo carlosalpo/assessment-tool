@@ -12,7 +12,7 @@
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
     "test:ops": "node --test --experimental-strip-types lib/operational-assessment.test.ts",
-    "test:ai": "node --test --experimental-strip-types lib/ai-analysis.test.ts lib/lifecycle-analysis.test.ts lib/operations-analysis.test.ts lib/ai-debug.test.ts lib/ai-design-guidelines.test.ts lib/ai-scope-brief.test.ts lib/ai-scope-engine.test.ts lib/ai-device-context.test.ts lib/ai-scope-schemas.test.ts lib/ai-status-labels.test.ts lib/ai-finding-summary.test.ts lib/ai-scope-ui.test.ts lib/ai-pipeline-view.test.ts",
+    "test:ai": "node --test --experimental-strip-types lib/ai-analysis.test.ts lib/lifecycle-analysis.test.ts lib/operations-analysis.test.ts lib/ai-debug.test.ts lib/ai-design-guidelines.test.ts lib/scope-playbook.test.ts lib/ai-scope-brief.test.ts lib/ai-scope-engine.test.ts lib/ai-device-context.test.ts lib/ai-scope-schemas.test.ts lib/ai-status-labels.test.ts lib/ai-finding-summary.test.ts lib/ai-scope-ui.test.ts lib/ai-pipeline-view.test.ts",
     "test:eval": "node --test --experimental-strip-types eval/eval.test.ts",
     "test:navigation": "node --test --experimental-strip-types lib/assessment-navigation.test.ts",
     "test:templates": "node --test --experimental-strip-types lib/document-templates.test.ts lib/performance-analysis.test.ts lib/performance-visualization-service.test.ts lib/ai-analysis.test.ts",
