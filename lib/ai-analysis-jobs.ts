@@ -59,6 +59,11 @@ import {
   getScopePlaybook,
   type ScopePlaybookSnapshot
 } from "./scope-playbook-store.ts";
+import {
+  consolidateGapFindings,
+  isGapConsolidationEnabled,
+  normalizeGapFindings
+} from "./gap-consolidation.ts";
 import { mapLegacyRemediation } from "./types.ts";
 
 export type AIAnalysisJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "partially_completed";
@@ -1862,7 +1867,8 @@ async function callOpenAIForScopeAnalysis(
               "Puedes conservar, ajustar severidad o descartar candidatos solo si la evidencia contradice el candidato.",
               "No devuelvas findings vacio cuando la memoria tenga candidatos validos soportados por evidencia.",
               "Incluye evidence_refs, related_fact_ids, related_metric_ids y related_correlation_ids usando solo IDs existentes en el packet.",
-              "Incluye remediation_category con una de las 4 categorias accionables; usa pending_validation solo si no aplica remediacion o falta validacion del arquitecto."
+              "Incluye remediation_category con una de las 4 categorias accionables; usa pending_validation solo si no aplica remediacion o falta validacion del arquitecto.",
+              ...(isGapConsolidationEnabled() ? ["Si el hallazgo es sobre falta o insuficiencia de datos recolectados (cobertura de vecinos, metricas, monitoreo), clasificalo como visibility_gap severidad low y no lo repitas por equipo."] : [])
             ],
             aiScopePacket: scopePacket,
             ...(debug?.deviceOsByName ? { deviceOsFamilies: serializeDeviceOsLookup(debug.deviceOsByName) } : {}),
@@ -1932,7 +1938,8 @@ async function callOpenAIForScopeAnalysis(
       rejectedFindings: validation.rejectedFindings
     });
     const mergedFindings = mergeScopeFindings(validation.validFindings, deterministicScopeFindings);
-    const exclusionResult = applyScopePlaybookExclusions(scopeId, mergedFindings, debug?.scopePlaybook ?? null, debug?.deviceOsByName);
+    const gapProcessedFindings = applyGapConsolidationForScope(scopeId, mergedFindings);
+    const exclusionResult = applyScopePlaybookExclusions(scopeId, gapProcessedFindings, debug?.scopePlaybook ?? null, debug?.deviceOsByName);
     return {
       ...parsed,
       phase: "scope_analysis",
@@ -2088,7 +2095,8 @@ async function captureSynthesisInteraction(
 }
 
 function deterministicScopeAnalysisFallback(scopeId: AIAnalysisScopeId, findings: any[], reason: string, playbook?: ScopePlaybook | null, deviceOsByName?: DeviceOsLookup) {
-  const exclusionResult = applyScopePlaybookExclusions(scopeId, findings, playbook ?? null, deviceOsByName);
+  const gapProcessedFindings = applyGapConsolidationForScope(scopeId, findings);
+  const exclusionResult = applyScopePlaybookExclusions(scopeId, gapProcessedFindings, playbook ?? null, deviceOsByName);
   return {
     phase: "scope_analysis",
     scopeId,
@@ -2339,6 +2347,9 @@ export function buildScopeSystemPrompt(scopeId: AIAnalysisScopeId) {
   if (isPerDeviceEnabled() && engineForScope(scopeId) === "ai-per-device") {
     lines.splice(lines.length - 1, 0, "Modo por equipo: el contexto incluye varios equipos con su rol, vecinos y protocolos. Genera hallazgos POR EQUIPO; cada hallazgo indica en `related_devices` el equipo especifico. No mezcles equipos en un mismo hallazgo salvo interaccion explicita entre ellos.");
   }
+  if (isGapConsolidationEnabled() && !isSynthesisScope(scopeId)) {
+    lines.splice(lines.length - 1, 0, "Si el hallazgo describe falta o insuficiencia de DATOS recolectados (cobertura de vecinos CDP/LLDP, metricas de performance o monitoreo), usa visibility_gap severidad low y consolidalo por tema en vez de repetirlo por equipo.");
+  }
   return lines.join("\n");
 }
 
@@ -2375,6 +2386,15 @@ function applyScopePlaybookExclusions(scopeId: AIAnalysisScopeId, findings: any[
     return { kept: findings, suppressed: [] as ReturnType<typeof applyExclusions>["suppressed"] };
   }
   return applyExclusions(findings, playbook.exclusions, { deviceOsByName });
+}
+
+function applyGapConsolidationForScope(scopeId: AIAnalysisScopeId, findings: any[]) {
+  if (!isGapConsolidationEnabled() || isSynthesisScope(scopeId)) return findings;
+  return consolidateGapFindings(normalizeGapFindings(findings));
+}
+
+function isSynthesisScope(scopeId: AIAnalysisScopeId) {
+  return scopeId === "roadmap" || scopeId === "executive_summary";
 }
 
 function deviceOsLookupFromDeviceContexts(deviceContexts: Array<ReturnType<typeof buildDeviceContext>>): Map<string, OsFamily> {
@@ -3135,6 +3155,7 @@ export function hashScopeInput(record: any, scopeId: AIAnalysisScopeId, options?
       ...(isEvidenceTieringEnabled() ? { evidenceTiering: true } : {}),
       ...(isDomainPartitionEnabled() ? { domainPartition: true } : {}),
       ...(isPerDeviceEnabled() && engineForScope(scopeId) === "ai-per-device" ? { perDevice: true } : {}),
+      ...(isGapConsolidationEnabled() ? { gapConsolidation: true } : {}),
       ...(isDeterministicLifecycleEnabled() && scopeId === "lifecycle" ? { deterministicLifecycle: true } : {}),
       ...(isDeterministicOperationsEnabled() && scopeId === "operations" ? { deterministicOperations: true } : {}),
       ...(usesDesignRubric(scopeId) && options?.designGuidelinesHash ? { designGuidelinesHash: options.designGuidelinesHash } : {}),
