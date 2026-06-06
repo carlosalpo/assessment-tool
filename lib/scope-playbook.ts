@@ -419,6 +419,287 @@ export const defaultConfigurationScopePlaybook: ScopePlaybook = {
   exclusions: []
 };
 
+export const defaultSecurityScopePlaybook: ScopePlaybook = {
+  scopeId: "security",
+  criteria: [
+    {
+      id: "sec-management-plane-aaa",
+      aspect: "AAA y control de acceso administrativo",
+      guidance: "Evalua AAA con TACACS+/RADIUS y fallback local, authorization/accounting de comandos cuando aplique, usuarios locales de respaldo con privilegios minimos y ausencia de cuentas genericas.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "sec-ssh-only-management",
+      aspect: "Administracion interactiva segura",
+      guidance: "Evalua SSHv2 como unico acceso interactivo, Telnet deshabilitado, versiones/ciphers razonables, claves RSA suficientes y line vty/management ACL restringida a redes de gestion.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "sec-http-https-management",
+      aspect: "HTTP/HTTPS/ASDM/NX-API de administracion",
+      guidance: "Evalua HTTP plano deshabilitado, HTTPS/ASDM/NX-API solo si hay necesidad operacional, restringido por origen/VRF/interfaz y con autenticacion AAA.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "sec-management-plane-acl-vrf",
+      aspect: "Aislamiento del plano de gestion",
+      guidance: "Evalua VRF/interfaz de gestion, ACLs de infraestructura, management access-class/control-plane host y separacion entre trafico de gestion y datos.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "sec-snmp-hardening",
+      aspect: "SNMP seguro",
+      guidance: "Evalua SNMPv3 authPriv, comunidades v1/v2c restringidas o ausentes, ACLs de origen, grupos/vistas minimas, traps relevantes y ausencia de comunidades default o RW.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "sec-password-secrets",
+      aspect: "Proteccion de credenciales y secretos",
+      guidance: "Evalua enable secret en lugar de enable password, secret type robusto cuando aplique, service password-encryption como minimo, politicas de password y ausencia de secretos debiles o reversibles.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "sec-logging-audit",
+      aspect: "Auditoria de cambios y logging de seguridad",
+      guidance: "Evalua syslog centralizado, timestamps, logging de cambios de configuracion/comandos, accounting AAA, severidades utiles y fuente de logs consistente.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "sec-ntp-auth-time",
+      aspect: "Tiempo confiable para seguridad",
+      guidance: "Evalua NTP autenticado cuando aplique, servidores autorizados, timezone coherente y consistencia horaria para forensica, correlacion de eventos y certificados.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "sec-unused-services",
+      aspect: "Servicios inseguros o innecesarios",
+      guidance: "Evalua deshabilitacion de servicios no usados como finger, PAD, bootp server, small servers, source-route, identd, ip http server, telnet y protocolos de transferencia inseguros.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "sec-cdp-lldp-exposure",
+      aspect: "Exposicion por CDP/LLDP",
+      guidance: "Evalua CDP/LLDP deshabilitado en puertos de usuario, perimetro, DMZ, Internet o enlaces no confiables; permitido solo donde sea necesario para operacion interna.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "sec-control-plane-protection",
+      aspect: "Proteccion del control plane",
+      guidance: "Evalua CoPP/CPPr/receive ACLs, rate limiting de trafico dirigido al dispositivo, filtros de ICMP/TTL/options y proteccion contra trafico que impacte CPU.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "sec-icmp-redirects-proxy-arp",
+      aspect: "Comportamientos IP riesgosos",
+      guidance: "Evalua ICMP redirects, proxy ARP, directed broadcast, source-route, unreachable generation y defaults IP que puedan facilitar reconnaissance, spoofing o rutas inesperadas.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "sec-routing-protocol-auth",
+      aspect: "Seguridad de protocolos de routing",
+      guidance: "Evalua autenticacion OSPF/EIGRP/BGP, passive-interface por defecto, vecinos explicitamente definidos, TTL security/GTSM para eBGP y filtros de rutas por vecino.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "sec-layer2-access",
+      aspect: "Seguridad de capa 2 en acceso",
+      guidance: "Evalua DHCP Snooping, Dynamic ARP Inspection, IP Source Guard, port-security, storm-control y proteccion contra rogue DHCP/ARP spoofing en switches de acceso.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "sec-stp-edge-protection",
+      aspect: "Proteccion L2 contra loops o switches no autorizados",
+      guidance: "Evalua BPDU Guard, Root Guard, Loop Guard, UDLD y PortFast/edge-port como controles de seguridad operacional ante dispositivos no autorizados o fallas L2.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "sec-vlan-trunk-security",
+      aspect: "Seguridad de VLANs y trunks",
+      guidance: "Evalua DTP deshabilitado, VLAN nativa no usada, allowed VLAN minima, VLAN 1 sin trafico de usuario/gestion y aislamiento de VLANs sensibles.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "sec-asa-management-hardening",
+      aspect: "ASA - hardening de administracion",
+      guidance: "Evalua SSH/ASDM/HTTP restringido por interfaz y origen, AAA para SSH/HTTP, autorizacion de comandos, usuarios locales de emergencia, NTP/logging/SNMP seguros.",
+      appliesTo: ["asa"]
+    },
+    {
+      id: "sec-asa-access-policy",
+      aspect: "ASA - politica de acceso y object-groups",
+      guidance: "Evalua ACLs con minimo privilegio, object-groups claros, ausencia de any/any amplio, reglas sombra, logging selectivo en reglas criticas y deny final esperado.",
+      appliesTo: ["asa"]
+    },
+    {
+      id: "sec-asa-nat-vpn",
+      aspect: "ASA - NAT, VPN y exposicion perimetral",
+      guidance: "Evalua NAT especifico, VPN con algoritmos/grupos fuertes segun evidencia, tunnel-groups no obsoletos, split-tunnel controlado y management no expuesto por outside salvo excepcion.",
+      appliesTo: ["asa"]
+    },
+    {
+      id: "sec-nxos-rbac",
+      aspect: "NX-OS - RBAC y roles",
+      guidance: "Evalua roles/RBAC, usuarios locales, AAA, feature privilege separation, SNMP users, management VRF y servicios NX-API/HTTP/Telnet segun necesidad real.",
+      appliesTo: ["nxos"]
+    }
+  ],
+  expected: [
+    {
+      id: "expected-sec-aaa-missing",
+      title: "AAA administrativo ausente o incompleto",
+      description: "Equipo sin AAA centralizado, sin fallback local controlado, sin accounting/autorizacion de comandos o con usuarios genericos/privilegios excesivos.",
+      severityHint: "high",
+      exampleRationale: "La configuracion no evidencia TACACS+/RADIUS o accounting de administracion, reduciendo trazabilidad y control de cambios privilegiados.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-sec-telnet-enabled",
+      title: "Telnet o administracion interactiva insegura habilitada",
+      description: "Line vty, ASA management o servicio equivalente permite Telnet o no fuerza SSHv2 para acceso administrativo.",
+      severityHint: "high",
+      exampleRationale: "La evidencia muestra transporte Telnet o ausencia de restriccion a SSH, exponiendo credenciales y sesiones administrativas.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "expected-sec-management-wide-open",
+      title: "Plano de gestion accesible desde origenes amplios",
+      description: "SSH/HTTPS/SNMP/ASDM/NX-API permitido desde redes no acotadas, sin ACL, sin VRF de gestion o por interfaces no destinadas a gestion.",
+      severityHint: "high",
+      exampleRationale: "La configuracion permite administracion desde rangos amplios o interfaces no segregadas, aumentando superficie de ataque.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-sec-http-plain",
+      title: "HTTP plano o interfaz web innecesaria activa",
+      description: "Servicio HTTP no cifrado o consola web/ASDM/NX-API habilitada sin necesidad operacional y restricciones suficientes.",
+      severityHint: "medium",
+      exampleRationale: "El equipo mantiene servicio web administrativo activo sin evidencia de restriccion fuerte de origen o uso requerido.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "expected-sec-snmp-v2-weak",
+      title: "SNMP debil o comunidad expuesta",
+      description: "SNMPv1/v2c con community strings, permisos RW, comunidades genericas o ACLs de origen ausentes/incompletas.",
+      severityHint: "high",
+      exampleRationale: "La configuracion SNMP usa comunidad o version sin controles de privacidad/autenticacion equivalentes a SNMPv3 authPriv.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-sec-weak-secret",
+      title: "Credenciales o secretos configurados de forma debil",
+      description: "Enable password en vez de secret, secretos reversibles/debiles, usuarios locales privilegiados sin proteccion robusta o passwords genericos.",
+      severityHint: "high",
+      exampleRationale: "La evidencia muestra mecanismos de password legacy o secretos con proteccion insuficiente para acceso privilegiado.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "expected-sec-logging-audit-gap",
+      title: "Brecha de auditoria de seguridad administrativa",
+      description: "Ausencia de syslog centralizado, timestamps, accounting AAA o logging de cambios/comandos administrativos.",
+      severityHint: "medium",
+      exampleRationale: "La configuracion no permite reconstruir de forma confiable quien cambio que, cuando y desde donde durante un incidente.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-sec-ntp-gap",
+      title: "Sin tiempo confiable para trazabilidad de seguridad",
+      description: "NTP ausente/no autenticado donde aplica, timezone inconsistente o falta de source-interface para logs y eventos.",
+      severityHint: "medium",
+      exampleRationale: "La falta de sincronizacion horaria confiable degrada correlacion de eventos, certificados, AAA y analisis forense.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-sec-unused-service-exposure",
+      title: "Servicio innecesario o inseguro expuesto",
+      description: "Servicios legacy o no usados habilitados incrementan superficie de ataque del dispositivo.",
+      severityHint: "medium",
+      exampleRationale: "La configuracion evidencia servicios administrativos o auxiliares activos sin justificacion operativa clara.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "expected-sec-cdp-lldp-exposure",
+      title: "CDP/LLDP expone informacion sensible en borde no confiable",
+      description: "Protocolos de descubrimiento activos en puertos donde revelan plataforma, version, IP de gestion o vecinos a dominios no confiables.",
+      severityHint: "medium",
+      exampleRationale: "CDP/LLDP aparece habilitado en una interfaz que por nombre/rol parece usuario, perimetro o enlace externo.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "expected-sec-control-plane-unprotected",
+      title: "Control plane sin proteccion contra trafico dirigido",
+      description: "Ausencia de CoPP/CPPr/receive ACL o filtros equivalentes para limitar trafico destinado al CPU.",
+      severityHint: "high",
+      exampleRationale: "El equipo no muestra politica de control plane y su rol/exposicion sugiere riesgo ante escaneo, floods o paquetes malformados.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "expected-sec-ip-behavior-risk",
+      title: "Comportamiento IP riesgoso habilitado",
+      description: "ICMP redirects, proxy ARP, source-route, directed broadcast u otros defaults facilitan spoofing, reconnaissance o rutas no deseadas.",
+      severityHint: "medium",
+      exampleRationale: "La evidencia no muestra deshabilitacion de comportamientos IP inseguros en interfaces o globalmente donde seria esperado.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "expected-sec-routing-auth-gap",
+      title: "Protocolo de routing sin autenticacion o hardening",
+      description: "OSPF/EIGRP/BGP sin autenticacion, vecinos no restringidos, interfaces no pasivas o falta de TTL security/filtros donde aplica.",
+      severityHint: "medium",
+      exampleRationale: "La configuracion de routing permite formacion o influencia de vecinos sin controles visibles de autenticacion/origen.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "expected-sec-l2-access-control-gap",
+      title: "Acceso L2 sin controles anti-spoofing",
+      description: "Switches de acceso sin DHCP Snooping, DAI, IP Source Guard, port-security o storm-control donde el rol lo requiere.",
+      severityHint: "medium",
+      exampleRationale: "La evidencia no muestra controles L2 esperados para limitar rogue DHCP, ARP spoofing o hosts no autorizados.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "expected-sec-trunk-vlan-exposure",
+      title: "Trunk/VLAN con superficie lateral excesiva",
+      description: "Trunks permisivos, VLAN nativa default, VLAN 1 en uso o DTP activo aumentan alcance de ataques L2 y errores de segmentacion.",
+      severityHint: "medium",
+      exampleRationale: "La configuracion trunk/VLAN muestra defaults o amplitud innecesaria que incrementa movimiento lateral y dominio de falla.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "expected-sec-asa-admin-exposure",
+      title: "ASA con administracion expuesta o sin AAA fuerte",
+      description: "ASA permite SSH/ASDM/HTTP/SNMP desde origenes amplios, sin AAA para consola/SSH/HTTP o sin autorizacion de comandos.",
+      severityHint: "high",
+      exampleRationale: "La configuracion ASA expone administracion y no evidencia controles suficientes de autenticacion, origen y auditoria.",
+      appliesTo: ["asa"]
+    },
+    {
+      id: "expected-sec-asa-acl-any-any",
+      title: "ASA con regla amplia o politica poco restrictiva",
+      description: "ACL/object-group/NAT incluye any/any, permisos amplios, reglas sombra o logging insuficiente en trafico critico.",
+      severityHint: "high",
+      exampleRationale: "La evidencia muestra permisos excesivos o poco especificos que pueden exponer servicios internos o dificultar auditoria.",
+      appliesTo: ["asa"]
+    },
+    {
+      id: "expected-sec-asa-vpn-crypto-weak",
+      title: "ASA con VPN o criptografia debil",
+      description: "VPN/tunnel-group/crypto policy con algoritmos legacy, grupos debiles, split-tunnel amplio o parametros no alineados a buenas practicas.",
+      severityHint: "high",
+      exampleRationale: "La configuracion de VPN/crypto contiene parametros legacy o permisivos que elevan riesgo de acceso remoto o sitio-a-sitio.",
+      appliesTo: ["asa"]
+    },
+    {
+      id: "expected-sec-nxos-rbac-gap",
+      title: "NX-OS sin RBAC/AAA suficiente",
+      description: "Nexus con roles locales amplios, AAA incompleto, SNMP users debiles o servicios de gestion fuera de la VRF/interfaz esperada.",
+      severityHint: "high",
+      exampleRationale: "La configuracion NX-OS no evidencia separacion de privilegios ni control administrativo acorde al rol del equipo.",
+      appliesTo: ["nxos"]
+    }
+  ],
+  exclusions: []
+};
+
 const severityOrder: Record<string, number> = {
   informational: 0,
   info: 0,

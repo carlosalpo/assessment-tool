@@ -2,12 +2,14 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "./prisma.ts";
 import {
   defaultConfigurationScopePlaybook,
+  defaultSecurityScopePlaybook,
   emptyScopePlaybook,
   isSupportedScopePlaybookScopeId,
   normalizeScopePlaybook,
   scopePlaybookHash,
   type ExclusionRule,
-  type ScopePlaybook
+  type ScopePlaybook,
+  type SupportedScopePlaybookScopeId
 } from "./scope-playbook.ts";
 
 export type ScopePlaybookSnapshot = ScopePlaybook & {
@@ -18,9 +20,7 @@ export async function getScopePlaybook(scopeId: string): Promise<ScopePlaybookSn
   if (!isSupportedScopePlaybookScopeId(scopeId)) throw new Error(`Scope playbook no soportado: ${scopeId}.`);
   const record = await prisma.scopePlaybook.findUnique({ where: { scopeId } });
   if (!record) {
-    const initialPlaybook = scopeId === "configuration"
-      ? defaultConfigurationScopePlaybook
-      : emptyScopePlaybook(scopeId);
+    const initialPlaybook = defaultScopePlaybook(scopeId);
     const seeded = await prisma.scopePlaybook.upsert({
       where: { scopeId },
       create: scopePlaybookToPrisma(initialPlaybook),
@@ -29,6 +29,12 @@ export async function getScopePlaybook(scopeId: string): Promise<ScopePlaybookSn
     return scopePlaybookSnapshot(seeded);
   }
   return scopePlaybookSnapshot(record);
+}
+
+function defaultScopePlaybook(scopeId: SupportedScopePlaybookScopeId): ScopePlaybook {
+  if (scopeId === "configuration") return defaultConfigurationScopePlaybook;
+  if (scopeId === "security") return defaultSecurityScopePlaybook;
+  return emptyScopePlaybook(scopeId);
 }
 
 export async function upsertScopePlaybook(input: ScopePlaybook & { updatedBy?: string | null }): Promise<ScopePlaybookSnapshot> {

@@ -9,6 +9,7 @@ import {
   applyExclusions,
   buildPlaybookPromptSection,
   defaultConfigurationScopePlaybook,
+  defaultSecurityScopePlaybook,
   deviceOsFamily,
   isSupportedScopePlaybookScopeId,
   normalizeScopePlaybook,
@@ -182,6 +183,18 @@ test("default configuration playbook covers key platform best-practice areas", (
   assert.ok(defaultConfigurationScopePlaybook.criteria.some((item) => item.id === "cfg-asa-management" && item.appliesTo.includes("asa")));
   assert.ok(defaultConfigurationScopePlaybook.expected.some((item) => item.id === "expected-cdp-lldp-exposure"));
   assert.ok(defaultConfigurationScopePlaybook.expected.some((item) => item.id === "expected-asa-policy-hygiene"));
+});
+
+test("default security playbook covers key platform hardening areas", () => {
+  assert.equal(defaultSecurityScopePlaybook.scopeId, "security");
+  assert.ok(defaultSecurityScopePlaybook.criteria.length >= 18);
+  assert.ok(defaultSecurityScopePlaybook.expected.length >= 18);
+  assert.ok(defaultSecurityScopePlaybook.criteria.some((item) => item.id === "sec-management-plane-aaa" && item.appliesTo.includes("all")));
+  assert.ok(defaultSecurityScopePlaybook.criteria.some((item) => item.id === "sec-asa-management-hardening" && item.appliesTo.includes("asa")));
+  assert.ok(defaultSecurityScopePlaybook.criteria.some((item) => item.id === "sec-nxos-rbac" && item.appliesTo.includes("nxos")));
+  assert.ok(defaultSecurityScopePlaybook.expected.some((item) => item.id === "expected-sec-telnet-enabled"));
+  assert.ok(defaultSecurityScopePlaybook.expected.some((item) => item.id === "expected-sec-control-plane-unprotected"));
+  assert.ok(defaultSecurityScopePlaybook.expected.some((item) => item.id === "expected-sec-asa-acl-any-any"));
 });
 
 test("playbook API allowlist accepts the four command-output scopes and rejects others", () => {
