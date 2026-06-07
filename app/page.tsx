@@ -507,6 +507,11 @@ type RunEvaluationOptions = {
   forceReevaluate?: boolean;
 };
 
+type LifecyclePrestepState = {
+  running: boolean;
+  error: string;
+};
+
 type AssessmentRecord = {
   id: string;
   ownerUserId: string;
@@ -830,6 +835,7 @@ export default function HomePage() {
   });
   const [documentTemplates, setDocumentTemplates] = useState<DocumentTemplateVersion[]>([]);
   const [aiAnalysisStatusByAssessment, setAiAnalysisStatusByAssessment] = useState<Record<string, AIAssessmentAnalysisStatus>>({});
+  const [lifecyclePrestepByAssessment, setLifecyclePrestepByAssessment] = useState<Record<string, LifecyclePrestepState>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -1620,6 +1626,43 @@ export default function HomePage() {
 
   async function runEvaluation(area: EvaluationArea | "complete", options?: RunEvaluationOptions) {
     if (!selectedRecord) return;
+    const assessmentId = selectedRecord.id;
+    const shouldRunLifecyclePrestep = (area === "lifecycle" || area === "complete") && selectedRecord.lifecycleConsultedProductIds.length === 0;
+
+    if (shouldRunLifecyclePrestep) {
+      setLifecyclePrestepByAssessment((current) => ({
+        ...current,
+        [assessmentId]: { running: true, error: "" }
+      }));
+
+      try {
+        const updatedRecord = await consultLifecycleEox(assessmentId, { failOnError: true });
+        const updatedRecords = records.map((record) => (record.id === assessmentId ? updatedRecord : record));
+        await syncPersistedAssessmentRecords(updatedRecords);
+        setPersistenceState({
+          mode: "postgres",
+          message: "Sincronizado con PostgreSQL.",
+          lastSyncedAt: new Date().toISOString()
+        });
+        setLifecyclePrestepByAssessment((current) => ({
+          ...current,
+          [assessmentId]: { running: false, error: "" }
+        }));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "No se pudo consultar o persistir Cisco EoX antes de evaluar Vigencia.";
+        updateRecord(assessmentId, (current) => ({
+          ...current,
+          lifecycleEoxMessage: message,
+          updatedAt: new Date().toISOString()
+        }));
+        setLifecyclePrestepByAssessment((current) => ({
+          ...current,
+          [assessmentId]: { running: false, error: message }
+        }));
+        return;
+      }
+    }
+
     const mode = area === "complete" ? "full" : "scope";
     const scopeId = area === "complete" ? null : evaluationAreaToAIScope(area);
     const response = await fetch("/api/ai-analysis/jobs", {
@@ -1629,7 +1672,7 @@ export default function HomePage() {
         ...(openAiApiKey.trim() ? { "x-openai-api-key": openAiApiKey.trim() } : {})
       },
       body: JSON.stringify({
-        assessmentId: selectedRecord.id,
+        assessmentId,
         mode,
         scopeId,
         forceReevaluate: Boolean(options?.forceReevaluate),
@@ -1640,8 +1683,8 @@ export default function HomePage() {
       return;
     }
 
-    const status = await fetchAIAnalysisStatus(selectedRecord.id).catch(() => null);
-    if (status) setAiAnalysisStatusByAssessment((current) => ({ ...current, [selectedRecord.id]: status }));
+    const status = await fetchAIAnalysisStatus(assessmentId).catch(() => null);
+    if (status) setAiAnalysisStatusByAssessment((current) => ({ ...current, [assessmentId]: status }));
   }
 
   async function cancelAnalysisJob(jobId: string) {
@@ -1674,6 +1717,7 @@ export default function HomePage() {
     if (productIds.length === 0) {
       const message = "No hay PIDs disponibles. Carga show inventory o inventario con modelo/PID.";
       updateRecord(recordId, (current) => ({ ...current, lifecycleEoxMessage: message, updatedAt: new Date().toISOString() }));
+      if (options?.failOnError) throw new Error(message);
       return { ...record, lifecycleEoxMessage: message };
     }
 
@@ -1691,6 +1735,14 @@ export default function HomePage() {
       const lookupResults = result.lookupResults;
       const sourceLabel = result.source === "public-cisco" ? "fuente publica Cisco" : "Cisco Support EoX API";
       const message = `${Object.keys(recordsMap).length} registros EoX encontrados para ${productIds.length} PIDs consultados via ${sourceLabel}.${result.warning ? ` ${result.warning}` : ""}`;
+      if (options?.failOnError && result.source === "public-cisco") {
+        updateRecord(recordId, (current) => ({
+          ...current,
+          lifecycleEoxMessage: message,
+          updatedAt: new Date().toISOString()
+        }));
+        throw new Error(message);
+      }
       const nextRecord = {
         ...record,
         lifecycleEoxRecords: recordsMap,
@@ -2275,6 +2327,7 @@ export default function HomePage() {
           executiveSummary={selectedExecutiveSummary}
           documentTemplates={documentTemplates}
           aiAnalysisStatus={selectedAIAnalysisStatus}
+          lifecyclePrestepState={lifecyclePrestepByAssessment[selectedRecord.id]}
           onBack={() => setWorkspaceView("dashboard")}
           onTabChange={setActiveTab}
           onEdit={() => openEditForm(selectedRecord)}
@@ -2999,6 +3052,7 @@ function AssessmentWorkspace({
   executiveSummary,
   documentTemplates,
   aiAnalysisStatus,
+  lifecyclePrestepState,
   onBack,
   onTabChange,
   onEdit,
@@ -3046,6 +3100,7 @@ function AssessmentWorkspace({
   executiveSummary: ExecutiveRiskDashboard | null;
   documentTemplates: DocumentTemplateVersion[];
   aiAnalysisStatus?: AIAssessmentAnalysisStatus;
+  lifecyclePrestepState?: LifecyclePrestepState;
   onBack: () => void;
   onTabChange: (tab: Tab) => void;
   onEdit: () => void;
@@ -3241,6 +3296,7 @@ function AssessmentWorkspace({
             record={record}
             currentUser={currentUser}
             aiAnalysisStatus={aiAnalysisStatus}
+            lifecyclePrestepState={lifecyclePrestepState}
             onRunEvaluation={canEdit ? onRunEvaluation : () => undefined}
             onCancelAnalysisJob={canEdit ? onCancelAnalysisJob : () => undefined}
             onRetryAnalysisJob={canEdit ? onRetryAnalysisJob : () => undefined}
@@ -7758,6 +7814,7 @@ function AiEvaluationTab({
   record,
   currentUser,
   aiAnalysisStatus,
+  lifecyclePrestepState,
   onRunEvaluation,
   onCancelAnalysisJob,
   onRetryAnalysisJob,
@@ -7770,6 +7827,7 @@ function AiEvaluationTab({
   record: AssessmentRecord;
   currentUser: AppUser | null;
   aiAnalysisStatus?: AIAssessmentAnalysisStatus;
+  lifecyclePrestepState?: LifecyclePrestepState;
   onRunEvaluation: (area: EvaluationArea | "complete", options?: RunEvaluationOptions) => void;
   onCancelAnalysisJob: (jobId: string) => void;
   onRetryAnalysisJob: (jobId: string) => void;
@@ -7792,6 +7850,7 @@ function AiEvaluationTab({
   const subtabRefs = useRef<Partial<Record<AIEvaluationSubtab, HTMLButtonElement | null>>>({});
   const pipelineStages = buildPipelineView(aiAnalysisStatus, latestJob);
   const engineJob = activeJob ?? latestJob;
+  const lifecyclePrestepRunning = Boolean(lifecyclePrestepState?.running);
   const aiFindingsToReviewCount = record.parsed.findings.filter((finding) => finding.aiMetadata && finding.status === "ai_suggested").length;
   const aiSubtabs = [
     { id: "evaluation" as const, label: "Evaluacion", count: null, active: Boolean(activeJob) },
@@ -7888,9 +7947,9 @@ function AiEvaluationTab({
                   <RotateCcw size={16} />
                   Limpiar todo
                 </Button>
-                <Button size="sm" onClick={() => onRunEvaluation("complete")} disabled={hasRunningAnalysis}>
+                <Button size="sm" onClick={() => onRunEvaluation("complete")} disabled={hasRunningAnalysis || lifecyclePrestepRunning}>
                   <PlayCircle size={16} />
-                  Evaluación completa
+                  {lifecyclePrestepRunning ? "Consultando EoX..." : "Evaluación completa"}
                 </Button>
                 {activeJob && (
                   <Button variant="danger" size="sm" onClick={() => onCancelAnalysisJob(activeJob.id)}>
@@ -7949,7 +8008,21 @@ function AiEvaluationTab({
                     const detailOpen = Boolean(expandedAreaDetails[area.id]);
                     const findingsFilterActive = scopeFindingFilter === area.id;
                     const operationsInterviewBlocked = area.id === "operations" && !isOperationalAssessmentComplete(record.operationalAssessment);
-                    const evaluationDisabledReason = operationsInterviewBlocked ? "Completa las entrevistas del Tab 11 primero" : undefined;
+                    const lifecyclePrestepRunning = area.id === "lifecycle" && Boolean(lifecyclePrestepState?.running);
+                    const lifecyclePrestepError = area.id === "lifecycle" ? lifecyclePrestepState?.error || "" : "";
+                    const lifecycleEoxStatusMessage = area.id === "lifecycle"
+                      ? record.lifecycleConsultedProductIds.length > 0
+                        ? `EoX consultado: ${record.lifecycleConsultedProductIds.length} PIDs`
+                        : "Se consultará Cisco EoX al evaluar"
+                      : "";
+                    const lifecycleNodeMessage = lifecyclePrestepRunning
+                      ? "Consultando Cisco EoX..."
+                      : lifecyclePrestepError || lifecycleEoxStatusMessage;
+                    const evaluationDisabledReason = operationsInterviewBlocked
+                      ? "Completa las entrevistas del Tab 11 primero"
+                      : lifecyclePrestepRunning
+                        ? "Consultando Cisco EoX..."
+                        : undefined;
 
                     return (
                       <EvaluationAmbitoNode
@@ -7962,6 +8035,8 @@ function AiEvaluationTab({
                         active={isCurrentScopeExecuting}
                         progress={scopeProgress}
                         message={scopeMessage}
+                        supplementalMessage={area.id === "lifecycle" ? lifecycleNodeMessage : undefined}
+                        supplementalTone={lifecyclePrestepError ? "danger" : lifecyclePrestepRunning ? "info" : undefined}
                         findingSummary={findingSummary}
                         blockedMessage={operationsInterviewBlocked ? evaluationDisabledReason : undefined}
                         detailOpen={detailOpen}
@@ -7980,9 +8055,9 @@ function AiEvaluationTab({
                         actions={(
                           <>
                             <span title={evaluationDisabledReason}>
-                              <Button size="sm" onClick={() => onRunEvaluation(area.id)} disabled={isScopeRunning || hasRunningAnalysis || operationsInterviewBlocked}>
+                              <Button size="sm" onClick={() => onRunEvaluation(area.id)} disabled={isScopeRunning || hasRunningAnalysis || operationsInterviewBlocked || lifecyclePrestepRunning}>
                                 <PlayCircle size={14} />
-                                Evaluar
+                                {lifecyclePrestepRunning ? "Consultando..." : "Evaluar"}
                               </Button>
                             </span>
                             <CardOverflowMenu
@@ -7991,7 +8066,7 @@ function AiEvaluationTab({
                                 {
                                   label: "Forzar re-evaluación",
                                   onSelect: () => onRunEvaluation(area.id, { forceReevaluate: true }),
-                                  disabled: isScopeRunning || hasRunningAnalysis || operationsInterviewBlocked
+                                  disabled: isScopeRunning || hasRunningAnalysis || operationsInterviewBlocked || lifecyclePrestepRunning
                                 },
                                 {
                                   label: "Reset",
@@ -8433,6 +8508,8 @@ function EvaluationAmbitoNode({
   active,
   progress,
   message,
+  supplementalMessage,
+  supplementalTone,
   findingSummary,
   blockedMessage,
   detailOpen,
@@ -8450,6 +8527,8 @@ function EvaluationAmbitoNode({
   active: boolean;
   progress: number;
   message: string;
+  supplementalMessage?: string;
+  supplementalTone?: "info" | "danger";
   findingSummary: AreaFindingSummary;
   blockedMessage?: string;
   detailOpen?: boolean;
@@ -8524,6 +8603,18 @@ function EvaluationAmbitoNode({
               </div>
             </div>
             <p className="text-xs text-muted-foreground">{progress}% · {message}</p>
+            {supplementalMessage ? (
+              <div className={cn(
+                "rounded-md border px-3 py-2 text-xs",
+                supplementalTone === "danger"
+                  ? "border-rose-300/40 bg-rose-400/10 text-rose-300"
+                  : supplementalTone === "info"
+                    ? "border-primary/40 bg-primary/10 text-primary"
+                    : "border-border bg-muted/30 text-muted-foreground"
+              )}>
+                {supplementalMessage}
+              </div>
+            ) : null}
           </div>
         )}
       </div>

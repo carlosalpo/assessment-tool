@@ -1233,6 +1233,8 @@ async function narrateLifecycleFindings(input: {
               dates: finding.dates,
               severity: finding.severity,
               remediationCategory: finding.remediationCategory,
+              criticality: finding.criticality,
+              role: finding.role,
               currentText: {
                 technical_rationale: finding.technical_rationale,
                 business_impact: finding.business_impact,

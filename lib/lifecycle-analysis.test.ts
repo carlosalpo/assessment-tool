@@ -66,9 +66,10 @@ test("buildLifecycleFindings produces deterministic severity and remediation cat
   });
 
   assert.deepEqual(findings.map((finding) => finding.device), ["core-01", "dist-01", "legacy-01"]);
-  assert.equal(findings[0].severity, "high");
+  assert.equal(findings[0].severity, "critical");
   assert.equal(findings[0].remediationCategory, "platform_upgrade");
-  assert.equal(findings[1].severity, "medium");
+  assert.match(findings[0].technical_rationale, /criticidad critical \(rol core\)/);
+  assert.equal(findings[1].severity, "high");
   assert.equal(findings[2].severity, "critical");
   assert.equal(findings[2].source, "software");
   assert.equal(findings[2].remediationCategory, "new_technology");
@@ -80,6 +81,28 @@ test("buildLifecycleFindings produces deterministic severity and remediation cat
 test("buildLifecycleFindings skips devices without EoX or obsolete software signal", () => {
   const findings = buildLifecycleFindings({ devices: [baseDevice({ model: "C9300-48P", softwareVersion: "17.12.1" })] }, {});
   assert.deepEqual(findings, []);
+});
+
+test("buildLifecycleFindings escalates severity by device criticality without degrading base risk", () => {
+  const findings = buildLifecycleFindings({
+    devices: [
+      baseDevice({ hostname: "access-low", criticality: "low", role: "access", model: "C9300-48P" }),
+      baseDevice({ hostname: "access-high", criticality: "high", role: "access", model: "C9300-48P" }),
+      baseDevice({ hostname: "core-critical", criticality: "critical", role: "core", model: "C9300-48P" }),
+      baseDevice({ hostname: "dist-medium", criticality: "medium", role: "distribution", model: "C9500-48Y4C" }),
+      baseDevice({ hostname: "dc-critical", criticality: "critical", role: "datacenter", model: "C9500-48Y4C" })
+    ]
+  }, {
+    "C9300-48P": eox({ productId: "C9300-48P", endOfSaleDate: "2021-01-31", lastDateOfSupport: "2030-01-31" }),
+    "C9500-48Y4C": eox({ productId: "C9500-48Y4C", lastDateOfSupport: "2025-01-31" })
+  });
+
+  const severityByDevice = Object.fromEntries(findings.map((finding) => [finding.device, finding.severity]));
+  assert.equal(severityByDevice["access-low"], "medium");
+  assert.equal(severityByDevice["access-high"], "high");
+  assert.equal(severityByDevice["core-critical"], "high");
+  assert.equal(severityByDevice["dist-medium"], "high");
+  assert.equal(severityByDevice["dc-critical"], "critical");
 });
 
 test("applyLifecycleNarration only updates narrative fields", () => {

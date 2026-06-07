@@ -66,6 +66,8 @@ export type LifecycleFinding = {
   };
   severity: RiskLevel;
   remediationCategory: RemediationCategory;
+  criticality: "critical" | "high" | "medium" | "low";
+  role: string;
   title: string;
   affectedAssets: string[];
   evidenceRefs: string[];
@@ -153,7 +155,10 @@ export function buildLifecycleFindings(
       const component = evaluation.source === "hardware" ? evaluation.hardware : evaluation.software;
       const hostname = device.hostname || device.id || "unknown-device";
       const status = evaluation.status as LifecycleFinding["status"];
-      const severity = severityForLifecycleStatus(status);
+      const baseSeverity = severityForLifecycleStatus(status);
+      const criticality = normalizeLifecycleCriticality(device.criticality);
+      const role = normalizeLifecycleRole(device.role);
+      const severity = applyLifecycleCriticalityEscalation(baseSeverity, criticality);
       const remediationCategory = remediationCategoryForLifecycle(status, evaluation.source);
       const sourceLabel = evaluation.source === "hardware" ? "hardware" : "software";
       const statusLabel = lifecycleStatusLabel(status);
@@ -165,12 +170,14 @@ export function buildLifecycleFindings(
         dates: component.dates,
         severity,
         remediationCategory,
+        criticality,
+        role,
         title: `${hostname}: riesgo lifecycle ${statusLabel} en ${sourceLabel}`,
         affectedAssets: [hostname],
         evidenceRefs: lifecycleEvidenceRefs(device, component).slice(0, 8),
         confidence: component.record ? 90 : 75,
-        technical_rationale: deterministicTechnicalRationale(hostname, status, evaluation.source, component),
-        business_impact: deterministicBusinessImpact(status, evaluation.source),
+        technical_rationale: deterministicTechnicalRationale(hostname, status, evaluation.source, component, criticality, role),
+        business_impact: deterministicBusinessImpact(status, evaluation.source, criticality, role),
         recommendation: deterministicRecommendation(status, evaluation.source),
         validation_questions: [
           "Confirmar si el equipo y version detectados representan el estado actual de produccion.",
@@ -231,6 +238,32 @@ function severityForLifecycleStatus(status: LifecycleFinding["status"]): RiskLev
   return "medium";
 }
 
+const lifecycleSeverityRank: Partial<Record<RiskLevel, number>> = {
+  low: 0,
+  medium: 1,
+  high: 2,
+  critical: 3
+};
+
+const lifecycleSeverityByRank = ["low", "medium", "high", "critical"] as const;
+
+function applyLifecycleCriticalityEscalation(baseSeverity: RiskLevel, criticality: LifecycleFinding["criticality"]): RiskLevel {
+  const baseRank = lifecycleSeverityRank[baseSeverity];
+  if (baseRank === undefined) return baseSeverity;
+  const increment = criticality === "critical" || (criticality === "high" && baseSeverity === "medium") ? 1 : 0;
+  return lifecycleSeverityByRank[Math.min(baseRank + increment, lifecycleSeverityByRank.length - 1)];
+}
+
+function normalizeLifecycleCriticality(value: string | undefined): LifecycleFinding["criticality"] {
+  if (value === "critical" || value === "high" || value === "medium" || value === "low") return value;
+  return "medium";
+}
+
+function normalizeLifecycleRole(value: string | undefined) {
+  const normalized = String(value ?? "").trim();
+  return normalized || "sin rol definido";
+}
+
 function remediationCategoryForLifecycle(status: LifecycleFinding["status"], source: LifecycleSource): RemediationCategory {
   if (source === "hardware") return "platform_upgrade";
   return status === "obsolete" ? "new_technology" : "platform_upgrade";
@@ -247,24 +280,32 @@ function lifecycleEvidenceRefs(device: LifecycleInputDevice, component: Lifecycl
   ].filter(Boolean) as string[]));
 }
 
-function deterministicTechnicalRationale(hostname: string, status: LifecycleFinding["status"], source: LifecycleSource, component: LifecycleComponentEvaluation) {
+function deterministicTechnicalRationale(
+  hostname: string,
+  status: LifecycleFinding["status"],
+  source: LifecycleSource,
+  component: LifecycleComponentEvaluation,
+  criticality: LifecycleFinding["criticality"],
+  role: string
+) {
   const statusLabel = lifecycleStatusLabel(status);
   const sourceLabel = source === "hardware" ? "hardware" : "software";
   const dates = [
     component.dates.endOfSaleDate ? `End-of-Sale ${component.dates.endOfSaleDate}` : "",
     component.dates.lastDateOfSupport ? `Last Date of Support ${component.dates.lastDateOfSupport}` : ""
   ].filter(Boolean).join("; ");
-  return `${hostname} presenta estado lifecycle ${statusLabel} en ${sourceLabel}${dates ? ` (${dates})` : ""}.`;
+  return `${hostname} presenta estado lifecycle ${statusLabel} en ${sourceLabel}${dates ? ` (${dates})` : ""} en un equipo de criticidad ${criticality} (rol ${role}).`;
 }
 
-function deterministicBusinessImpact(status: LifecycleFinding["status"], source: LifecycleSource) {
+function deterministicBusinessImpact(status: LifecycleFinding["status"], source: LifecycleSource, criticality: LifecycleFinding["criticality"], role: string) {
+  const impactContext = ` El impacto se evalua considerando criticidad ${criticality} y rol ${role}.`;
   if (status === "obsolete") {
-    return "La obsolescencia eleva el riesgo de indisponibilidad, brechas de seguridad y falta de soporte para incidentes criticos.";
+    return `La obsolescencia eleva el riesgo de indisponibilidad, brechas de seguridad y falta de soporte para incidentes criticos.${impactContext}`;
   }
   if (status === "end_of_support") {
-    return `El ${source === "hardware" ? "equipo" : "software"} fuera de soporte reduce la capacidad de recibir correcciones, reemplazos y asistencia del fabricante.`;
+    return `El ${source === "hardware" ? "equipo" : "software"} fuera de soporte reduce la capacidad de recibir correcciones, reemplazos y asistencia del fabricante.${impactContext}`;
   }
-  return "El fin de venta anticipa restricciones de soporte y disponibilidad de reemplazos, por lo que debe entrar al plan de renovacion.";
+  return `El fin de venta anticipa restricciones de soporte y disponibilidad de reemplazos, por lo que debe entrar al plan de renovacion.${impactContext}`;
 }
 
 function deterministicRecommendation(status: LifecycleFinding["status"], source: LifecycleSource) {
