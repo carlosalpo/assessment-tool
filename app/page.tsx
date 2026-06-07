@@ -61,6 +61,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input, Textarea } from "@/components/ui/input";
 import { Panel, PanelBody, PanelHeader } from "@/components/ui/panel";
+import { ScrollX } from "@/components/ui/scroll-x";
 import { parseCiscoEvidence } from "@/lib/cisco-parsers";
 import {
   activateTemplateVersion,
@@ -2164,7 +2165,7 @@ export default function HomePage() {
   return (
     <main className="min-h-screen">
       <header className="border-b border-border bg-white">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-5 py-4">
+        <div className="mx-auto flex max-w-screen-2xl flex-wrap items-center justify-between gap-3 px-5 py-4">
           <div className="flex min-w-0 items-center gap-4">
             <div className="flex h-11 w-28 shrink-0 items-center">
               <Image src="/brand/gbm-logo-blue.png" alt="GBM" width={1000} height={563} priority className="block h-auto w-full object-contain dark:hidden" />
@@ -2309,7 +2310,7 @@ export default function HomePage() {
           onRemoveAssessmentShare={removeAssessmentShare}
         />
       ) : (
-        <div className="mx-auto max-w-7xl px-5 py-5">
+        <div className="mx-auto max-w-screen-2xl px-5 py-5">
           <EmptyState icon={<ClipboardList size={24} />} title="Crea un assessment para comenzar" />
         </div>
       )}
@@ -2520,7 +2521,7 @@ function SettingsWorkspace({
   const isAdmin = Boolean(currentUser && canManageUsers(currentUser));
 
   return (
-    <div className="mx-auto max-w-7xl space-y-4 px-4 py-5 sm:px-5">
+    <div className="mx-auto max-w-screen-2xl space-y-4 px-4 py-5 sm:px-5">
       <Panel>
         <PanelHeader className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
@@ -2757,7 +2758,7 @@ function DashboardWorkspace({
   onFormChange: (form: AssessmentForm) => void;
 }) {
   return (
-    <div className="mx-auto max-w-7xl space-y-4 px-4 py-5 sm:px-5">
+    <div className="mx-auto max-w-screen-2xl space-y-4 px-4 py-5 sm:px-5">
       <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-3">
         <MetricPanel label="Assessments" value={portfolio.total} />
         <MetricPanel label="En revision" value={portfolio.inReview} />
@@ -3083,7 +3084,7 @@ function AssessmentWorkspace({
   const effectiveParsed = useMemo(() => effectiveParsedNetworkData(record), [record]);
 
   return (
-    <div className="mx-auto max-w-7xl space-y-4 px-4 py-5 sm:px-5">
+    <div className="mx-auto max-w-screen-2xl space-y-4 px-4 py-5 sm:px-5">
       <Panel>
         <PanelHeader className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
@@ -10469,11 +10470,11 @@ function LifecycleHardwareTable({ rows, onShowDetail }: { rows: LifecycleHardwar
   if (rows.length === 0) return <EmptyState icon={<Server size={24} />} title="Sin inventario hardware para evaluar" />;
 
   return (
-    <div className="overflow-x-auto rounded-md border border-border">
+    <ScrollX className="rounded-md border border-border">
       <table className="w-full min-w-[1500px] text-left text-sm">
         <thead className="bg-muted/60 text-xs uppercase text-muted-foreground">
           <tr>
-            <th className="w-72 min-w-72 px-3 py-2 font-semibold">Equipo</th>
+            <th className="sticky left-0 z-10 w-72 min-w-72 bg-[hsl(var(--muted))] px-3 py-2 font-semibold">Equipo</th>
             <th className="px-3 py-2 font-semibold">Componente</th>
             <th className="px-3 py-2 font-semibold">PID</th>
             <th className="px-3 py-2 font-semibold">Serial</th>
@@ -10490,7 +10491,7 @@ function LifecycleHardwareTable({ rows, onShowDetail }: { rows: LifecycleHardwar
         <tbody className="divide-y divide-border bg-white">
           {rows.map((row) => (
             <tr key={row.id}>
-              <td className="w-72 min-w-72 px-3 py-3 align-top">
+              <td className="sticky left-0 z-10 w-72 min-w-72 bg-[hsl(var(--surface))] px-3 py-3 align-top">
                 <p className="break-words font-semibold leading-snug">{row.hostname}</p>
                 <p className="mt-1 break-words text-xs leading-snug text-muted-foreground">{row.source}</p>
               </td>
@@ -10528,7 +10529,7 @@ function LifecycleHardwareTable({ rows, onShowDetail }: { rows: LifecycleHardwar
           ))}
         </tbody>
       </table>
-    </div>
+    </ScrollX>
   );
 }
 
@@ -10536,11 +10537,11 @@ function LifecycleSoftwareTable({ rows, onShowDetail }: { rows: LifecycleSoftwar
   if (rows.length === 0) return <EmptyState icon={<Server size={24} />} title="Sin inventario software para evaluar" />;
 
   return (
-    <div className="overflow-x-auto rounded-md border border-border">
+    <ScrollX className="rounded-md border border-border">
       <table className="w-full min-w-[1280px] text-left text-sm">
         <thead className="bg-muted/60 text-xs uppercase text-muted-foreground">
           <tr>
-            <th className="w-72 min-w-72 px-3 py-2 font-semibold">Equipo</th>
+            <th className="sticky left-0 z-10 w-72 min-w-72 bg-[hsl(var(--muted))] px-3 py-2 font-semibold">Equipo</th>
             <th className="px-3 py-2 font-semibold">Modelo / PID</th>
             <th className="px-3 py-2 font-semibold">Version</th>
             <th className="w-56 px-3 py-2 font-semibold">Estado</th>
@@ -10552,7 +10553,7 @@ function LifecycleSoftwareTable({ rows, onShowDetail }: { rows: LifecycleSoftwar
         <tbody className="divide-y divide-border bg-white">
           {rows.map((row) => (
             <tr key={row.id}>
-              <td className="w-72 min-w-72 px-3 py-3 align-top">
+              <td className="sticky left-0 z-10 w-72 min-w-72 bg-[hsl(var(--surface))] px-3 py-3 align-top">
                 <p className="break-words font-semibold leading-snug">{row.hostname}</p>
                 <p className="mt-1 break-words text-xs leading-snug text-muted-foreground">{row.source}</p>
               </td>
@@ -10585,7 +10586,7 @@ function LifecycleSoftwareTable({ rows, onShowDetail }: { rows: LifecycleSoftwar
           ))}
         </tbody>
       </table>
-    </div>
+    </ScrollX>
   );
 }
 
@@ -10666,11 +10667,11 @@ function SupportCoverageTable({ rows }: { rows: SupportCoverageRow[] }) {
   if (rows.length === 0) return <EmptyState icon={<Server size={24} />} title="Sin seriales para consultar soporte" />;
 
   return (
-    <div className="overflow-x-auto rounded-md border border-border">
+    <ScrollX className="rounded-md border border-border">
       <table className="w-full min-w-[1440px] text-left text-sm">
         <thead className="bg-muted/60 text-xs uppercase text-muted-foreground">
           <tr>
-            <th className="w-72 min-w-72 px-3 py-2 font-semibold">Equipo</th>
+            <th className="sticky left-0 z-10 w-72 min-w-72 bg-[hsl(var(--muted))] px-3 py-2 font-semibold">Equipo</th>
             <th className="px-3 py-2 font-semibold">Componente</th>
             <th className="px-3 py-2 font-semibold">Serial</th>
             <th className="px-3 py-2 font-semibold">PID</th>
@@ -10685,7 +10686,7 @@ function SupportCoverageTable({ rows }: { rows: SupportCoverageRow[] }) {
         <tbody className="divide-y divide-border bg-white">
           {rows.map((row) => (
             <tr key={`support-${row.id}`}>
-              <td className="w-72 min-w-72 px-3 py-3 align-top">
+              <td className="sticky left-0 z-10 w-72 min-w-72 bg-[hsl(var(--surface))] px-3 py-3 align-top">
                 <p className="break-words font-semibold leading-snug">{row.hostname}</p>
                 <p className="mt-1 break-words text-xs leading-snug text-muted-foreground">{row.source}</p>
               </td>
@@ -10708,7 +10709,7 @@ function SupportCoverageTable({ rows }: { rows: SupportCoverageRow[] }) {
           ))}
         </tbody>
       </table>
-    </div>
+    </ScrollX>
   );
 }
 
