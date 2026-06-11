@@ -103,6 +103,45 @@ test("planDeviceBatches greedily packs whole device contexts in deterministic or
   }
 });
 
+test("planDeviceBatches includes configuration devices with only relevant operational state facts", () => {
+  const context = buildAssessmentAIContext(fixtureInput());
+  const expandedContext = {
+    ...context,
+    devices: [
+      ...context.devices,
+      {
+        id: "dev_state_only",
+        hostname: "state-only-01",
+        role: "distribution",
+        site: "HQ",
+        platform: "ios-xe",
+        model: "unknown",
+        softwareVersion: "unknown",
+        lifecycleStatus: "unknown" as const,
+        criticality: "high" as const,
+        evidenceRefs: ["state-only-01 Po10 suspended"]
+      }
+    ],
+    operationalStateFacts: [
+      ...context.operationalStateFacts,
+      {
+        id: "state_only_port_channel",
+        deviceId: "state-only-01",
+        category: "switching" as const,
+        factType: "port_channel_degraded",
+        observedState: "Port-channel member suspended",
+        severityHint: "high" as const,
+        evidenceRef: "state-only-01 Po10 suspended"
+      }
+    ]
+  };
+
+  const batches = planDeviceBatches(expandedContext, "configuration", 50000);
+  const hostnames = batches.flatMap((batch) => batch.deviceHostnames);
+
+  assert.ok(hostnames.includes("state-only-01"));
+});
+
 function fixtureInput(): AssessmentAIContextInput {
   const performance = createDefaultPerformanceState("assess_device_context");
   return {

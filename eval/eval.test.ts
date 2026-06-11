@@ -45,6 +45,7 @@ test("offline golden harness validates expected scope findings", () => {
       console.log(formatReport(metrics, validation.rejectedFindings.length));
       assert.equal(metrics.missing.length, 0, `${golden.fixtureId}/${golden.scopeId} missing mustFind: ${JSON.stringify(metrics.missing)}`);
       assert.equal(metrics.leaked.length, 0, `${golden.fixtureId}/${golden.scopeId} leaked mustNotFind: ${JSON.stringify(metrics.leaked)}`);
+      assert.equal(metrics.vacuousRemediationCount, 0, `${golden.fixtureId}/${golden.scopeId} tiene recomendaciones vacias o genericas.`);
       assert.ok(metrics.recall >= threshold.minRecall, `${golden.fixtureId}/${golden.scopeId} recall ${metrics.recall} < ${threshold.minRecall}`);
       assert.ok(metrics.precision >= threshold.minPrecision, `${golden.fixtureId}/${golden.scopeId} precision ${metrics.precision} < ${threshold.minPrecision}`);
       assert.ok(metrics.leaked.length <= threshold.maxLeaked, `${golden.fixtureId}/${golden.scopeId} leaked ${metrics.leaked.length} > ${threshold.maxLeaked}`);
@@ -52,7 +53,7 @@ test("offline golden harness validates expected scope findings", () => {
     });
 
   const aggregate = aggregateMetrics(reports);
-  console.log(`aggregate precision=${pct(aggregate.precision)} recall=${pct(aggregate.recall)} coverage=${pct(aggregate.coverage)} produced=${aggregate.produced} leaked=${aggregate.leaked.length}`);
+  console.log(`aggregate precision=${pct(aggregate.precision)} recall=${pct(aggregate.recall)} coverage=${pct(aggregate.coverage)} produced=${aggregate.produced} vacuousRemediation=${aggregate.vacuousRemediationCount} leaked=${aggregate.leaked.length}`);
   assert.equal(aggregate.missing.length, 0, `aggregate missing mustFind: ${JSON.stringify(aggregate.missing)}`);
   assert.equal(aggregate.leaked.length, 0, `aggregate leaked mustNotFind: ${JSON.stringify(aggregate.leaked)}`);
   assert.ok(aggregate.precision >= thresholds.aggregate.minPrecision, `aggregate precision ${aggregate.precision} < ${thresholds.aggregate.minPrecision}`);
@@ -123,7 +124,7 @@ function readJson<T>(path: string): T {
 }
 
 function formatReport(metrics: ReturnType<typeof evaluateScope>, rejected: number) {
-  return `${metrics.fixtureId}/${metrics.scopeId} precision=${pct(metrics.precision)} recall=${pct(metrics.recall)} coverage=${pct(metrics.coverage)} produced=${metrics.produced} rejected=${rejected} leaked=${metrics.leaked.length}`;
+  return `${metrics.fixtureId}/${metrics.scopeId} precision=${pct(metrics.precision)} recall=${pct(metrics.recall)} coverage=${pct(metrics.coverage)} produced=${metrics.produced} rejected=${rejected} vacuousRemediation=${metrics.vacuousRemediationCount} leaked=${metrics.leaked.length}`;
 }
 
 function pct(value: number) {

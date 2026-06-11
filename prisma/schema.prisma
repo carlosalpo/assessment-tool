@@ -346,6 +346,19 @@ model ScopePlaybook {
   updatedAt      DateTime @updatedAt
 }
 
+model DeviceVisualProfile {
+  id             String   @id
+  scope          String
+  vendor         String
+  category       String
+  title          String
+  matchJson      Json
+  uplinkBaySlots Int?
+  sectionsJson   Json
+  updatedBy      String?
+  updatedAt      DateTime @updatedAt
+}
+
 model AiInteractionLog {
   id                   String   @id @default(cuid())
   jobId                String

@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   baseFindingSchema,
+  impactIfFailsEnum,
+  isCoverageLedgerEnabled,
+  isEnrichedFindingsEnabled,
   patternForScope,
+  probabilityOfFailureEnum,
   reduceResultSchema,
   scopeAnalysisResultSchemaForPattern,
   scopePattern,
@@ -60,6 +64,8 @@ const patternSpecificFields: Record<Exclude<ScopeQueryPattern, "synthesis">, str
   aggregation: ["aggregation_basis", "occurrence_count", "time_window", "correlated_entity"]
 };
 
+const enrichedFindingFields = ["probable_cause", "technical_impact", "probability_of_failure", "impact_if_fails"];
+
 test("scopePattern covers every AI scope exactly once", () => {
   assert.deepEqual(Object.keys(scopePattern).sort(), [...allScopes].sort());
   assert.equal(Object.keys(scopePattern).length, 16);
@@ -98,9 +104,62 @@ test("usesPatternQuery wires map patterns but not synthesis scopes when flag is 
 });
 
 test("baseFindingSchema keeps the current generic finding contract", () => {
-  const schema = baseFindingSchema();
-  assert.deepEqual(Object.keys(schema.properties).sort(), [...baseFindingFields].sort());
-  assert.deepEqual(schema.required.sort(), [...baseFindingFields].sort());
+  withEnv({ AI_ENRICHED_FINDINGS: undefined }, () => {
+    const schema = baseFindingSchema();
+    assert.equal(isEnrichedFindingsEnabled(), false);
+    assert.deepEqual(Object.keys(schema.properties).sort(), [...baseFindingFields].sort());
+    assert.deepEqual(schema.required.sort(), [...baseFindingFields].sort());
+  });
+});
+
+test("baseFindingSchema requires enriched synthesis fields only when AI_ENRICHED_FINDINGS is enabled", () => {
+  withEnv({ AI_ENRICHED_FINDINGS: "1" }, () => {
+    const schema = baseFindingSchema();
+    assert.equal(isEnrichedFindingsEnabled(), true);
+    assert.deepEqual(Object.keys(schema.properties).sort(), [...baseFindingFields, ...enrichedFindingFields].sort());
+    assert.deepEqual(schema.required.sort(), [...baseFindingFields, ...enrichedFindingFields].sort());
+    assert.deepEqual(schema.properties.probability_of_failure.enum, probabilityOfFailureEnum);
+    assert.deepEqual(schema.properties.impact_if_fails.enum, impactIfFailsEnum);
+  });
+});
+
+test("coverage ledger fields are absent from schemas when AI_COVERAGE_LEDGER is disabled", () => {
+  withEnv({ AI_COVERAGE_LEDGER: undefined, AI_ENRICHED_FINDINGS: undefined }, () => {
+    const findingSchema = baseFindingSchema("configuration");
+    const resultSchema = scopeAnalysisResultSchemaForPattern("entity", "configuration");
+    assert.equal(isCoverageLedgerEnabled(), false);
+    assert.equal(findingSchema.properties.criterion_ids, undefined);
+    assert.equal(resultSchema.properties.evidence_gaps, undefined);
+    assert.equal(resultSchema.properties.evaluated_clean, undefined);
+    assert.equal(resultSchema.properties.findings.items.properties.criterion_ids, undefined);
+    assert.equal(resultSchema.required.includes("evidence_gaps"), false);
+    assert.equal(resultSchema.required.includes("evaluated_clean"), false);
+  });
+});
+
+test("coverage ledger fields are required only for covered scopes when AI_COVERAGE_LEDGER is enabled", () => {
+  withEnv({ AI_COVERAGE_LEDGER: "1", AI_ENRICHED_FINDINGS: undefined }, () => {
+    const configurationFinding = baseFindingSchema("configuration");
+    const configurationResult = scopeAnalysisResultSchemaForPattern("entity", "configuration");
+    const evidenceResult = scopeAnalysisResultSchemaForPattern("aggregation", "evidence");
+    const performanceFinding = baseFindingSchema("performance");
+    const performanceResult = scopeAnalysisResultSchemaForPattern("entity", "performance");
+
+    assert.equal(isCoverageLedgerEnabled(), true);
+    assert.ok(configurationFinding.properties.criterion_ids);
+    assert.ok(configurationFinding.required.includes("criterion_ids"));
+    assert.ok(configurationResult.properties.evidence_gaps);
+    assert.ok(configurationResult.properties.evaluated_clean);
+    assert.ok(configurationResult.required.includes("evidence_gaps"));
+    assert.ok(configurationResult.required.includes("evaluated_clean"));
+    assert.ok(configurationResult.properties.findings.items.properties.criterion_ids);
+    assert.ok(configurationResult.properties.findings.items.required.includes("criterion_ids"));
+    assert.ok(evidenceResult.properties.evidence_gaps);
+    assert.ok(evidenceResult.properties.evaluated_clean);
+    assert.equal(performanceFinding.properties.criterion_ids, undefined);
+    assert.equal(performanceResult.properties.evidence_gaps, undefined);
+    assert.equal(performanceResult.properties.evaluated_clean, undefined);
+  });
 });
 
 for (const pattern of ["graph", "entity", "aggregation"] as const) {
@@ -111,7 +170,7 @@ for (const pattern of ["graph", "entity", "aggregation"] as const) {
   test(`${pattern} finding contains base fields and pattern extension fields`, () => {
     const schema = scopeAnalysisResultSchemaForPattern(pattern);
     const findingSchema = schema.properties.findings.items;
-    const expectedFields = [...baseFindingFields, ...patternSpecificFields[pattern]];
+    const expectedFields = [...baseFindingFields, ...activeEnrichedFindingFields(), ...patternSpecificFields[pattern]];
     assert.deepEqual(Object.keys(findingSchema.properties).sort(), expectedFields.sort());
     assert.deepEqual(findingSchema.required.sort(), expectedFields.sort());
   });
@@ -125,7 +184,7 @@ test("reduce result schema is strict-valid and includes composite fields", () =>
   const schema = reduceResultSchema();
   assertStrictSchema(schema, "reduce result");
   const findingSchema = schema.properties.findings.items;
-  const expectedFields = [...baseFindingFields, "source_finding_ids", "composite_rationale"];
+  const expectedFields = [...baseFindingFields, ...activeEnrichedFindingFields(), "source_finding_ids", "composite_rationale"];
   assert.deepEqual(Object.keys(findingSchema.properties).sort(), expectedFields.sort());
   assert.deepEqual(findingSchema.required.sort(), expectedFields.sort());
 });
@@ -167,5 +226,31 @@ function assertStrictSchema(schema: any, path: string) {
   }
   if (type.includes("array") && schema.items) {
     assertStrictSchema(schema.items, `${path}[]`);
+  }
+}
+
+function activeEnrichedFindingFields() {
+  return isEnrichedFindingsEnabled() ? enrichedFindingFields : [];
+}
+
+function withEnv(values: Record<string, string | undefined>, run: () => void) {
+  const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+  try {
+    for (const [key, value] of Object.entries(values)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    run();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
   }
 }

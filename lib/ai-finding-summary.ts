@@ -1,6 +1,7 @@
 import type { Finding, RiskLevel } from "@/lib/types";
+import { scopeToAmbito, type AmbitoId } from "./ai-scope-ui.ts";
 
-export type FindingAreaFilter = "topology" | "configuration" | "security" | "lifecycle" | "operations" | "logs";
+export type FindingAreaFilter = AmbitoId;
 
 export type AreaFindingSummary = {
   total: number;
@@ -12,22 +13,41 @@ export type AreaFindingSummary = {
 const severityKeys: RiskLevel[] = ["critical", "high", "medium", "low", "info"];
 const completedAIStatuses = new Set<Finding["status"]>(["accepted", "validated", "discarded"]);
 const areaCategoryMap: Record<FindingAreaFilter, Finding["category"]> = {
-  topology: "resiliency",
   configuration: "configuration",
   security: "security",
+  logs: "operations",
   lifecycle: "lifecycle",
+  topology: "resiliency",
   operations: "operations",
-  logs: "operations"
+  performance: "operations"
 };
 
+// Legacy compatibility for UI surfaces that still map the old six-area facade to coarse categories.
+// Canonical filtering should use findingAmbito/filterFindingsByArea instead.
 export function areaToFindingCategory(area: FindingAreaFilter): Finding["category"] {
   return areaCategoryMap[area];
 }
 
+export function findingAmbito(finding: Finding): AmbitoId | null {
+  const byScope = scopeToAmbito(finding.scope);
+  if (byScope) return byScope;
+
+  const serviceOffer = String(finding.serviceOffer ?? "").toLowerCase();
+  if (finding.aiMetadata?.domain === "performance" || serviceOffer.includes("performance")) return "performance";
+
+  // Fallback by coarse category is approximate because legacy operations findings can represent
+  // operations, logs/events or performance before scope-based attribution existed.
+  if (finding.category === "configuration") return "configuration";
+  if (finding.category === "security") return "security";
+  if (finding.category === "lifecycle" || finding.category === "inventory") return "lifecycle";
+  if (finding.category === "resiliency") return "topology";
+  if (finding.category === "operations") return "operations";
+  return null;
+}
+
 export function filterFindingsByArea(findings: Finding[], area: FindingAreaFilter | null | undefined): Finding[] {
   if (!area) return findings;
-  const category = areaToFindingCategory(area);
-  return findings.filter((finding) => finding.category === category);
+  return findings.filter((finding) => findingAmbito(finding) === area);
 }
 
 export function summarizeAreaFindings(findings: Finding[]): AreaFindingSummary {

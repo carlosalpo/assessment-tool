@@ -7,6 +7,16 @@ const encryptionVersion = "aes-256-gcm:v1";
 const openAIProvider = "openai";
 const ciscoProvider = "cisco_eox";
 const localKeyFileName = ".credential-encryption-key";
+const ciscoOAuthTokenUrl = "https://id.cisco.com/oauth2/default/v1/token";
+
+type CiscoOAuthCredential = {
+  type: "oauth_client";
+  clientId: string;
+  clientSecret: string;
+  tokenUrl?: string;
+};
+
+let ciscoOAuthTokenCache: { key: string; accessToken: string; expiresAt: number } | null = null;
 
 export type CredentialMetadata = {
   provider: string;
@@ -25,9 +35,14 @@ export async function getOpenAIApiKey() {
   return stored || process.env.OPENAI_API_KEY?.trim() || "";
 }
 
-export async function getCiscoApiToken() {
+export async function getCiscoAccessToken() {
   const stored = await getPersistedCredentialValue(ciscoProvider);
-  return stored || process.env.CISCO_API_TOKEN?.trim() || "";
+  if (stored) return fetchCiscoOAuthAccessToken(parseStoredCiscoOAuthCredential(stored));
+
+  const envOAuth = getCiscoOAuthCredentialFromEnv();
+  if (envOAuth) return fetchCiscoOAuthAccessToken(envOAuth);
+
+  return "";
 }
 
 export async function saveOpenAIApiKey(apiKey: string, updatedBy?: string) {
@@ -39,11 +54,13 @@ export async function saveOpenAIApiKey(apiKey: string, updatedBy?: string) {
   });
 }
 
-export async function saveCiscoApiToken(apiToken: string, updatedBy?: string) {
+export async function saveCiscoOAuthCredential(input: { clientId: string; clientSecret: string }, updatedBy?: string) {
+  const credential = normalizeCiscoOAuthCredential(input);
   return saveApiCredential({
     provider: ciscoProvider,
-    label: "Cisco EoX OAuth access token",
-    value: normalizeBearerToken(apiToken),
+    label: "Cisco API OAuth client credentials",
+    value: serializeCiscoCredential(credential),
+    displayLastFour: credential.clientSecret.slice(-4),
     updatedBy
   });
 }
@@ -53,7 +70,7 @@ export async function deleteOpenAIApiKey() {
   return getOpenAICredentialMetadata();
 }
 
-export async function deleteCiscoApiToken() {
+export async function deleteCiscoOAuthCredential() {
   await prisma.apiCredential.deleteMany({ where: { provider: ciscoProvider } });
   return getCiscoCredentialMetadata();
 }
@@ -98,30 +115,30 @@ export async function getCiscoCredentialMetadata(): Promise<CredentialMetadata> 
     return credentialToMetadata(stored, "postgres");
   }
 
-  const envToken = process.env.CISCO_API_TOKEN?.trim() || "";
-  if (envToken) {
+  const envOAuth = getCiscoOAuthCredentialFromEnv();
+  if (envOAuth) {
     return {
       provider: ciscoProvider,
-      label: "Cisco EoX OAuth access token",
+      label: "Cisco API OAuth client credentials",
       configured: true,
       source: "env",
-      maskedValue: maskCredential(envToken.slice(-4)),
-      lastFour: envToken.slice(-4),
+      maskedValue: maskCredential(envOAuth.clientSecret.slice(-4)),
+      lastFour: envOAuth.clientSecret.slice(-4),
       updatedAt: null,
-      updatedBy: "CISCO_API_TOKEN",
+      updatedBy: "CISCO_CLIENT_ID/CISCO_CLIENT_SECRET",
       encryptionVersion: null
     };
   }
 
-  return emptyMetadata(ciscoProvider, "Cisco EoX OAuth access token");
+  return emptyMetadata(ciscoProvider, "Cisco API OAuth client credentials");
 }
 
-async function saveApiCredential(input: { provider: string; label: string; value: string; updatedBy?: string }) {
+async function saveApiCredential(input: { provider: string; label: string; value: string; displayLastFour?: string; updatedBy?: string }) {
   const value = input.value.trim();
   if (!value) throw new Error("La credencial no puede estar vacia.");
   const encryptedValue = encryptSecret(value);
   const fingerprint = fingerprintSecret(value);
-  const lastFour = value.slice(-4);
+  const lastFour = input.displayLastFour ?? value.slice(-4);
 
   const credential = await prisma.apiCredential.upsert({
     where: { provider: input.provider },
@@ -236,8 +253,87 @@ function credentialToMetadata(
   };
 }
 
-function normalizeBearerToken(value: string) {
-  return value.trim().replace(/^Bearer\s+/i, "");
+function normalizeCiscoOAuthCredential(input: { clientId: string; clientSecret: string }): CiscoOAuthCredential {
+  const clientId = input.clientId.trim();
+  const clientSecret = input.clientSecret.trim();
+  if (!clientId || !clientSecret) {
+    throw new Error("Credencial Cisco invalida: client_id y client_secret son requeridos.");
+  }
+  return { type: "oauth_client", clientId, clientSecret };
+}
+
+function parseStoredCiscoOAuthCredential(value: string): CiscoOAuthCredential {
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    const clientId = stringValue(parsed.client_id) || stringValue(parsed.clientId);
+    const clientSecret = stringValue(parsed.client_secret) || stringValue(parsed.clientSecret);
+    if (clientId && clientSecret) {
+      return {
+        type: "oauth_client",
+        clientId,
+        clientSecret,
+        tokenUrl: stringValue(parsed.token_url) || stringValue(parsed.tokenUrl) || undefined
+      };
+    }
+  } catch {
+    // Fall through to the explicit error below.
+  }
+  throw new Error("Credencial Cisco persistida invalida. Guarda client_id y client_secret nuevamente en Ajustes.");
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function serializeCiscoCredential(credential: CiscoOAuthCredential) {
+  return JSON.stringify(credential);
+}
+
+function getCiscoOAuthCredentialFromEnv(): CiscoOAuthCredential | null {
+  const clientId = process.env.CISCO_CLIENT_ID?.trim() || process.env.CISCO_API_CLIENT_ID?.trim() || "";
+  const clientSecret = process.env.CISCO_CLIENT_SECRET?.trim() || process.env.CISCO_API_CLIENT_SECRET?.trim() || "";
+  if (!clientId || !clientSecret) return null;
+  return {
+    type: "oauth_client",
+    clientId,
+    clientSecret,
+    tokenUrl: process.env.CISCO_OAUTH_TOKEN_URL?.trim() || undefined
+  };
+}
+
+async function fetchCiscoOAuthAccessToken(credential: CiscoOAuthCredential) {
+  const cacheKey = fingerprintSecret(`${credential.tokenUrl || ciscoOAuthTokenUrl}:${credential.clientId}:${credential.clientSecret}`);
+  const now = Date.now();
+  if (ciscoOAuthTokenCache?.key === cacheKey && ciscoOAuthTokenCache.expiresAt > now + 30_000) {
+    return ciscoOAuthTokenCache.accessToken;
+  }
+
+  const body = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_id: credential.clientId,
+    client_secret: credential.clientSecret
+  });
+  const response = await fetch(credential.tokenUrl || ciscoOAuthTokenUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+    body,
+    cache: "no-store"
+  });
+  const payload = (await response.json().catch(() => null)) as { access_token?: string; expires_in?: number; error?: string; error_description?: string } | null;
+
+  if (!response.ok || !payload?.access_token) {
+    const detail = payload?.error_description || payload?.error || "";
+    throw new Error(`Cisco OAuth respondio ${response.status}.${detail ? ` Detalle: ${detail}` : ""}`);
+  }
+
+  const expiresInSeconds = Number.isFinite(payload.expires_in) ? Number(payload.expires_in) : 3600;
+  ciscoOAuthTokenCache = {
+    key: cacheKey,
+    accessToken: payload.access_token.trim().replace(/^Bearer\s+/i, ""),
+    expiresAt: now + Math.max(60, expiresInSeconds - 120) * 1000
+  };
+
+  return ciscoOAuthTokenCache.accessToken;
 }
 
 function emptyMetadata(provider = openAIProvider, label = "OpenAI API key"): CredentialMetadata {

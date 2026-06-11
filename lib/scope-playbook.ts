@@ -2,13 +2,15 @@ import { createHash } from "node:crypto";
 import type { RiskLevel } from "./types.ts";
 
 export type OsFamily = "all" | "ios" | "ios-xe" | "nxos" | "asa" | "unknown";
-export type SupportedScopePlaybookScopeId = "configuration" | "security" | "evidence" | "performance";
+export type SupportedScopePlaybookScopeId = "configuration" | "security" | "evidence" | "performance" | "topology" | "operations";
 
 export const supportedScopePlaybookScopeIds: SupportedScopePlaybookScopeId[] = [
   "configuration",
   "security",
   "evidence",
-  "performance"
+  "performance",
+  "topology",
+  "operations"
 ];
 
 export type Criterion = {
@@ -54,368 +56,614 @@ export type SuppressedFinding = {
 
 export type DeviceOsLookup = Record<string, OsFamily> | Map<string, OsFamily>;
 
+export type CoveragePlanCriterion = {
+  id: string;
+  aspect: string;
+};
+
+export type CoveragePlanEntry = {
+  deviceHostname: string;
+  osFamily: OsFamily;
+  criteria: CoveragePlanCriterion[];
+};
+
+type CoveragePlanDeviceContext = {
+  identity: {
+    hostname: string;
+    osFamily: OsFamily;
+  };
+};
+
+const configurationBestPracticeCriteria: Criterion[] = [
+  {
+    id: "cfg-01-supported-software",
+    aspect: "Versiones de software soportadas",
+    guidance: "Mantener IOS Legacy, IOS XE y NX-OS en releases recomendados, con soporte activo, PSIRT revisado y sin bugs criticos abiertos de stacking, PoE, STP o seguridad.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-02-standard-image-family",
+    aspect: "Estandar de imagen por familia",
+    guidance: "Validar una version estandar por plataforma o familia, por ejemplo Catalyst 2960/3560/3750, Catalyst 9200/9300/9500 y Nexus 3K/5K/7K/9K.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-03-centralized-aaa",
+    aspect: "AAA centralizado",
+    guidance: "Usar TACACS+ o RADIUS para autenticacion, autorizacion y accounting, evitando administracion basada solo en cuentas locales compartidas.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-04-emergency-local-user",
+    aspect: "Usuario local de emergencia",
+    guidance: "Mantener un usuario local seguro de fallback para escenarios de caida de AAA, con privilegios controlados y secreto fuerte.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-05-strong-secrets",
+    aspect: "Secretos fuertes",
+    guidance: "Usar enable secret y usuarios con secret o algoritmos robustos disponibles; no aceptar password 0, claves triviales ni service password-encryption como control suficiente.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-06-disable-telnet",
+    aspect: "Telnet deshabilitado",
+    guidance: "Permitir administracion remota unicamente por SSH; reportar transport input telnet o all como exposicion de credenciales en texto claro.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-07-ssh-version-2",
+    aspect: "SSH version 2",
+    guidance: "Forzar SSHv2 y llaves RSA/ECDSA robustas segun soporte de plataforma, detectando llaves antiguas o parametros SSH heredados.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-08-vty-admin-acl",
+    aspect: "ACL para acceso VTY o administrativo",
+    guidance: "Restringir acceso administrativo a subredes de gestion mediante access-class, ACL de management-plane, interfaz mgmt o control equivalente.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-09-management-vrf-network",
+    aspect: "VRF o red dedicada de management",
+    guidance: "Separar administracion del trafico de usuarios mediante VRF, interfaz mgmt o VLAN/red dedicada; marcar como riesgo SVIs expuestas a usuarios.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-10-disable-unused-services",
+    aspect: "Servicios innecesarios deshabilitados",
+    guidance: "Desactivar servicios no usados como HTTP server, finger, PAD, small servers, source routing u otros defaults heredados sin funcion operacional.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-11-https-controlled-use",
+    aspect: "HTTPS solo si se usa GUI o API",
+    guidance: "Si web management, RESTCONF, NX-API o GUI son necesarios, exigir HTTPS, certificado y ACL; si no se usan, deben estar deshabilitados.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-12-snmpv3-authpriv",
+    aspect: "SNMPv3 authPriv",
+    guidance: "Preferir SNMPv3 con autenticacion y cifrado; reportar SNMPv1/v2c, comunidades public/private o permisos RW sin justificacion y controles.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-13-snmp-acl",
+    aspect: "SNMP restringido por ACL",
+    guidance: "Permitir SNMP solo desde servidores NMS autorizados, incluso cuando se use SNMPv3; evitar consultas desde cualquier origen.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-14-reliable-ntp",
+    aspect: "NTP confiable",
+    guidance: "Usar servidores NTP internos, preferiblemente autenticados o filtrados por ACL, y reportar equipos sin sincronizacion confiable.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-15-timezone-timestamps",
+    aspect: "Timezone y timestamps",
+    guidance: "Configurar zona horaria y timestamps de logs/debug para evitar evidencia con hora desfasada o imposible de correlacionar.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-16-central-syslog",
+    aspect: "Syslog central",
+    guidance: "Enviar logs a servidores centralizados con severidad adecuada; no depender solo del buffer local del equipo.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-17-management-source-interface",
+    aspect: "Source-interface de servicios de gestion",
+    guidance: "Definir origen estable para Syslog, SNMP, TACACS, RADIUS y NTP usando loopback, mgmt o interfaz de gestion segun diseno.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-18-legal-banners",
+    aspect: "Banners legales",
+    guidance: "Usar banner de acceso autorizado y monitoreo; evitar mensajes informales o informacion sensible del cliente.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-19-admin-roles-privileges",
+    aspect: "Roles y privilegios administrativos",
+    guidance: "Separar perfiles de operador, NOC, administrador y auditor; no entregar privilegio 15 o rol admin a todos los usuarios.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-20-session-timeout",
+    aspect: "Timeout de sesiones",
+    guidance: "Configurar exec-timeout o equivalente en lineas administrativas y consolas para cerrar sesiones inactivas.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-21-control-plane-protection",
+    aspect: "Proteccion de control plane",
+    guidance: "Usar CoPP, CPPr o politicas equivalentes para proteger CPU contra trafico destinado al switch o potencial DoS.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-22-automatic-config-backup",
+    aspect: "Backup automatico de configuracion",
+    guidance: "Respaldar running-config y startup-config en repositorio central despues de cambios y mantener trazabilidad historica.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-23-archive-rollback-checkpoint",
+    aspect: "Archive, rollback o checkpoint",
+    guidance: "Usar archive/configure replace en IOS/IOS XE y checkpoint/rollback en NX-OS antes de cambios relevantes.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-24-controlled-config-save",
+    aspect: "Guardado controlado de configuracion",
+    guidance: "Confirmar y validar cambios antes de write memory o copy running startup, especialmente despues de cambios de alto riesgo.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-25-remote-change-revert",
+    aspect: "Reversion segura en cambios remotos",
+    guidance: "Programar reload/revert, checkpoint o rollback al modificar routing, AAA, VLAN de gestion o trunks remotamente.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-26-explicit-stp-mode",
+    aspect: "Modo STP explicito",
+    guidance: "Definir Rapid-PVST, MST o el modo STP requerido por diseno y detectar defaults mezclados entre switches.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-27-stp-root-primary-secondary",
+    aspect: "Root bridge primario y secundario",
+    guidance: "Asegurar que core o distribucion sean root STP segun diseno y que exista backup root; evitar que equipos de acceso puedan disputar la raiz.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-28-portfast-edge-only",
+    aspect: "PortFast solo en puertos finales",
+    guidance: "Activar PortFast o edge port unicamente hacia usuarios, servidores o endpoints; reportarlo en uplinks, trunks o enlaces switch-switch.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-29-bpdu-guard-access",
+    aspect: "BPDU Guard en puertos de acceso",
+    guidance: "Todo puerto edge debe tener BPDU Guard global o por interfaz para proteger contra switches no autorizados y loops accidentales.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-30-root-guard-downstream",
+    aspect: "Root Guard en puertos descendentes",
+    guidance: "Aplicar Root Guard donde nunca deberia aparecer un root superior, especialmente hacia acceso o dominios no confiables.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-31-loop-guard-applicable",
+    aspect: "Loop Guard donde corresponde",
+    guidance: "Usar Loop Guard en enlaces no-edge donde perdida unidireccional de BPDUs pueda provocar loops; no confundirlo con BPDU Guard.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-32-udld-aggressive-fiber",
+    aspect: "UDLD aggressive en fibra",
+    guidance: "Activar UDLD aggressive en enlaces de fibra criticos, uplinks y miembros de port-channel donde una falla unidireccional sea peligrosa.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-33-lacp-etherchannel",
+    aspect: "EtherChannel con LACP",
+    guidance: "Preferir LACP activo/pasivo sobre mode on para evitar agregados estaticos con loops o inconsistencias silenciosas.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-34-port-channel-member-consistency",
+    aspect: "Consistencia de miembros de Port-channel",
+    guidance: "Verificar speed, duplex, trunk, allowed VLANs, MTU, STP y QoS iguales entre miembros de un port-channel.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-35-trunk-allowed-vlans",
+    aspect: "Allowed VLANs explicitas en trunks",
+    guidance: "Permitir solo VLANs necesarias en trunks; reportar allowed vlan all como ampliacion innecesaria del dominio de falla.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-36-unused-native-vlan",
+    aspect: "VLAN nativa no utilizada",
+    guidance: "Definir una native VLAN dedicada, sin usuarios y consistente en ambos extremos; evitar VLAN 1 como nativa con trafico real.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-37-tag-native-vlan",
+    aspect: "Etiquetado de VLAN nativa",
+    guidance: "Etiquetar native VLAN cuando el diseno y la compatibilidad lo permitan, validando ambos extremos del trunk.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-38-disable-dtp",
+    aspect: "DTP deshabilitado",
+    guidance: "Configurar switchport nonegotiate en trunks estaticos IOS/IOS XE y evitar negociacion dinamica de trunks.",
+    appliesTo: ["ios", "ios-xe"]
+  },
+  {
+    id: "cfg-39-avoid-vlan1-user-management",
+    aspect: "VLAN 1 fuera de usuarios y gestion",
+    guidance: "Reservar VLAN 1 solo para funciones inevitables de control; reportar usuarios, impresoras, APs o management en VLAN 1.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-40-shutdown-unused-ports",
+    aspect: "Puertos no utilizados apagados",
+    guidance: "Apagar puertos no usados, documentarlos y moverlos a VLAN de parqueo sin salida; no dejarlos vivos por conveniencia.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-41-interface-descriptions",
+    aspect: "Descripciones de interfaces",
+    guidance: "Documentar destino, circuito, patch panel, servicio o equipo conectado para reducir troubleshooting por adivinanza.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-42-storm-control",
+    aspect: "Storm Control",
+    guidance: "Controlar broadcast, multicast y unknown unicast en puertos de acceso y donde el diseno lo requiera, evitando umbrales agresivos sin medicion.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-43-dhcp-snooping",
+    aspect: "DHCP Snooping",
+    guidance: "Confiar solo puertos hacia DHCP server, relay o uplinks legitimos; habilitar por VLAN requerida y evitar trusted en puertos de usuario.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-44-dynamic-arp-inspection",
+    aspect: "Dynamic ARP Inspection",
+    guidance: "Usar DAI junto con DHCP Snooping o ARP ACLs en ambientes estaticos; reportar DAI activo sin bindings correctos.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-45-ip-source-guard",
+    aspect: "IP Source Guard",
+    guidance: "Usar IPSG en puertos de acceso contra spoofing de IP, considerando hosts estaticos, telefonos, camaras y equipos industriales.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-46-ipv6-first-hop-security",
+    aspect: "IPv6 First Hop Security",
+    guidance: "Aplicar RA Guard, DHCPv6 Guard, IPv6 Snooping y politicas FHS donde aplique; no asumir seguridad porque IPv6 no se usa formalmente.",
+    appliesTo: ["ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-47-dot1x-mab-access",
+    aspect: "802.1X y MAB en accesos",
+    guidance: "Usar 802.1X/MAB donde sea viable, con profiling, fallback y excepciones controladas para impresoras, telefonos, camaras o IoT.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-48-qos-trust-boundary",
+    aspect: "Trust boundary de QoS",
+    guidance: "Confiar DSCP/CoS solo desde dispositivos confiables como telefonos IP, APs, firewalls, routers o servidores controlados; no confiar desde cualquier PC.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "cfg-49-vpc-consistency-peer-link",
+    aspect: "NX-OS vPC consistencia y peer-link",
+    guidance: "En vPC validar consistencia de VLANs, port-channels, STP, LACP, MTU, allowed VLANs, parametros vPC y robustez del peer-link.",
+    appliesTo: ["nxos"]
+  },
+  {
+    id: "cfg-50-vpc-keepalive-peerlink-orphans",
+    aspect: "NX-OS vPC keepalive, peer-link y orphan ports",
+    guidance: "Disenar peer-keepalive por red separada, peer-link robusto, dual-homing con LACP y control de orphan ports; vPC no debe tratarse como stack Catalyst.",
+    appliesTo: ["nxos"]
+  }
+];
+
+const configurationExpectedFindings: ExpectedFindingType[] = [
+  {
+    id: "expected-cfg-unsupported-software",
+    title: "Software sin version soportada o recomendada",
+    description: "Equipo en release antiguo, fuera de soporte recomendado o con exposicion a PSIRT/bugs relevantes para su plataforma.",
+    severityHint: "high",
+    exampleRationale: "La version observada no coincide con el estandar recomendado de la familia y puede heredar vulnerabilidades o defectos conocidos.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-image-standard-drift",
+    title: "Desviacion del estandar de imagen por familia",
+    description: "Dispositivos comparables operan con releases distintos sin excepcion documentada, dificultando troubleshooting y automatizacion.",
+    severityHint: "medium",
+    exampleRationale: "El equipo difiere de la version base esperada para su familia y rol, creando deriva operacional entre switches equivalentes.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-aaa-missing",
+    title: "AAA centralizado ausente o incompleto",
+    description: "Administracion sin TACACS+/RADIUS efectivo, sin accounting o con dependencia de cuentas locales compartidas.",
+    severityHint: "high",
+    exampleRationale: "La configuracion no evidencia AAA centralizado con trazabilidad de comandos y sesiones administrativas.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-shared-local-users",
+    title: "Usuarios locales compartidos o sin trazabilidad",
+    description: "Cuentas locales genericas o compartidas que impiden atribucion de cambios y elevan riesgo operativo.",
+    severityHint: "high",
+    exampleRationale: "La evidencia muestra usuarios locales usados como mecanismo principal o generico de administracion, sin trazabilidad individual.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-emergency-user-gap",
+    title: "Fallback local de emergencia ausente o debil",
+    description: "No existe usuario local seguro de contingencia o el usuario de emergencia usa secreto debil/privilegios no controlados.",
+    severityHint: "medium",
+    exampleRationale: "La configuracion depende del AAA sin fallback seguro o conserva una cuenta local que no cumple el estandar de emergencia.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-weak-secrets",
+    title: "Secretos o passwords debiles en configuracion",
+    description: "Uso de password 0, enable password, secretos triviales o cifrado reversible tratado como seguridad real.",
+    severityHint: "high",
+    exampleRationale: "La evidencia muestra credenciales heredadas o debiles que no protegen adecuadamente el acceso administrativo.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-telnet-enabled",
+    title: "Telnet habilitado en administracion remota",
+    description: "Lineas VTY o servicio equivalente permiten Telnet, exponiendo credenciales y sesiones en texto claro.",
+    severityHint: "high",
+    exampleRationale: "La configuracion permite transport input telnet o all, incumpliendo el estandar de administracion solo por SSH.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-sshv2-gap",
+    title: "SSH sin hardening basico",
+    description: "SSHv2 no forzado, llaves debiles o parametros heredados que reducen seguridad del acceso administrativo.",
+    severityHint: "medium",
+    exampleRationale: "La evidencia no muestra SSHv2 o llaves robustas alineadas al estandar de administracion segura.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-management-acl-missing",
+    title: "Acceso administrativo sin ACL de origen",
+    description: "SSH, VTY, management-plane o interfaz mgmt aceptan acceso desde origenes amplios o no documentados.",
+    severityHint: "high",
+    exampleRationale: "No se observa access-class, ACL de management o restriccion equivalente hacia subredes autorizadas.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-management-vrf-gap",
+    title: "Gestion mezclada con trafico de usuarios",
+    description: "Administracion expuesta en VLAN/SVI de usuarios o sin VRF/red dedicada cuando la plataforma y el diseno lo permiten.",
+    severityHint: "medium",
+    exampleRationale: "El plano de gestion parece compartir dominio con trafico de usuarios, ampliando superficie de acceso administrativo.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-unnecessary-services",
+    title: "Servicios innecesarios activos",
+    description: "Servicios heredados o no usados permanecen habilitados, como HTTP plano, small servers, source routing o similares.",
+    severityHint: "medium",
+    exampleRationale: "La configuracion conserva servicios sin necesidad operacional visible, incrementando superficie de ataque y ruido operativo.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-snmpv2c-rw",
+    title: "SNMPv2c RW o comunidades inseguras",
+    description: "SNMPv1/v2c, communities public/private o permisos RW sin ACL adecuada ni migracion a SNMPv3 authPriv.",
+    severityHint: "high",
+    exampleRationale: "La configuracion usa comunidades SNMP debiles o de escritura, lo que permite exposicion o cambio de informacion de gestion.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-snmp-acl-missing",
+    title: "SNMP sin restriccion de origen",
+    description: "SNMP queda accesible desde origenes no acotados aunque use version segura o comunidades no triviales.",
+    severityHint: "medium",
+    exampleRationale: "No se observa ACL o vista que limite consultas SNMP a servidores NMS autorizados.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-ntp-unreliable",
+    title: "NTP ausente o no confiable",
+    description: "Reloj sin servidores NTP confiables, sin autenticacion/filtrado cuando aplica o con origen no controlado.",
+    severityHint: "medium",
+    exampleRationale: "La falta de NTP confiable impide correlacionar eventos y reconstruir incidentes con precision.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-syslog-missing",
+    title: "Syslog central ausente o incompleto",
+    description: "Equipo depende solo de buffer local o no envia logs a colectores centrales con severidad y origen adecuados.",
+    severityHint: "medium",
+    exampleRationale: "La evidencia no muestra logging host/source-interface suficiente para mantener trazabilidad fuera del equipo.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-config-backup-missing",
+    title: "Backups automaticos de configuracion ausentes",
+    description: "No hay evidencia de respaldo automatico de running/startup-config en repositorio central despues de cambios.",
+    severityHint: "medium",
+    exampleRationale: "La operacion quedaria expuesta a reconstruccion manual de configuraciones ante falla o error de cambio.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-change-rollback-missing",
+    title: "Cambios remotos sin rollback o checkpoint",
+    description: "Cambios de riesgo se realizan sin archive, checkpoint, configure replace, reload/revert o mecanismo equivalente.",
+    severityHint: "high",
+    exampleRationale: "No se observa punto de retorno para cambios remotos que podrian cortar acceso de gestion, routing o trunks.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-stp-mode-default",
+    title: "Modo STP no definido explicitamente",
+    description: "El equipo conserva defaults o mezcla modos STP sin decision clara de diseno.",
+    severityHint: "medium",
+    exampleRationale: "La ausencia de modo STP explicito puede generar convergencia inconsistente entre switches.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-stp-root-uncontrolled",
+    title: "Root STP no controlado",
+    description: "Prioridades STP permiten que un switch no previsto sea root o no existe root primario/secundario por VLAN.",
+    severityHint: "medium",
+    exampleRationale: "La evidencia no demuestra control intencional de root bridge segun rol de core/distribucion.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-bpdu-guard-missing",
+    title: "Puertos de acceso sin BPDU Guard",
+    description: "Puertos edge o PortFast carecen de BPDU Guard efectivo, permitiendo loops por switches no autorizados.",
+    severityHint: "medium",
+    exampleRationale: "La configuracion muestra puertos de acceso sin proteccion BPDU Guard global o por interfaz.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-root-loop-udld-gap",
+    title: "Guardas STP o UDLD incompletos",
+    description: "Root Guard, Loop Guard o UDLD aggressive faltan en enlaces donde el rol y medio fisico los hacen recomendables.",
+    severityHint: "medium",
+    exampleRationale: "El enlace critico carece de protecciones contra root no deseado, perdida de BPDUs o falla unidireccional.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-port-channel-inconsistent",
+    title: "Port-channel con miembros inconsistentes",
+    description: "Miembros de EtherChannel/port-channel tienen diferencias de VLAN, trunk, MTU, QoS, speed, duplex o STP.",
+    severityHint: "medium",
+    exampleRationale: "La inconsistencia entre miembros puede suspender enlaces, degradar redundancia o provocar forwarding inesperado.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-trunk-allowed-all",
+    title: "Trunk con allowed VLAN all",
+    description: "Trunks permiten todas las VLANs en lugar de una lista explicita y minima segun necesidad real.",
+    severityHint: "medium",
+    exampleRationale: "Allowed VLAN all expande innecesariamente el dominio de falla y facilita propagacion de errores de capa 2.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-native-vlan-risk",
+    title: "Native VLAN default o no controlada",
+    description: "Native VLAN usa VLAN 1, transporta trafico real, no esta etiquetada donde aplica o difiere entre extremos.",
+    severityHint: "medium",
+    exampleRationale: "La native VLAN observada no esta aislada del trafico real y puede crear fugas o inconsistencias de trunk.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-vlan1-user-management",
+    title: "VLAN 1 usada para usuarios o gestion",
+    description: "Usuarios, APs, impresoras o administracion usan VLAN 1 en lugar de VLANs dedicadas.",
+    severityHint: "medium",
+    exampleRationale: "El uso de VLAN 1 para trafico real contradice el estandar de segmentacion y reduce control de capa 2.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-unused-ports-active",
+    title: "Puertos no usados permanecen activos",
+    description: "Interfaces sin uso aparente no estan en shutdown, no tienen descripcion ni VLAN de parqueo controlada.",
+    severityHint: "low",
+    exampleRationale: "Los puertos activos sin proposito documentado permiten conexiones no controladas y complican operacion.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-interface-description-gap",
+    title: "Interfaces sin descripcion operacional",
+    description: "Interfaces relevantes carecen de descripcion de destino, servicio, circuito o equipo conectado.",
+    severityHint: "low",
+    exampleRationale: "La falta de descripcion aumenta tiempo de troubleshooting y riesgo de cambios sobre interfaces equivocadas.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-storm-control-gap",
+    title: "Storm Control ausente o mal calibrado",
+    description: "Puertos de acceso sin storm-control esperado o con umbrales agresivos en enlaces criticos sin medicion.",
+    severityHint: "medium",
+    exampleRationale: "La configuracion no evidencia control razonable de broadcast/multicast/unknown unicast segun rol del puerto.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-dhcp-snooping-gap",
+    title: "DHCP Snooping ausente o trust incorrecto",
+    description: "DHCP Snooping no esta habilitado por VLAN requerida o hay puertos de usuario marcados como trusted.",
+    severityHint: "medium",
+    exampleRationale: "La configuracion no protege adecuadamente contra servidores DHCP no autorizados en accesos.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-dai-ipsg-bindings",
+    title: "DAI/IPSG sin bindings correctos",
+    description: "Dynamic ARP Inspection o IP Source Guard se activan sin DHCP Snooping bindings, ARP ACLs o excepciones para hosts estaticos.",
+    severityHint: "high",
+    exampleRationale: "El control de spoofing depende de bindings incompletos y puede bloquear hosts legitimos o dejar huecos de seguridad.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-ipv6-fhs-gap",
+    title: "IPv6 First Hop Security ausente",
+    description: "RA Guard, DHCPv6 Guard, IPv6 Snooping o politicas FHS faltan en accesos donde IPv6 local podria ser explotado.",
+    severityHint: "medium",
+    exampleRationale: "Aunque IPv6 no se use formalmente, la red de acceso podria aceptar RA rogue u otros ataques de primer salto.",
+    appliesTo: ["ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-8021x-mab-gap",
+    title: "Acceso sin 802.1X/MAB o excepciones controladas",
+    description: "Puertos de acceso carecen de autenticacion de endpoint o el fallback MAB no esta gobernado por perfil y excepciones.",
+    severityHint: "medium",
+    exampleRationale: "La configuracion no muestra control de identidad de endpoint suficiente para el rol de acceso observado.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-qos-trust-boundary-risk",
+    title: "Trust boundary de QoS mal definido",
+    description: "El equipo confia DSCP/CoS desde endpoints no confiables o no delimita telefonos, APs, routers/firewalls y servidores controlados.",
+    severityHint: "low",
+    exampleRationale: "La politica de QoS permite que fuentes no confiables marquen trafico con prioridad indebida.",
+    appliesTo: ["ios", "ios-xe", "nxos"]
+  },
+  {
+    id: "expected-cfg-vpc-treated-as-stack",
+    title: "vPC tratado como stack Catalyst",
+    description: "El diseno o configuracion asume que vPC se comporta como stack, ignorando peer-link, peer-keepalive, orphan ports y split-brain.",
+    severityHint: "high",
+    exampleRationale: "La evidencia de vPC no muestra controles propios de Nexus y parece operar como si ambos peers fueran un unico chasis logico.",
+    appliesTo: ["nxos"]
+  },
+  {
+    id: "expected-cfg-vpc-peerlink-keepalive-orphan-risk",
+    title: "vPC con peer-link, keepalive u orphan ports en riesgo",
+    description: "Peer-keepalive sin red separada, peer-link fragil, dual-homing incompleto u orphan ports sin control operacional.",
+    severityHint: "high",
+    exampleRationale: "La configuracion vPC no evidencia resiliencia suficiente ante falla de peer-link o condiciones de forwarding inconsistentes.",
+    appliesTo: ["nxos"]
+  }
+];
+
 export const defaultConfigurationScopePlaybook: ScopePlaybook = {
   scopeId: "configuration",
-  criteria: [
-    {
-      id: "cfg-spanning-tree",
-      aspect: "Spanning-tree y switching",
-      guidance: "Evalua modo STP, root/secondary root por VLAN, prioridad no default en equipos core/distribucion, consistencia de VLANs y coherencia con el rol del equipo.",
-      appliesTo: ["ios", "ios-xe", "nxos"]
-    },
-    {
-      id: "cfg-stp-edge-protection",
-      aspect: "Proteccion STP en puertos edge",
-      guidance: "Verifica PortFast/edge-port solo en puertos de acceso hacia hosts y BPDU Guard habilitado globalmente o por interfaz; detecta BPDU Filter usado para ocultar BPDUs salvo excepcion documentada.",
-      appliesTo: ["ios", "ios-xe", "nxos"]
-    },
-    {
-      id: "cfg-stp-root-loop-guard",
-      aspect: "Root Guard, Loop Guard y proteccion contra loops",
-      guidance: "Evalua Root Guard en puertos hacia acceso/edge donde no debe aparecer un root superior, Loop Guard en enlaces no-designated/root/alternate criticos y coherencia con el diseno STP.",
-      appliesTo: ["ios", "ios-xe", "nxos"]
-    },
-    {
-      id: "cfg-udld",
-      aspect: "UDLD en enlaces de fibra o punto a punto",
-      guidance: "Evalua UDLD normal/aggressive en enlaces switch-switch, fibra, uplinks, port-channel members y enlaces donde una falla unidireccional podria producir loops o blackholing.",
-      appliesTo: ["ios", "ios-xe", "nxos"]
-    },
-    {
-      id: "cfg-trunk-hardening",
-      aspect: "Hardening de trunks y VLANs",
-      guidance: "Evalua native VLAN no usada, tagging de native VLAN donde aplique, DTP deshabilitado, lista allowed VLAN explicita, pruning razonado y ausencia de VLAN 1 para trafico de usuario/gestion.",
-      appliesTo: ["ios", "ios-xe", "nxos"]
-    },
-    {
-      id: "cfg-access-port-controls",
-      aspect: "Controles de puertos de acceso",
-      guidance: "Evalua switchport mode access, VLAN asignada, PortFast/BPDU Guard, storm-control, deshabilitacion de puertos no usados y descripcion de interfaces de acceso criticas.",
-      appliesTo: ["ios", "ios-xe", "nxos"]
-    },
-    {
-      id: "cfg-port-channel",
-      aspect: "Port-channel, LACP y consistencia de miembros",
-      guidance: "Evalua que los EtherChannel/port-channel usen LACP cuando sea posible, tengan miembros consistentes en velocidad/duplex/trunk/VLAN/STP, y no mezclen configuraciones incompatibles.",
-      appliesTo: ["ios", "ios-xe", "nxos"]
-    },
-    {
-      id: "cfg-vpc-mlag-stack",
-      aspect: "vPC/MLAG/StackWise/Virtual Switching",
-      guidance: "En Nexus evalua vPC domain, peer-link, peer-keepalive, orphan ports, consistency parameters y role priority; en Catalyst evalua StackWise/StackWise Virtual/VSS y dual-active detection si hay evidencia.",
-      appliesTo: ["ios", "ios-xe", "nxos"]
-    },
-    {
-      id: "cfg-routing-protocols",
-      aspect: "Protocolos de routing",
-      guidance: "Evalua OSPF, BGP, EIGRP, rutas estaticas, redistribucion, timers, vecinos, passive-interface, summarization y consistencia entre configuracion y estado observado.",
-      appliesTo: ["all"]
-    },
-    {
-      id: "cfg-routing-redistribution",
-      aspect: "Redistribucion y control de rutas",
-      guidance: "Evalua redistribucion entre protocolos con route-map/prefix-list/tagging, filtros de entrada/salida, rutas por defecto condicionadas y riesgo de leaks o loops de routing.",
-      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
-    },
-    {
-      id: "cfg-routing-adjacency-hardening",
-      aspect: "Proteccion de adyacencias de routing",
-      guidance: "Evalua autenticacion OSPF/EIGRP/BGP cuando aplique, TTL security/GTSM para eBGP, vecinos explicitamente definidos, interfaces pasivas y control de origen de sesiones.",
-      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
-    },
-    {
-      id: "cfg-first-hop-redundancy",
-      aspect: "Redundancia de gateway",
-      guidance: "Evalua HSRP/VRRP/GLBP con prioridades intencionales, preempt controlado, tracking de uplinks/rutas criticas y consistencia de VIPs entre pares.",
-      appliesTo: ["ios", "ios-xe", "nxos"]
-    },
-    {
-      id: "cfg-management-plane",
-      aspect: "Plano de administracion",
-      guidance: "Evalua SSH en lugar de Telnet, AAA/TACACS/RADIUS, usuarios locales de respaldo, access-class/ACL de gestion, exec-timeout, privilegios, banners y ausencia de servicios inseguros innecesarios.",
-      appliesTo: ["all"]
-    },
-    {
-      id: "cfg-snmp",
-      aspect: "SNMP y telemetria basica",
-      guidance: "Evalua preferencia por SNMPv3, comunidades SNMPv2 restringidas por ACL cuando existan, traps relevantes, contact/location y ausencia de comunidades por defecto o lectura amplia.",
-      appliesTo: ["all"]
-    },
-    {
-      id: "cfg-logging",
-      aspect: "Logging y timestamps",
-      guidance: "Evalua service timestamps/logging timestamps, logging buffered razonable, syslog remoto, severidad adecuada, origen de logs, persistencia y consistencia con NTP/timezone.",
-      appliesTo: ["all"]
-    },
-    {
-      id: "cfg-ntp-time",
-      aspect: "NTP, timezone y reloj",
-      guidance: "Evalua NTP con servidores definidos, autenticacion cuando aplique, timezone/clock summer-time coherente, source-interface y ausencia de equipos sin sincronizacion horaria.",
-      appliesTo: ["all"]
-    },
-    {
-      id: "cfg-cdp-lldp",
-      aspect: "Descubrimiento CDP/LLDP",
-      guidance: "Evalua CDP/LLDP como decision explicita: deshabilitado en bordes no confiables, Internet/perimetro y puertos de usuario; permitido solo donde soporte operacion/topologia y exista justificacion.",
-      appliesTo: ["ios", "ios-xe", "nxos"]
-    },
-    {
-      id: "cfg-line-vty-management",
-      aspect: "Line VTY y administracion",
-      guidance: "Evalua line vty, SSH/Telnet, AAA, SNMP, logging, NTP, banners y controles de administracion sin duplicar hallazgos de seguridad salvo que sean desviaciones operativas de configuracion.",
-      appliesTo: ["ios", "ios-xe", "nxos"]
-    },
-    {
-      id: "cfg-interface-description-standard",
-      aspect: "Estandar de interfaces y documentacion operacional",
-      guidance: "Evalua descripciones de interfaces, shutdown intencional en puertos no usados, coherencia de speed/duplex/MTU, MTU jumbo donde aplique y consistencia de nombres/roles.",
-      appliesTo: ["all"]
-    },
-    {
-      id: "cfg-resiliency-features",
-      aspect: "Funciones de resiliencia de plataforma",
-      guidance: "Evalua NSF/SSO/NSR, graceful restart, BFD, object tracking, dual-active detection, supervisor redundancy y configuraciones HA soportadas por la plataforma cuando aparezcan en evidencia.",
-      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
-    },
-    {
-      id: "cfg-qos-control-plane",
-      aspect: "QoS y control plane",
-      guidance: "Evalua CoPP/control-plane policing, QoS de control/voz/critical apps, trust boundary, service-policy aplicado y ausencia de politicas que puedan dejar sin proteccion el CPU.",
-      appliesTo: ["ios", "ios-xe", "nxos"]
-    },
-    {
-      id: "cfg-asa-management",
-      aspect: "ASA - administracion y acceso de gestion",
-      guidance: "Evalua SSH/ASDM/HTTP management restringido por interfaz y redes autorizadas, AAA, usuarios locales de respaldo, management-access, logging, NTP y SNMP seguro.",
-      appliesTo: ["asa"]
-    },
-    {
-      id: "cfg-asa-nat-acl-objects",
-      aspect: "ASA - NAT, ACLs y objetos",
-      guidance: "Evalua orden y especificidad de NAT/ACL, objetos duplicados u obsoletos, any/any innecesario, reglas sombra, nombres descriptivos y coherencia entre object-groups y politicas.",
-      appliesTo: ["asa"]
-    },
-    {
-      id: "cfg-asa-failover",
-      aspect: "ASA - failover y alta disponibilidad",
-      guidance: "Evalua failover active/standby o clustering cuando exista, interfaces de failover/stateful, monitoreo de interfaces, version/config sync y consistencia de parametros HA.",
-      appliesTo: ["asa"]
-    },
-    {
-      id: "cfg-nxos-features",
-      aspect: "NX-OS - feature set y servicios habilitados",
-      guidance: "Evalua feature enablement necesario y minimo, NX-OS management VRF, interface-vlan/hsrp/vpc/lacp/nxapi segun uso, y servicios habilitados sin consumo evidente.",
-      appliesTo: ["nxos"]
-    },
-    {
-      id: "cfg-standard-deviation",
-      aspect: "Desviaciones de estandar",
-      guidance: "Identifica diferencias recurrentes entre equipos del mismo rol o sitio, configuraciones incompletas y parametros fuera del estandar esperado.",
-      appliesTo: ["all"]
-    }
-  ],
-  expected: [
-    {
-      id: "expected-stp-risk",
-      title: "Riesgo de capa 2 por STP o switching inconsistente",
-      description: "Configuracion STP, trunking o port-channel que puede provocar loops, raiz no deseada o degradacion de redundancia.",
-      severityHint: "medium",
-      exampleRationale: "La evidencia muestra parametros STP/trunk inconsistentes contra el rol del equipo y puede afectar convergencia o dominios de falla.",
-      appliesTo: ["ios", "ios-xe", "nxos"]
-    },
-    {
-      id: "expected-stp-default-root",
-      title: "Root STP no controlado o prioridad default",
-      description: "VLANs sin root/backup root predecible o switches de acceso/periferia con prioridad capaz de disputar el root bridge.",
-      severityHint: "medium",
-      exampleRationale: "El equipo conserva prioridad STP default o una prioridad no alineada al rol, por lo que una reconvergencia puede elegir un root no deseado.",
-      appliesTo: ["ios", "ios-xe", "nxos"]
-    },
-    {
-      id: "expected-bpdu-guard-missing",
-      title: "Puertos edge sin BPDU Guard efectivo",
-      description: "Puertos de acceso/PortFast sin BPDU Guard global o por interfaz, exponiendo el dominio L2 a switches no autorizados.",
-      severityHint: "medium",
-      exampleRationale: "La configuracion muestra PortFast/edge sin proteccion BPDU Guard equivalente, lo que puede permitir loops por conexion accidental de un switch.",
-      appliesTo: ["ios", "ios-xe", "nxos"]
-    },
-    {
-      id: "expected-bpdu-filter-risk",
-      title: "BPDU Filter usado en puertos sin excepcion clara",
-      description: "BPDU Filter oculta BPDUs y puede impedir que STP detecte una topologia peligrosa si se usa fuera de casos controlados.",
-      severityHint: "high",
-      exampleRationale: "La evidencia muestra BPDU Filter aplicado donde no hay justificacion de excepcion, reduciendo la capacidad de STP para proteger contra loops.",
-      appliesTo: ["ios", "ios-xe", "nxos"]
-    },
-    {
-      id: "expected-root-loop-guard-gap",
-      title: "Falta de Root Guard o Loop Guard en enlaces criticos",
-      description: "Enlaces hacia acceso, distribucion o topologias redundantes sin guardas STP apropiadas para prevenir root no deseado o loops por BPDUs perdidos.",
-      severityHint: "medium",
-      exampleRationale: "La configuracion no evidencia Root Guard/Loop Guard en puertos donde el rol del equipo sugiere que deberia proteger la topologia STP.",
-      appliesTo: ["ios", "ios-xe", "nxos"]
-    },
-    {
-      id: "expected-udld-gap",
-      title: "UDLD ausente en enlaces punto a punto criticos",
-      description: "Enlaces de fibra, uplinks o miembros de port-channel sin UDLD normal/aggressive donde una falla unidireccional tendria impacto.",
-      severityHint: "medium",
-      exampleRationale: "El enlace critico no muestra UDLD habilitado, por lo que una falla unidireccional podria derivar en blackholing o loop de capa 2.",
-      appliesTo: ["ios", "ios-xe", "nxos"]
-    },
-    {
-      id: "expected-trunk-hardening-gap",
-      title: "Trunk con controles VLAN incompletos",
-      description: "Trunks con native VLAN default/no etiquetada, allowed VLAN amplia, DTP activo o uso innecesario de VLAN 1.",
-      severityHint: "medium",
-      exampleRationale: "La evidencia muestra trunking permisivo o defaults de VLAN que amplian el dominio de falla y dificultan control operacional.",
-      appliesTo: ["ios", "ios-xe", "nxos"]
-    },
-    {
-      id: "expected-port-channel-inconsistency",
-      title: "Inconsistencia en port-channel o LACP",
-      description: "Miembros de port-channel con parametros incompatibles, LACP ausente donde se espera negociacion, o trunk/VLAN/STP distinto entre miembros.",
-      severityHint: "medium",
-      exampleRationale: "Los miembros del agregado no comparten parametros criticos, lo que puede causar suspension, balanceo incorrecto o degradacion de redundancia.",
-      appliesTo: ["ios", "ios-xe", "nxos"]
-    },
-    {
-      id: "expected-vpc-stack-ha-deviation",
-      title: "Desviacion en vPC/StackWise/VSS o HA de switching",
-      description: "Parametros HA de switching incompletos o inconsistentes: peer-link/keepalive, role priority, orphan ports, dual-active detection o consistencia de stack.",
-      severityHint: "high",
-      exampleRationale: "La configuracion HA del par/sistema no evidencia controles esperados para evitar split-brain, perdida de peer o aislamiento de miembros.",
-      appliesTo: ["ios", "ios-xe", "nxos"]
-    },
-    {
-      id: "expected-routing-deviation",
-      title: "Desviacion en routing o control plane",
-      description: "Protocolos, vecinos, rutas, redistribucion o timers configurados de forma incompleta o inconsistente.",
-      severityHint: "medium",
-      exampleRationale: "La configuracion de routing observada difiere del patron esperado para el rol y requiere validacion del arquitecto.",
-      appliesTo: ["all"]
-    },
-    {
-      id: "expected-route-leak-risk",
-      title: "Riesgo de route leak por redistribucion sin control",
-      description: "Redistribucion entre protocolos o rutas default sin filtros, tags, route-map o limites claros.",
-      severityHint: "high",
-      exampleRationale: "La evidencia muestra redistribucion amplia sin controles visibles, elevando el riesgo de fuga de rutas o loops de control-plane.",
-      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
-    },
-    {
-      id: "expected-routing-neighbor-protection-gap",
-      title: "Vecinos de routing sin proteccion o alcance controlado",
-      description: "Sesiones OSPF/EIGRP/BGP sin autenticacion, interfaces no pasivas o vecinos BGP sin restricciones esperadas.",
-      severityHint: "medium",
-      exampleRationale: "La configuracion permite adyacencias o sesiones de routing sin controles que limiten origen, autenticacion o alcance operacional.",
-      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
-    },
-    {
-      id: "expected-fhrp-tracking-gap",
-      title: "Gateway redundante sin tracking efectivo",
-      description: "HSRP/VRRP/GLBP sin tracking de uplinks/rutas criticas, prioridades inconsistentes o preempt no alineado al diseno.",
-      severityHint: "medium",
-      exampleRationale: "La configuracion FHRP no evidencia tracking de condiciones de salida, por lo que el gateway activo puede mantenerse aun sin conectividad util.",
-      appliesTo: ["ios", "ios-xe", "nxos"]
-    },
-    {
-      id: "expected-management-deviation",
-      title: "Desviacion de administracion y gestion",
-      description: "Configuracion de line vty, AAA, SNMP, logging o NTP que reduce mantenibilidad o control operativo.",
-      severityHint: "medium",
-      exampleRationale: "La evidencia de running-config muestra parametros de administracion que no siguen el estandar operativo esperado.",
-      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
-    },
-    {
-      id: "expected-legacy-management-service",
-      title: "Servicio de administracion inseguro o no restringido",
-      description: "Telnet, HTTP plano, SNMP comunitario amplio, line vty sin ACL o gestion permitida desde redes no acotadas.",
-      severityHint: "high",
-      exampleRationale: "La configuracion expone administracion sin controles suficientes de protocolo, origen o autenticacion centralizada.",
-      appliesTo: ["all"]
-    },
-    {
-      id: "expected-cdp-lldp-exposure",
-      title: "CDP/LLDP expuesto fuera de enlaces confiables",
-      description: "CDP o LLDP habilitado en interfaces de usuario, perimetro, Internet, DMZ o enlaces donde revela informacion innecesaria.",
-      severityHint: "medium",
-      exampleRationale: "El protocolo de descubrimiento esta habilitado en una interfaz que no parece requerirlo para operacion y puede revelar plataforma, version o vecinos.",
-      appliesTo: ["ios", "ios-xe", "nxos"]
-    },
-    {
-      id: "expected-logging-ntp-gap",
-      title: "Logging o sincronizacion horaria incompleta",
-      description: "Logs sin timestamps, sin syslog remoto, severidad insuficiente, NTP ausente o timezone inconsistente.",
-      severityHint: "medium",
-      exampleRationale: "La evidencia no muestra configuracion suficiente para correlacionar eventos de forma confiable durante troubleshooting o investigacion.",
-      appliesTo: ["all"]
-    },
-    {
-      id: "expected-snmp-weakness",
-      title: "SNMP debil o sin restriccion adecuada",
-      description: "Uso de SNMPv2/community sin ACL, comunidades genericas, ausencia de SNMPv3 o traps relevantes.",
-      severityHint: "medium",
-      exampleRationale: "La configuracion SNMP observada depende de comunidades o carece de restricciones visibles de origen, aumentando riesgo de exposicion o baja trazabilidad.",
-      appliesTo: ["all"]
-    },
-    {
-      id: "expected-unused-interface-risk",
-      title: "Interfaces no usadas sin control operacional",
-      description: "Interfaces sin descripcion, no administrativamente apagadas o con parametros default que pueden habilitar conexiones no controladas.",
-      severityHint: "low",
-      exampleRationale: "La configuracion no evidencia shutdown/descripcion/estandar en puertos no usados o ambiguos, reduciendo control operacional.",
-      appliesTo: ["all"]
-    },
-    {
-      id: "expected-control-plane-policy-gap",
-      title: "Control plane sin politica de proteccion visible",
-      description: "Ausencia de CoPP/control-plane policing, service-policy o controles equivalentes para proteger CPU ante trafico de control inesperado.",
-      severityHint: "medium",
-      exampleRationale: "La configuracion no muestra proteccion del control plane en una plataforma donde el rol o exposicion la haria recomendable.",
-      appliesTo: ["ios", "ios-xe", "nxos"]
-    },
-    {
-      id: "expected-asa-management-exposure",
-      title: "ASA con gestion no suficientemente restringida",
-      description: "SSH/ASDM/HTTP/SNMP/logging/NTP en ASA configurados sin origen acotado, autenticacion robusta o parametros operativos esperados.",
-      severityHint: "high",
-      exampleRationale: "La configuracion ASA permite o sugiere gestion desde origenes amplios o sin controles operativos suficientes.",
-      appliesTo: ["asa"]
-    },
-    {
-      id: "expected-asa-policy-hygiene",
-      title: "ASA con higiene deficiente de NAT/ACL/objetos",
-      description: "Objetos duplicados, reglas any/any, NAT/ACL sombra, object-groups obsoletos o politica dificil de auditar.",
-      severityHint: "medium",
-      exampleRationale: "La evidencia muestra reglas u objetos que reducen claridad, pueden ocultar permisos excesivos o dificultan operacion segura del firewall.",
-      appliesTo: ["asa"]
-    },
-    {
-      id: "expected-asa-failover-gap",
-      title: "ASA sin failover consistente o monitoreo HA incompleto",
-      description: "Configuracion failover incompleta, interfaces no monitoreadas, stateful failover ausente donde se espera o diferencias entre pares.",
-      severityHint: "high",
-      exampleRationale: "La evidencia de HA/failover no muestra controles suficientes para continuidad o sincronizacion confiable entre firewalls.",
-      appliesTo: ["asa"]
-    },
-    {
-      id: "expected-nxos-feature-drift",
-      title: "NX-OS con features habilitados sin uso evidente",
-      description: "Features NX-OS habilitados sin configuracion asociada, servicios de administracion innecesarios o VRF de gestion inconsistente.",
-      severityHint: "low",
-      exampleRationale: "El equipo Nexus tiene features/servicios activos que no parecen estar respaldados por configuracion o necesidad operacional en la evidencia.",
-      appliesTo: ["nxos"]
-    },
-    {
-      id: "expected-cross-device-standard",
-      title: "Inconsistencia entre equipos comparables",
-      description: "Diferencias relevantes entre equipos del mismo rol, sitio o grupo de consistencia.",
-      severityHint: "low",
-      exampleRationale: "Equipos comparables presentan parametros distintos sin evidencia de excepcion documentada.",
-      appliesTo: ["all"]
-    }
-  ],
+  criteria: configurationBestPracticeCriteria,
+  expected: configurationExpectedFindings,
   exclusions: []
 };
 
@@ -961,6 +1209,492 @@ export const defaultEvidenceScopePlaybook: ScopePlaybook = {
   exclusions: []
 };
 
+export const defaultPerformanceScopePlaybook: ScopePlaybook = {
+  scopeId: "performance",
+  criteria: [
+    {
+      id: "perf-resource-exhaustion-root-cause",
+      aspect: "Resource exhaustion (cpu/memory)",
+      guidance: "Evalua CPU y memoria distinguiendo umbral sostenido contra pico aislado. Para causa raiz exige top procesos, duracion/ventana, sampleType historico cuando exista, separacion control-plane vs data-plane y correlacion con logs/eventos de proceso, watchdog, reload o cambios recientes.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "perf-interface-errors-physical-root-cause",
+      aspect: "Errores de interfaz (crc/input/output/frame)",
+      guidance: "Evalua input_errors, output_errors, crc_errors, frame_errors, overruns e ignored como posible falla fisica. Para causa raiz exige interfaz afectada, vecino CDP/LLDP, rol del enlace (uplink/acceso/port-channel), tendencia historica, transceiver/cableado/duplex/fibra y correlacion con flaps o eventos fisicos.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "perf-drops-congestion-qos-root-cause",
+      aspect: "Drops (queue/qos/input/output)",
+      guidance: "Evalua drops, input_drops, output_drops y queue_drops separando congestion real de misconfiguracion QoS. Para causa raiz exige utilizacion del uplink, sobre-suscripcion, politica QoS aplicada, cola afectada, direccion del trafico y ventana temporal.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "perf-saturation-capacity-root-cause",
+      aspect: "Saturation (utilization/rate)",
+      guidance: "Evalua utilization, utilization_in/out e input/output_rate_bps contra capacidad del enlace. Para causa raiz exige patron de trafico, ventana y recurrencia, rol del enlace critico, vecino, demanda esperada, evidencia de sobreutilizacion y decision entre upgrade, redistribucion o traffic engineering.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "perf-instability-physical-protocol-root-cause",
+      aspect: "Instability (flaps/routing_neighbor_stability)",
+      guidance: "Evalua flaps e inestabilidad de routing_neighbor_stability como falla fisica o de protocolo. Para causa raiz exige recurrencia, vecino/interfaz, protocolo afectado, correlacion con errores fisicos, eventos de link line-protocol y cambios de control-plane.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "perf-qos-marking-policy-root-cause",
+      aspect: "QoS",
+      guidance: "Evalua qos_drops y drops por clase verificando marcado, politica aplicada, colas, shaping/policing y enlace de salida. Para causa raiz exige drops observados por clase, mapa de politica, direccion, umbrales y correlacion con saturacion o aplicaciones criticas.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    }
+  ],
+  expected: [
+    {
+      id: "expected-perf-sustained-cpu-memory-exhaustion",
+      title: "CPU o memoria en agotamiento sostenido",
+      description: "CPU o memoria supera umbrales de forma sostenida o recurrente, con indicios de proceso, control-plane/data-plane o evento correlacionado.",
+      severityHint: "high",
+      exampleRationale: "La metrica de CPU/memoria excede el umbral y requiere validar top procesos, duracion de la ventana y eventos correlacionados antes de concluir dimensionamiento o falla de software.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "expected-perf-recurrent-physical-uplink-errors",
+      title: "Errores fisicos recurrentes en uplink",
+      description: "CRC, input/output/frame errors u overruns aparecen en enlace critico o uplink y sugieren transceiver, fibra, cableado, duplex o peer fisico defectuoso.",
+      severityHint: "high",
+      exampleRationale: "La interfaz afectada acumula errores fisicos y debe correlacionarse con vecino CDP/LLDP, rol de enlace y tendencia para confirmar causa raiz fisica.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "expected-perf-congestion-drops-oversubscribed-link",
+      title: "Drops por congestion en enlace sobre-suscrito",
+      description: "Drops de entrada/salida/cola coinciden con alta utilizacion o sobre-suscripcion y pueden impactar aplicaciones sensibles.",
+      severityHint: "medium",
+      exampleRationale: "Los drops observados requieren validar utilizacion del uplink, politica QoS, direccion del trafico y ventana temporal para separar congestion de configuracion QoS.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-perf-critical-link-saturation",
+      title: "Saturacion de enlace critico",
+      description: "Utilizacion o tasa de trafico excede umbral en enlace critico, con patron recurrente que puede requerir upgrade, redistribucion o traffic engineering.",
+      severityHint: "high",
+      exampleRationale: "La metrica de utilizacion supera capacidad esperada y debe evaluarse con patron de trafico, ventana historica, vecino y criticidad del enlace.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-perf-interface-flapping",
+      title: "Interfaz flapeando o vecino inestable",
+      description: "Flaps de interfaz o routing_neighbor_stability muestran recurrencia en una interfaz, vecino o protocolo.",
+      severityHint: "high",
+      exampleRationale: "La inestabilidad observada debe correlacionarse con errores fisicos, eventos de line protocol y vecino para distinguir falla fisica de protocolo.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "expected-perf-qos-drops-critical-class",
+      title: "Drops de QoS en clase critica",
+      description: "qos_drops o drops por cola afectan clase critica y requieren validar marcado, politica, shaping/policing y saturacion del enlace.",
+      severityHint: "medium",
+      exampleRationale: "Los drops de QoS pueden ser resultado de politica esperada o de mala clasificacion; se requiere evidencia de clase, politica aplicada y utilizacion.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    }
+  ],
+  exclusions: [
+    {
+      id: "perf-exclude-transient-snapshot-spike",
+      keywords: ["pico transitorio", "snapshot", "instantaneo", "isolated spike", "single sample", "pico aislado"],
+      severityBelow: "high",
+      reason: "Un pico transitorio de snapshot sin historico, recurrencia ni evento correlacionado no debe elevarse como problema confirmado de performance.",
+      source: "manual",
+      appliesTo: ["all"]
+    },
+    {
+      id: "perf-exclude-lab-test-interfaces",
+      keywords: ["lab", "laboratorio", "test", "prueba", "sandbox", "dev"],
+      severityBelow: "medium",
+      reason: "Interfaces de laboratorio o prueba pueden presentar errores/drops aceptables si no sostienen trafico productivo.",
+      source: "manual",
+      appliesTo: ["all"]
+    }
+  ]
+};
+
+export const defaultTopologyScopePlaybook: ScopePlaybook = {
+  scopeId: "topology",
+  criteria: [
+    {
+      id: "topo-stp-root-placement",
+      aspect: "STP root bridge ubicado segun diseno",
+      guidance: "Evalua que el root bridge primario y secundario de cada dominio STP residan en core/distribucion o en el par previsto, no en switches de acceso, bordes o equipos de baja resiliencia.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "topo-stp-root-priority",
+      aspect: "Prioridad STP consistente con jerarquia",
+      guidance: "Revisa prioridades, root ID, bridge ID y VLANs/MST instances para detectar raices accidentales, backups ausentes o prioridades iguales que puedan mover la raiz ante cambios menores.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "topo-stp-forwarding-blocking",
+      aspect: "Estado forwarding/blocking coherente",
+      guidance: "Contrasta enlaces esperados con puertos forwarding, alternate/blocking, designated/root y costos para detectar caminos L2 suboptimos, loops latentes o enlaces redundantes que nunca protegen el segmento.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "topo-stp-mode-homogeneous",
+      aspect: "Modo STP homogeneo",
+      guidance: "Identifica mezcla no justificada de PVST, Rapid-PVST, MST o STP legacy entre dominios conectados; reporta riesgos de convergencia, frontera o mapeo MST inconsistente.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "topo-stp-tcn-sources",
+      aspect: "Fuentes de TCN y cambios STP",
+      guidance: "Evalua topology changes, TCN, link flaps y cambios de root para ubicar segmentos que generan reconvergencia L2 recurrente o evidencian endpoints/switches inestables.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "topo-stp-edge-protections",
+      aspect: "Root Guard, Loop Guard y BPDU Guard en bordes",
+      guidance: "Valida que enlaces descendentes o edge tengan BPDU Guard/Root Guard/Loop Guard segun rol; no reportes ausencia si la evidencia no permite distinguir edge, trunk o enlace switch-switch.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "topo-routing-ospf-eigrp-structure",
+      aspect: "Estructura OSPF/EIGRP por areas y dominios",
+      guidance: "Evalua si OSPF/EIGRP sigue una estructura jerarquica razonable por sitio, core, distribucion o WAN; detecta area unica extendida, areas mal ubicadas o dominios sin limites claros.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "topo-routing-abr-redistribution",
+      aspect: "ABR, ASBR y redistribucion controlada",
+      guidance: "Revisa ABR/ASBR, puntos de redistribucion, rutas externas y limites entre dominios para detectar dependencia de un solo nodo, redistribucion asimetrica o rutas externas sin control.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "topo-routing-summarization",
+      aspect: "Sumarizacion y contencion de rutas",
+      guidance: "Evalua si existen summarization, filtros o limites que eviten flooding innecesario de LSAs/rutas; reporta sprawl de rutas cuando la evidencia muestre escala o dependencia transversal.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "topo-routing-adjacency-coverage",
+      aspect: "Cobertura y estabilidad de adyacencias",
+      guidance: "Contrasta vecinos esperados contra adyacencias OSPF/EIGRP observadas, estados, flaps y rutas aprendidas para detectar enlaces sin vecindad, vecinos inestables o cobertura incompleta.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "topo-routing-suboptimal-paths",
+      aspect: "Caminos suboptimos o asimetricos",
+      guidance: "Evalua metricas, next-hops, rutas por default y preferencia de paths para detectar trafico que cruza enlaces WAN, firewall o datacenter de forma suboptima o asimetrica.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "topo-ha-core-redundancy",
+      aspect: "Redundancia de core/distribucion segun criticidad",
+      guidance: "Evalua si sitios o segmentos criticos dependen de un solo core/distribucion, un solo uplink o un solo dispositivo de transito; considera aceptable una sucursal baja criticidad con uplink unico si el alcance lo justifica.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "topo-ha-first-hop",
+      aspect: "HSRP/VRRP/GLBP alineado a criticidad",
+      guidance: "Valida existencia y simetria de gateway redundante donde el segmento sea critico; reporta gateways unicos, standby ausente, prioridades incoherentes o tracking insuficiente.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "topo-ha-node-components",
+      aspect: "Fuente, supervisor y chasis unico en nodos criticos",
+      guidance: "Evalua si nodos core, distribucion, firewall o datacenter tienen PSU/supervisora/chasis unico cuando la evidencia de inventario o estado lo permita; trata faltantes como gap si no hay datos.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "topo-ha-portchannel-resilience",
+      aspect: "Resiliencia de port-channel y multi-chassis",
+      guidance: "Revisa port-channel, LACP, EtherChannel, vPC, MLAG o MEC para detectar miembros unicos, hashing asimetrico, enlaces al mismo chasis o peer incompleto.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "topo-ha-single-homed-critical-segments",
+      aspect: "Segmentos criticos single-homed",
+      guidance: "Identifica VLANs, redes de servidores, WAN, DMZ o segmentos de usuario criticos conectados a un solo switch/router/firewall sin camino alterno evidente.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "topo-wan-uplink-dependency",
+      aspect: "WAN con circuito o borde unico",
+      guidance: "Evalua dependencias de circuito, router CE/PE, default route, VPN o firewall para detectar sucursales o sitios que quedan sin servicio ante una falla simple del borde WAN.",
+      appliesTo: ["ios", "ios-xe", "asa"]
+    },
+    {
+      id: "topo-datacenter-fabric-resilience",
+      aspect: "Datacenter vPC/EVPN/VXLAN y peer-link/keepalive",
+      guidance: "En Nexus/datacenter, evalua vPC peer-link, peer-keepalive, orphan ports, EVPN/VXLAN VTEP, anycast gateway y dependencias de spine/leaf cuando aparezcan en evidencia.",
+      appliesTo: ["nxos"]
+    },
+    {
+      id: "topo-campus-access-distribution",
+      aspect: "Campus con acceso/distribucion redundante",
+      guidance: "Evalua dual-homing de acceso a distribucion, uplinks por closet, stacks, port-channels y gateways por VLAN para detectar redundancia parcial o asimetrica.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "topo-perimeter-firewall-ha",
+      aspect: "Perimetro con HA/failover de firewall",
+      guidance: "Evalua pares active/standby o active/active, failover links, interfaces monitoreadas y dependencia de firewall unico hacia Internet, DMZ o sucursales.",
+      appliesTo: ["asa"]
+    }
+  ],
+  expected: [
+    {
+      id: "expected-topo-spof-uplink",
+      title: "SPOF por uplink o circuito unico",
+      description: "Sitio, segmento o equipo critico depende de un solo uplink, circuito, router de borde o path de salida sin alternativa visible.",
+      severityHint: "high",
+      exampleRationale: "La evidencia topologica muestra un unico enlace de salida para un segmento critico, por lo que una falla simple aislaria el servicio.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-topo-spof-psu-supervisor",
+      title: "SPOF por PSU, supervisora o chasis unico",
+      description: "Nodo critico opera sin redundancia fisica suficiente de fuente, supervisora, chasis o par equivalente.",
+      severityHint: "high",
+      exampleRationale: "El equipo cumple una funcion de transito critica y la evidencia no muestra redundancia de componente o nodo alterno.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-topo-firewall-single-point",
+      title: "Firewall perimetral o de sucursal como punto unico",
+      description: "Perimetro, DMZ o conectividad de sucursal depende de un firewall unico o par HA incompleto.",
+      severityHint: "critical",
+      exampleRationale: "El camino hacia el segmento protegido cruza un solo firewall sin failover comprobado, exponiendo una interrupcion total ante falla del equipo.",
+      appliesTo: ["asa"]
+    },
+    {
+      id: "expected-topo-stp-root-misplaced",
+      title: "Root bridge STP mal ubicado",
+      description: "La raiz STP aparece en acceso, borde, sucursal o equipo que no corresponde al diseno jerarquico.",
+      severityHint: "medium",
+      exampleRationale: "El root bridge observado no coincide con core/distribucion esperado y puede inducir caminos L2 suboptimos o reconvergencias no deseadas.",
+      appliesTo: ["ios", "ios-xe", "nxos"]
+    },
+    {
+      id: "expected-topo-routing-instability",
+      title: "Inestabilidad o cobertura incompleta de routing",
+      description: "OSPF/EIGRP muestra vecinos faltantes, flaps, estados no full, redistribucion fragil o cobertura parcial de adyacencias.",
+      severityHint: "high",
+      exampleRationale: "Las adyacencias observadas no cubren todos los enlaces esperados y sugieren perdida de resiliencia o convergencia inestable.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "expected-topo-routing-suboptimal-path",
+      title: "Camino de routing suboptimo o asimetrico",
+      description: "Metricas, rutas por default o redistribucion llevan trafico por un path de mayor riesgo, costo o latencia frente a alternativas disponibles.",
+      severityHint: "medium",
+      exampleRationale: "El next-hop preferido no sigue la jerarquia esperada y puede cruzar WAN/firewall/datacenter de forma innecesaria.",
+      appliesTo: ["ios", "ios-xe", "nxos", "asa"]
+    },
+    {
+      id: "expected-topo-ha-absent",
+      title: "Ausencia de alta disponibilidad en segmento critico",
+      description: "No hay HSRP/VRRP/GLBP, vPC/MLAG, par redundante o camino alterno para un segmento cuya criticidad exige continuidad.",
+      severityHint: "high",
+      exampleRationale: "El segmento tiene un unico gateway o camino activo y no se observa mecanismo de failover acorde al impacto del servicio.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-topo-asymmetric-redundancy",
+      title: "Redundancia asimetrica o incompleta",
+      description: "Existe redundancia parcial, pero los enlaces terminan en el mismo nodo, faltan miembros de port-channel, el standby no cubre todas las VLANs o los caminos no son equivalentes.",
+      severityHint: "medium",
+      exampleRationale: "Aunque hay mas de un enlace o equipo, la topologia no elimina la falla simple porque la redundancia converge en el mismo punto.",
+      appliesTo: ["all"]
+    }
+  ],
+  exclusions: [
+    {
+      id: "topo-exclude-lab-test-segments",
+      keywords: ["lab", "laboratorio", "test", "prueba", "sandbox", "dev"],
+      severityBelow: "high",
+      reason: "Segmentos de laboratorio o prueba pueden operar con redundancia reducida si no sostienen servicios productivos.",
+      source: "manual",
+      appliesTo: ["all"]
+    },
+    {
+      id: "topo-exclude-low-criticality-intentional-single-homed",
+      keywords: ["single-homed intencional", "baja criticidad", "best effort", "no critico", "no crítico"],
+      severityBelow: "medium",
+      reason: "Conectividad single-homed de baja criticidad puede aceptarse cuando el diseno lo declara explicitamente.",
+      source: "manual",
+      appliesTo: ["all"]
+    }
+  ]
+};
+
+export const defaultOperationsScopePlaybook: ScopePlaybook = {
+  scopeId: "operations",
+  criteria: [
+    {
+      id: "ops-governance-operational-ownership",
+      aspect: "Gobierno operativo",
+      guidance: "Debe existir responsable formal de la operacion de red, roles documentados, prioridades de servicios criticos, SLAs/OLAs y revision periodica de riesgos operativos.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "ops-inventory-documentation-current",
+      aspect: "Inventario y documentacion",
+      guidance: "Mantener inventario actualizado de equipos, enlaces, sitios, direcciones, responsables, diagramas y documentacion de configuracion o dependencias clave.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "ops-monitoring-observability-coverage",
+      aspect: "Monitoreo y observabilidad",
+      guidance: "Asegurar monitoreo con cobertura de disponibilidad, interfaces criticas, capacidad, errores, eventos, syslog/SNMP/telemetria, alertas accionables y umbrales revisados.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "ops-incidents-troubleshooting-process",
+      aspect: "Incidentes y troubleshooting",
+      guidance: "Tener proceso documentado de incidentes con severidades, escalamiento, runbooks, postmortems y trazabilidad de causa raiz para problemas recurrentes.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "ops-change-management-formal",
+      aspect: "Gestion de cambios",
+      guidance: "Gestionar cambios con aprobacion, ventana, plan de pruebas, plan de reversa, comunicacion, registro de cambios y validacion posterior.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "ops-backup-config-verification",
+      aspect: "Backups y control de configuracion",
+      guidance: "Respaldar configuraciones automaticamente, versionarlas, verificar restauracion, detectar drift y conservar historico suficiente para auditoria y recuperacion.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "ops-lifecycle-support-management",
+      aspect: "Vulnerabilidades, lifecycle y soporte",
+      guidance: "Gestionar versiones, EoX/EoS, vulnerabilidades, contratos de soporte, ventanas de upgrade y riesgos de plataformas sin cobertura o software obsoleto.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "ops-capacity-performance-planning",
+      aspect: "Capacidad y performance",
+      guidance: "Revisar tendencia de capacidad, utilizacion, CPU/memoria, errores, drops, crecimiento de demanda y planes de expansion antes de degradacion de servicio.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "ops-continuity-dr-tested",
+      aspect: "Continuidad, resiliencia y DR",
+      guidance: "Definir y probar continuidad operativa, DR, recuperacion de configuraciones, contactos, procedimientos de contingencia y dependencias criticas ante fallas mayores.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "ops-automation-improvement-loop",
+      aspect: "Herramientas, automatizacion y mejora continua",
+      guidance: "Usar herramientas, repositorios, automatizacion, validaciones pre/post cambio, KPIs operativos y ciclos de mejora continua proporcionales al tamano del entorno.",
+      appliesTo: ["all"]
+    }
+  ],
+  expected: [
+    {
+      id: "expected-ops-governance-low-maturity",
+      title: "Gobierno operativo insuficiente",
+      description: "Roles, responsables, SLAs/OLAs, criticidad de servicios o revision de riesgos no estan definidos o no son consistentes.",
+      severityHint: "medium",
+      exampleRationale: "Las entrevistas muestran responsabilidad operacional poco formalizada, lo que dificulta priorizacion, escalamiento y toma de decisiones durante incidentes o cambios.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-ops-inventory-documentation-gap",
+      title: "Inventario o documentacion desactualizada",
+      description: "Inventario, diagramas, dependencias, direcciones, enlaces o responsables no estan actualizados o no cubren el alcance operativo.",
+      severityHint: "medium",
+      exampleRationale: "La falta de documentacion confiable incrementa tiempos de diagnostico y riesgo de cambios sobre dependencias no identificadas.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-ops-monitoring-insufficient-coverage",
+      title: "Monitoreo insuficiente o sin cobertura",
+      description: "No existe monitoreo suficiente de disponibilidad, interfaces criticas, capacidad, logs, eventos o alertas accionables.",
+      severityHint: "high",
+      exampleRationale: "La baja cobertura de monitoreo impide detectar degradacion temprana y desplaza la reaccion a reportes de usuario o fallas ya materializadas.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-ops-incident-management-low-maturity",
+      title: "Baja madurez de gestion de incidentes",
+      description: "El proceso de incidentes carece de severidades, escalamiento, runbooks, postmortem o gestion de problemas recurrentes.",
+      severityHint: "medium",
+      exampleRationale: "La operacion depende de conocimiento tacito y no captura causa raiz, elevando recurrencia y tiempo medio de recuperacion.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-ops-change-management-missing",
+      title: "Sin gestion de cambios formal",
+      description: "Cambios de red se ejecutan sin aprobacion, pruebas, ventana, rollback, comunicacion o validacion posterior consistente.",
+      severityHint: "high",
+      exampleRationale: "La ausencia de control formal de cambios eleva el riesgo de interrupciones no planificadas y dificulta atribuir o revertir impactos.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-ops-config-backups-unverified",
+      title: "Backups de configuracion no verificados",
+      description: "Los respaldos de configuracion son manuales, incompletos, sin versionamiento o sin prueba de restauracion.",
+      severityHint: "high",
+      exampleRationale: "Sin backups confiables y verificados, una falla o cambio fallido puede extender la recuperacion y aumentar perdida operacional.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-ops-lifecycle-support-gap",
+      title: "Gestion de lifecycle o soporte incompleta",
+      description: "No hay control suficiente de EoX/EoS, vulnerabilidades, contratos, versionamiento o plan de upgrades.",
+      severityHint: "medium",
+      exampleRationale: "La operacion puede quedar expuesta a plataformas sin soporte, vulnerabilidades conocidas o upgrades reactivos sin planificacion.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-ops-capacity-performance-reactive",
+      title: "Gestion de capacidad y performance reactiva",
+      description: "No se revisan tendencias, umbrales, errores, drops, CPU/memoria o demanda futura de forma periodica.",
+      severityHint: "medium",
+      exampleRationale: "La falta de capacidad predictiva aumenta la probabilidad de degradacion no anticipada y decisiones de expansion tardias.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-ops-continuity-dr-untested",
+      title: "Sin plan de continuidad/DR probado",
+      description: "Continuidad, DR, recuperacion, contactos, procedimientos y dependencias criticas no estan documentados o no han sido probados.",
+      severityHint: "high",
+      exampleRationale: "Un plan no probado reduce confianza de recuperacion ante falla mayor y puede prolongar indisponibilidad de servicios criticos.",
+      appliesTo: ["all"]
+    },
+    {
+      id: "expected-ops-automation-improvement-gap",
+      title: "Automatizacion y mejora continua insuficientes",
+      description: "No existen herramientas, versionamiento, automatizacion, validaciones o KPIs para reducir errores repetitivos y mejorar la operacion.",
+      severityHint: "low",
+      exampleRationale: "La operacion depende de tareas manuales y no mide mejoras, lo que incrementa variabilidad y retrabajo en entornos de crecimiento.",
+      appliesTo: ["all"]
+    }
+  ],
+  exclusions: [
+    {
+      id: "ops-exclude-automation-small-environment",
+      keywords: ["automatizacion", "automation", "entorno pequeno", "entorno pequeño", "small environment"],
+      severityBelow: "medium",
+      reason: "La automatizacion avanzada puede no ser prioritaria en entornos pequenos si existe control manual documentado y bajo volumen de cambios.",
+      source: "manual",
+      appliesTo: ["all"]
+    },
+    {
+      id: "ops-exclude-dr-noncritical-lab",
+      keywords: ["dr", "continuidad", "laboratorio", "lab", "no critico", "no crítico"],
+      severityBelow: "medium",
+      reason: "Dominios de laboratorio o no criticos pueden tener objetivos de continuidad reducidos si el negocio acepta el riesgo.",
+      source: "manual",
+      appliesTo: ["all"]
+    }
+  ]
+};
+
 const severityOrder: Record<string, number> = {
   informational: 0,
   info: 0,
@@ -1031,6 +1765,27 @@ export function resolveDevicePlaybook(playbook: ScopePlaybook, osFamily: OsFamil
     expected: normalized.expected.filter((item) => playbookItemAppliesTo(item.appliesTo, osFamily)),
     exclusions: normalized.exclusions.filter((item) => playbookItemAppliesTo(item.appliesTo, osFamily))
   };
+}
+
+export function applicableCriteriaForOs(playbook: ScopePlaybook, osFamily: OsFamily): Criterion[] {
+  return normalizeScopePlaybook(playbook).criteria.filter((criterion) => playbookItemAppliesTo(criterion.appliesTo, osFamily));
+}
+
+export function buildCoveragePlan(playbook: ScopePlaybook, deviceContexts: CoveragePlanDeviceContext[]): CoveragePlanEntry[] {
+  return deviceContexts
+    .map((deviceContext) => {
+      const osFamily = normalizeOsFamily(deviceContext.identity.osFamily);
+      const criteria = applicableCriteriaForOs(playbook, osFamily).map((criterion) => ({
+        id: criterion.id,
+        aspect: criterion.aspect
+      }));
+      return {
+        deviceHostname: deviceContext.identity.hostname,
+        osFamily,
+        criteria
+      };
+    })
+    .sort((left, right) => left.deviceHostname.localeCompare(right.deviceHostname));
 }
 
 export function resolvePlaybookForOsFamilies(playbook: ScopePlaybook, osFamilies: Iterable<OsFamily>): ScopePlaybook {

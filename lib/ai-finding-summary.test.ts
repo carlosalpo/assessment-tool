@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { filterFindingsByArea, summarizeAreaFindings } from "./ai-finding-summary.ts";
+import { filterFindingsByArea, findingAmbito, summarizeAreaFindings } from "./ai-finding-summary.ts";
 import type { Finding } from "./types.ts";
 
 test("summarizeAreaFindings returns zero counts for empty input", () => {
@@ -46,17 +46,46 @@ test("summarizeAreaFindings counts severity, finding type and pending validation
   assert.equal(summary.pendingValidation, 3);
 });
 
-test("filterFindingsByArea filters by mapped assessment area category", () => {
+test("findingAmbito prefers explicit scope over coarse category", () => {
+  assert.equal(findingAmbito(finding({ id: "performance", scope: "performance", category: "operations" })), "performance");
+  assert.equal(findingAmbito(finding({ id: "routing", scope: "routing", category: "operations" })), "topology");
+  assert.equal(findingAmbito(finding({ id: "inventory", scope: "inventory", category: "operations" })), "lifecycle");
+  assert.equal(findingAmbito(finding({ id: "evidence", scope: "evidence", category: "operations" })), "logs");
+  assert.equal(findingAmbito(finding({ id: "reduce", scope: "cross_scope_correlation", category: "operations" })), "operations");
+});
+
+test("findingAmbito falls back to category when scope is missing", () => {
+  assert.equal(findingAmbito(finding({ id: "performance-service", category: "operations", serviceOffer: "Performance Analysis" })), "performance");
+  assert.equal(findingAmbito(finding({ id: "performance-domain", category: "operations", aiMetadata: { domain: "performance" } })), "performance");
+  assert.equal(findingAmbito(finding({ id: "topology", category: "resiliency" })), "topology");
+  assert.equal(findingAmbito(finding({ id: "security", category: "security" })), "security");
+  assert.equal(findingAmbito(finding({ id: "configuration", category: "configuration" })), "configuration");
+  assert.equal(findingAmbito(finding({ id: "lifecycle", category: "lifecycle" })), "lifecycle");
+  assert.equal(findingAmbito(finding({ id: "inventory", category: "inventory" })), "lifecycle");
+  assert.equal(findingAmbito(finding({ id: "operations", category: "operations" })), "operations");
+});
+
+test("filterFindingsByArea filters by canonical ambito", () => {
   const findings = [
-    finding({ id: "topology", category: "resiliency" }),
-    finding({ id: "security", category: "security" }),
-    finding({ id: "operations", category: "operations" }),
-    finding({ id: "configuration", category: "configuration" })
+    finding({ id: "configuration", scope: "configuration", category: "operations" }),
+    finding({ id: "security", scope: "security", category: "operations" }),
+    finding({ id: "logs", scope: "evidence", category: "operations" }),
+    finding({ id: "lifecycle", scope: "lifecycle", category: "operations" }),
+    finding({ id: "inventory", scope: "inventory", category: "operations" }),
+    finding({ id: "topology", scope: "routing", category: "operations" }),
+    finding({ id: "operations", scope: "operations", category: "operations" }),
+    finding({ id: "performance", scope: "performance", category: "operations" }),
+    finding({ id: "legacy-performance", category: "operations", serviceOffer: "Performance Analysis" }),
+    finding({ id: "legacy-topology", category: "resiliency" })
   ];
 
-  assert.deepEqual(filterFindingsByArea(findings, "topology").map((item) => item.id), ["topology"]);
-  assert.deepEqual(filterFindingsByArea(findings, "logs").map((item) => item.id), ["operations"]);
-  assert.deepEqual(filterFindingsByArea(findings, "lifecycle").map((item) => item.id), []);
+  assert.deepEqual(filterFindingsByArea(findings, "configuration").map((item) => item.id), ["configuration"]);
+  assert.deepEqual(filterFindingsByArea(findings, "security").map((item) => item.id), ["security"]);
+  assert.deepEqual(filterFindingsByArea(findings, "logs").map((item) => item.id), ["logs"]);
+  assert.deepEqual(filterFindingsByArea(findings, "lifecycle").map((item) => item.id), ["lifecycle", "inventory"]);
+  assert.deepEqual(filterFindingsByArea(findings, "topology").map((item) => item.id), ["topology", "legacy-topology"]);
+  assert.deepEqual(filterFindingsByArea(findings, "operations").map((item) => item.id), ["operations"]);
+  assert.deepEqual(filterFindingsByArea(findings, "performance").map((item) => item.id), ["performance", "legacy-performance"]);
   assert.deepEqual(filterFindingsByArea(findings, null).map((item) => item.id), findings.map((item) => item.id));
 });
 

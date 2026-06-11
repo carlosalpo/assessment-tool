@@ -200,7 +200,12 @@ function devicesForScope(context: AssessmentAIContext, scopeId: AIScopeId) {
       .filter((fact) => fact.category === "security" || fact.category === "management")
       .forEach((fact) => add(fact.deviceId));
   }
-  if (scopeId === "configuration") context.configurationFacts.forEach((fact) => add(fact.deviceId));
+  if (scopeId === "configuration") {
+    context.configurationFacts.forEach((fact) => add(fact.deviceId));
+    context.operationalStateFacts
+      .filter((fact) => ["interface", "routing", "switching"].includes(fact.category))
+      .forEach((fact) => add(fact.deviceId));
+  }
 
   const candidates = relevant.size > 0
     ? context.devices.filter((device) => relevant.has(normalize(device.hostname)))

@@ -1,0 +1,327 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="2440" viewBox="0 0 1800 2440" role="img" aria-labelledby="title desc">
+  <title id="title">Flujo del proceso de Analisis AI</title>
+  <desc id="desc">Diagrama del flujo de datos, procesamiento deterministico, jobs por ambito, validacion y generacion de hallazgos del modulo de Analisis AI.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#071014"/>
+      <stop offset="52%" stop-color="#0d1720"/>
+      <stop offset="100%" stop-color="#10131d"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#30d5c8"/>
+      <stop offset="100%" stop-color="#7aa2ff"/>
+    </linearGradient>
+    <linearGradient id="warn" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#f7b955"/>
+      <stop offset="100%" stop-color="#ff7a90"/>
+    </linearGradient>
+    <filter id="shadow" x="-8%" y="-8%" width="116%" height="116%">
+      <feDropShadow dx="0" dy="12" stdDeviation="18" flood-color="#000000" flood-opacity="0.32"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="10" markerHeight="10" orient="auto-start-reverse">
+      <path d="M 0 1 L 11 6 L 0 11 z" fill="#6ee7de"/>
+    </marker>
+    <marker id="arrowMuted" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="10" markerHeight="10" orient="auto-start-reverse">
+      <path d="M 0 1 L 11 6 L 0 11 z" fill="#6f7f91"/>
+    </marker>
+    <style>
+      .bg { fill: url(#bg); }
+      .panel { fill: #111c26; stroke: #263848; stroke-width: 2; filter: url(#shadow); }
+      .panel2 { fill: #0d1821; stroke: #263848; stroke-width: 2; }
+      .panel3 { fill: #142130; stroke: #33485d; stroke-width: 2; }
+      .soft { fill: #0f1a24; stroke: #233544; stroke-width: 1.5; }
+      .pill { fill: #10252c; stroke: #2dd4bf; stroke-width: 1.5; }
+      .ai { fill: #151b2d; stroke: #7aa2ff; stroke-width: 2; }
+      .risk { fill: #241923; stroke: #f472b6; stroke-width: 1.8; }
+      .out { fill: #10231d; stroke: #34d399; stroke-width: 2; }
+      .warn { fill: #251c12; stroke: #f59e0b; stroke-width: 2; }
+      .line { stroke: #6ee7de; stroke-width: 3; fill: none; marker-end: url(#arrow); }
+      .mutedLine { stroke: #6f7f91; stroke-width: 2.5; fill: none; marker-end: url(#arrowMuted); }
+      .dash { stroke-dasharray: 9 9; }
+      .title { font: 700 46px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #f8fafc; }
+      .subtitle { font: 400 20px Inter, ui-sans-serif, system-ui, sans-serif; fill: #b7c3d1; }
+      .h1 { font: 800 26px Inter, ui-sans-serif, system-ui, sans-serif; fill: #ecfeff; }
+      .h2 { font: 750 20px Inter, ui-sans-serif, system-ui, sans-serif; fill: #f8fafc; }
+      .h3 { font: 700 17px Inter, ui-sans-serif, system-ui, sans-serif; fill: #dff7ff; }
+      .body { font: 400 15px Inter, ui-sans-serif, system-ui, sans-serif; fill: #c7d2de; }
+      .small { font: 400 13px Inter, ui-sans-serif, system-ui, sans-serif; fill: #aab8c6; }
+      .tiny { font: 700 11px Inter, ui-sans-serif, system-ui, sans-serif; fill: #8fa2b5; letter-spacing: 0.08em; }
+      .chipText { font: 700 13px Inter, ui-sans-serif, system-ui, sans-serif; fill: #bffcf6; }
+      .num { font: 800 19px Inter, ui-sans-serif, system-ui, sans-serif; fill: #071014; }
+      .muted { fill: #8fa2b5; }
+      .green { fill: #86efac; }
+      .cyan { fill: #67e8f9; }
+      .blue { fill: #93c5fd; }
+      .pink { fill: #f9a8d4; }
+      .amber { fill: #fcd34d; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1800" height="2440"/>
+  <rect x="36" y="36" width="1728" height="2368" rx="30" fill="none" stroke="#1f3343" stroke-width="2"/>
+
+  <text class="title" x="90" y="110">Proceso de Analisis AI: de la data a los hallazgos</text>
+  <text class="subtitle" x="92" y="148">Flujo operativo del assessment: ingestion, normalizacion, contexto deterministico, analisis por ambito, validacion y revision humana.</text>
+
+  <rect class="pill" x="92" y="178" width="500" height="42" rx="21"/>
+  <text class="chipText" x="116" y="205">Principio clave: la IA redacta y razona, pero la evidencia manda</text>
+  <rect class="pill" x="616" y="178" width="390" height="42" rx="21"/>
+  <text class="chipText" x="640" y="205">Todo hallazgo debe trazar a facts/evidence_refs</text>
+  <rect class="pill" x="1030" y="178" width="320" height="42" rx="21"/>
+  <text class="chipText" x="1054" y="205">Jobs persistentes + polling visual</text>
+
+  <!-- Main flow -->
+  <rect class="panel" x="90" y="270" width="310" height="250" rx="20"/>
+  <text class="tiny" x="120" y="305">01 DATA DE ENTRADA</text>
+  <text class="h2" x="120" y="336">Fuentes del assessment</text>
+  <text class="body" x="120" y="374">• Inventario, scope y roles</text>
+  <text class="body" x="120" y="402">• Evidencia CLI y archivos</text>
+  <text class="body" x="120" y="430">• Configuracion y estado</text>
+  <text class="body" x="120" y="458">• Metricas de performance</text>
+  <text class="body" x="120" y="486">• Entrevistas operativas</text>
+  <text class="body" x="120" y="514">• Cisco EoX / credenciales</text>
+
+  <path class="line" d="M 410 395 C 455 395 465 395 510 395"/>
+
+  <rect class="panel" x="520" y="270" width="310" height="250" rx="20"/>
+  <text class="tiny" x="550" y="305">02 PARSING Y NORMALIZACION</text>
+  <text class="h2" x="550" y="336">Convertir data cruda</text>
+  <text class="body" x="550" y="374">• Parsear comandos Cisco</text>
+  <text class="body" x="550" y="402">• Identificar dispositivos</text>
+  <text class="body" x="550" y="430">• Extraer configFacts</text>
+  <text class="body" x="550" y="458">• Extraer stateFacts</text>
+  <text class="body" x="550" y="486">• Crear evidence_refs</text>
+  <text class="body" x="550" y="514">• Normalizar severidad base</text>
+
+  <path class="line" d="M 840 395 C 885 395 895 395 940 395"/>
+
+  <rect class="panel" x="950" y="270" width="310" height="250" rx="20"/>
+  <text class="tiny" x="980" y="305">03 CONTEXTO DETERMINISTICO</text>
+  <text class="h2" x="980" y="336">Ground truth del motor</text>
+  <text class="body" x="980" y="374">• AssessmentAIContext</text>
+  <text class="body" x="980" y="402">• Knowledge graph</text>
+  <text class="body" x="980" y="430">• Facts por equipo/scope</text>
+  <text class="body" x="980" y="458">• Criticidad, sitio y rol</text>
+  <text class="body" x="980" y="486">• Missing evidence scoped</text>
+  <text class="body" x="980" y="514">• Correlaciones candidatas</text>
+
+  <path class="line" d="M 1270 395 C 1315 395 1325 395 1370 395"/>
+
+  <rect class="ai" x="1380" y="270" width="330" height="250" rx="20" filter="url(#shadow)"/>
+  <text class="tiny" x="1410" y="305">04 JOB AI PERSISTENTE</text>
+  <text class="h2" x="1410" y="336">Orquestacion por scope</text>
+  <text class="body" x="1410" y="374">• POST /ai-analysis/jobs</text>
+  <text class="body" x="1410" y="402">• AiAnalysisJob + Steps</text>
+  <text class="body" x="1410" y="430">• Cache/inputHash</text>
+  <text class="body" x="1410" y="458">• Polling UI cada ~2s</text>
+  <text class="body" x="1410" y="486">• Timeout y retry/cancel</text>
+  <text class="body" x="1410" y="514">• Debug admin opcional</text>
+
+  <!-- Six phases -->
+  <rect class="panel2" x="90" y="590" width="1620" height="315" rx="24"/>
+  <text class="tiny" x="120" y="628">PIPELINE REPETIDO POR CADA AMBITO</text>
+  <text class="h1" x="120" y="662">Las 6 fases del job para llegar a hallazgos trazables</text>
+
+  <g transform="translate(120 704)">
+    <rect class="soft" x="0" y="0" width="235" height="116" rx="16"/>
+    <circle cx="28" cy="28" r="17" fill="#6ee7de"/><text class="num" x="22" y="35">1</text>
+    <text class="h3" x="56" y="32">Contexto</text>
+    <text class="small" x="20" y="66">Carga record, scope</text>
+    <text class="small" x="20" y="90">estrategia y playbook.</text>
+  </g>
+  <path class="line" d="M 365 762 L 414 762"/>
+  <g transform="translate(425 704)">
+    <rect class="soft" x="0" y="0" width="235" height="116" rx="16"/>
+    <circle cx="28" cy="28" r="17" fill="#6ee7de"/><text class="num" x="22" y="35">2</text>
+    <text class="h3" x="56" y="32">Evidencia</text>
+    <text class="small" x="20" y="66">Selecciona facts, refs,</text>
+    <text class="small" x="20" y="90">metricas y relaciones.</text>
+  </g>
+  <path class="line" d="M 670 762 L 719 762"/>
+  <g transform="translate(730 704)">
+    <rect class="soft" x="0" y="0" width="235" height="116" rx="16"/>
+    <circle cx="28" cy="28" r="17" fill="#6ee7de"/><text class="num" x="22" y="35">3</text>
+    <text class="h3" x="56" y="32">Normalizacion</text>
+    <text class="small" x="20" y="66">Construye AIScopePacket</text>
+    <text class="small" x="20" y="90">y controla presupuesto.</text>
+  </g>
+  <path class="line" d="M 975 762 L 1024 762"/>
+  <g transform="translate(1035 704)">
+    <rect class="ai" x="0" y="0" width="235" height="116" rx="16"/>
+    <circle cx="28" cy="28" r="17" fill="#7aa2ff"/><text class="num" x="22" y="35">4</text>
+    <text class="h3" x="56" y="32">Analisis AI</text>
+    <text class="small" x="20" y="66">El modelo redacta</text>
+    <text class="small" x="20" y="90">hallazgos candidatos.</text>
+  </g>
+  <path class="line" d="M 1280 762 L 1329 762"/>
+  <g transform="translate(1340 704)">
+    <rect class="warn" x="0" y="0" width="235" height="116" rx="16"/>
+    <circle cx="28" cy="28" r="17" fill="#fbbf24"/><text class="num" x="22" y="35">5</text>
+    <text class="h3" x="56" y="32">Validacion</text>
+    <text class="small" x="20" y="66">Schema, scope rules,</text>
+    <text class="small" x="20" y="90">facts y evidence_refs.</text>
+  </g>
+  <path class="line" d="M 1578 762 C 1628 762 1628 834 1578 834"/>
+  <g transform="translate(1340 806)">
+    <rect class="out" x="0" y="0" width="235" height="116" rx="16"/>
+    <circle cx="28" cy="28" r="17" fill="#34d399"/><text class="num" x="22" y="35">6</text>
+    <text class="h3" x="56" y="32">Sintesis</text>
+    <text class="small" x="20" y="66">Persiste resultado,</text>
+    <text class="small" x="20" y="90">resumen y findings.</text>
+  </g>
+
+  <!-- Scope matrix -->
+  <rect class="panel2" x="90" y="940" width="1620" height="830" rx="24"/>
+  <text class="tiny" x="120" y="978">MAP POR AMBITO / DOMINIO</text>
+  <text class="h1" x="120" y="1012">Que analiza cada ambito antes de producir hallazgos</text>
+  <text class="subtitle" x="120" y="1044">Cada tarjeta usa los mismos 6 pasos, pero cambia la estrategia, evidencia prioritaria, reglas de validacion y tipo de hallazgo permitido.</text>
+
+  <g transform="translate(120 1085)">
+    <rect class="panel3" x="0" y="0" width="370" height="150" rx="16"/>
+    <text class="h2" x="24" y="34">Topologia</text>
+    <text class="small" x="24" y="66">CDP/LLDP, enlaces, pares, rutas fisicas.</text>
+    <text class="small" x="24" y="92">Busca SPOF, single-homed, dependencia</text>
+    <text class="small" x="24" y="118">critica y brechas de visibilidad.</text>
+  </g>
+  <g transform="translate(515 1085)">
+    <rect class="panel3" x="0" y="0" width="370" height="150" rx="16"/>
+    <text class="h2" x="24" y="34">Configuraciones</text>
+    <text class="small" x="24" y="66">running-config, interfaces y consistencia.</text>
+    <text class="small" x="24" y="92">AAA, NTP, Syslog, STP/BPDU, trunks,</text>
+    <text class="small" x="24" y="118">DHCP Snooping, vPC y port-channels.</text>
+  </g>
+  <g transform="translate(910 1085)">
+    <rect class="risk" x="0" y="0" width="370" height="150" rx="16"/>
+    <text class="h2" x="24" y="34">Seguridad</text>
+    <text class="small" x="24" y="66">Hardening administrativo y exposicion.</text>
+    <text class="small" x="24" y="92">Telnet/SSH, SNMP, HTTP, AAA, ACL,</text>
+    <text class="small" x="24" y="118">crypto, NAT/VPN y vectores de acceso.</text>
+  </g>
+  <g transform="translate(1305 1085)">
+    <rect class="risk" x="0" y="0" width="370" height="150" rx="16"/>
+    <text class="h2" x="24" y="34">Vigencia tecnologica</text>
+    <text class="small" x="24" y="66">PID, modelo, version y Cisco EoX.</text>
+    <text class="small" x="24" y="92">Cruza lifecycle con rol/criticidad y</text>
+    <text class="small" x="24" y="118">escala severidad si el equipo es critico.</text>
+  </g>
+
+  <g transform="translate(120 1260)">
+    <rect class="panel3" x="0" y="0" width="370" height="150" rx="16"/>
+    <text class="h2" x="24" y="34">Operaciones</text>
+    <text class="small" x="24" y="66">Entrevistas, procesos, backups, cambios.</text>
+    <text class="small" x="24" y="92">Monitoreo, rollback, mantenibilidad,</text>
+    <text class="small" x="24" y="118">gaps operativos y capacidad de soporte.</text>
+  </g>
+  <g transform="translate(515 1260)">
+    <rect class="panel3" x="0" y="0" width="370" height="150" rx="16"/>
+    <text class="h2" x="24" y="34">Logs y evidencia</text>
+    <text class="small" x="24" y="66">Cobertura, calidad y eventos recurrentes.</text>
+    <text class="small" x="24" y="92">Inestabilidad, flaps, syslog, NTP,</text>
+    <text class="small" x="24" y="118">ausencia de comandos o evidencia clave.</text>
+  </g>
+  <g transform="translate(910 1260)">
+    <rect class="risk" x="0" y="0" width="370" height="150" rx="16"/>
+    <text class="h2" x="24" y="34">Performance</text>
+    <text class="small" x="24" y="66">CPU, memoria, utilizacion, errores, drops.</text>
+    <text class="small" x="24" y="92">Evalua umbrales, tendencia, cobertura,</text>
+    <text class="small" x="24" y="118">hotspots y riesgo de capacidad.</text>
+  </g>
+  <g transform="translate(1305 1260)">
+    <rect class="panel3" x="0" y="0" width="370" height="150" rx="16"/>
+    <text class="h2" x="24" y="34">Inventario</text>
+    <text class="small" x="24" y="66">Cobertura, consistencia y completitud.</text>
+    <text class="small" x="24" y="92">Relaciona inventario, evidencia, sitio,</text>
+    <text class="small" x="24" y="118">rol, plataforma y alcance del assessment.</text>
+  </g>
+
+  <g transform="translate(120 1435)">
+    <rect class="panel3" x="0" y="0" width="370" height="150" rx="16"/>
+    <text class="h2" x="24" y="34">Routing / WAN</text>
+    <text class="small" x="24" y="66">Protocolos, redundancia y estabilidad.</text>
+    <text class="small" x="24" y="92">Busca dependencia de rutas, asimetria,</text>
+    <text class="small" x="24" y="118">fallos de convergencia o visibilidad.</text>
+  </g>
+  <g transform="translate(515 1435)">
+    <rect class="panel3" x="0" y="0" width="370" height="150" rx="16"/>
+    <text class="h2" x="24" y="34">Datacenter / Campus</text>
+    <text class="small" x="24" y="66">Patrones por dominio arquitectonico.</text>
+    <text class="small" x="24" y="92">Acceso, distribucion, core, fabric,</text>
+    <text class="small" x="24" y="118">segmentacion, resiliencia y operacion.</text>
+  </g>
+  <g transform="translate(910 1435)">
+    <rect class="risk" x="0" y="0" width="370" height="150" rx="16"/>
+    <text class="h2" x="24" y="34">Perimetro</text>
+    <text class="small" x="24" y="66">Firewalls, borde, exposicion y control.</text>
+    <text class="small" x="24" y="92">Cruza configuracion, seguridad, rutas,</text>
+    <text class="small" x="24" y="118">NAT/VPN y puntos de entrada/salida.</text>
+  </g>
+  <g transform="translate(1305 1435)">
+    <rect class="risk" x="0" y="0" width="370" height="150" rx="16"/>
+    <text class="h2" x="24" y="34">Alta disponibilidad</text>
+    <text class="small" x="24" y="66">vPC, port-channel, dual-homing, HA.</text>
+    <text class="small" x="24" y="92">Identifica degradacion, miembros fuera,</text>
+    <text class="small" x="24" y="118">dependencias y fallos de resiliencia.</text>
+  </g>
+
+  <g transform="translate(120 1610)">
+    <rect class="ai" x="0" y="0" width="755" height="105" rx="16"/>
+    <text class="h2" x="24" y="35">Correlacion transversal / Reduce</text>
+    <text class="small" x="24" y="67">Combina hallazgos entre scopes para detectar causas comunes, duplicados, amplificadores de riesgo y prioridades compartidas.</text>
+  </g>
+  <g transform="translate(910 1610)">
+    <rect class="out" x="0" y="0" width="765" height="105" rx="16"/>
+    <text class="h2" x="24" y="35">Roadmap y resumen ejecutivo / Synthesize</text>
+    <text class="small" x="24" y="67">Convierte hallazgos validados en narrativa ejecutiva, impacto de negocio, prioridades y plan de remediacion.</text>
+  </g>
+
+  <!-- Validation and output -->
+  <rect class="panel2" x="90" y="1840" width="1620" height="420" rx="24"/>
+  <text class="tiny" x="120" y="1878">COMO SE DECIDE SI UN HALLAZGO SOBREVIVE</text>
+  <text class="h1" x="120" y="1912">Validacion, persistencia y revision</text>
+
+  <rect class="warn" x="120" y="1960" width="360" height="210" rx="18"/>
+  <text class="h2" x="150" y="1996">Guardrails anti-alucinacion</text>
+  <text class="body" x="150" y="2034">• Schema estricto por finding</text>
+  <text class="body" x="150" y="2062">• Scope permite ciertos tipos</text>
+  <text class="body" x="150" y="2090">• Evidence_refs deben existir</text>
+  <text class="body" x="150" y="2118">• Fact IDs deben existir</text>
+  <text class="body" x="150" y="2146">• Reglas especiales por ambito</text>
+
+  <path class="line" d="M 492 2065 C 535 2065 545 2065 588 2065"/>
+
+  <rect class="out" x="600" y="1960" width="360" height="210" rx="18"/>
+  <text class="h2" x="630" y="1996">Contrato del hallazgo</text>
+  <text class="body" x="630" y="2034">• finding_id, scope, severity</text>
+  <text class="body" x="630" y="2062">• evidence_refs y fact_ids</text>
+  <text class="body" x="630" y="2090">• racional tecnico</text>
+  <text class="body" x="630" y="2118">• impacto de negocio</text>
+  <text class="body" x="630" y="2146">• recomendacion y preguntas</text>
+
+  <path class="line" d="M 972 2065 C 1015 2065 1025 2065 1068 2065"/>
+
+  <rect class="panel3" x="1080" y="1960" width="360" height="210" rx="18"/>
+  <text class="h2" x="1110" y="1996">Persistencia</text>
+  <text class="body" x="1110" y="2034">• AiScopeResult por scope</text>
+  <text class="body" x="1110" y="2062">• findingsJson/recommendations</text>
+  <text class="body" x="1110" y="2090">• inputHash y cache</text>
+  <text class="body" x="1110" y="2118">• job status y steps</text>
+  <text class="body" x="1110" y="2146">• auditoria/debug opcional</text>
+
+  <path class="line" d="M 1452 2065 C 1488 2065 1498 2065 1530 2065"/>
+
+  <rect class="ai" x="1540" y="1960" width="140" height="210" rx="18"/>
+  <text class="h2" x="1568" y="1996">UI</text>
+  <text class="small" x="1568" y="2034">Revision</text>
+  <text class="small" x="1568" y="2062">Validar</text>
+  <text class="small" x="1568" y="2090">Editar</text>
+  <text class="small" x="1568" y="2118">Descartar</text>
+  <text class="small" x="1568" y="2146">Reportar</text>
+
+  <rect class="soft" x="120" y="2218" width="1560" height="66" rx="16"/>
+  <text class="h3" x="150" y="2258">Resultado: hallazgos tecnicos trazables, agrupados por ambito, con severidad, evidencia, impacto, recomendacion y estado de revision.</text>
+
+  <!-- Monitoring strip -->
+  <rect class="panel2" x="90" y="2300" width="1620" height="78" rx="20"/>
+  <text class="tiny" x="120" y="2331">EXPERIENCIA DE USUARIO DURANTE JOBS LARGOS</text>
+  <text class="body" x="120" y="2362">La interfaz consulta el estado del job y muestra progreso, fase activa, tiempo transcurrido, ultima actividad, errores y mini timeline por ambito para evitar la percepcion de bloqueo.</text>
+</svg>

@@ -3,7 +3,10 @@ import { prisma } from "./prisma.ts";
 import {
   defaultConfigurationScopePlaybook,
   defaultEvidenceScopePlaybook,
+  defaultOperationsScopePlaybook,
+  defaultPerformanceScopePlaybook,
   defaultSecurityScopePlaybook,
+  defaultTopologyScopePlaybook,
   emptyScopePlaybook,
   isSupportedScopePlaybookScopeId,
   normalizeScopePlaybook,
@@ -32,10 +35,13 @@ export async function getScopePlaybook(scopeId: string): Promise<ScopePlaybookSn
   return scopePlaybookSnapshot(record);
 }
 
-function defaultScopePlaybook(scopeId: SupportedScopePlaybookScopeId): ScopePlaybook {
+export function defaultScopePlaybook(scopeId: SupportedScopePlaybookScopeId): ScopePlaybook {
   if (scopeId === "configuration") return defaultConfigurationScopePlaybook;
   if (scopeId === "security") return defaultSecurityScopePlaybook;
   if (scopeId === "evidence") return defaultEvidenceScopePlaybook;
+  if (scopeId === "performance") return defaultPerformanceScopePlaybook;
+  if (scopeId === "topology") return defaultTopologyScopePlaybook;
+  if (scopeId === "operations") return defaultOperationsScopePlaybook;
   return emptyScopePlaybook(scopeId);
 }
 

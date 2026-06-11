@@ -94,7 +94,6 @@ import {
   type LifecycleEoxRecord as SharedLifecycleEoxRecord
 } from "@/lib/lifecycle-analysis";
 import {
-  areaToFindingCategory,
   filterFindingsByArea,
   summarizeAreaFindings,
   type AreaFindingSummary
@@ -103,13 +102,21 @@ import { humanizeScopeStatus } from "@/lib/ai-status-labels";
 import {
   aiScopeDisplayOrder,
   aiScopePhaseDisplay,
+  activeAmbitoMemberScopes,
+  ambitoCoverageLedger,
+  ambitoMeta,
+  ambitoOrder,
   crossScopeCorrelationDisplay,
   flagForStage,
+  isCoverageComplete,
+  scopeToAmbito,
   scopeProgressFromStatus,
   type AIStageFlag,
   type AIScopeDisplayGroup,
   type AIScopeDisplayMetadata,
-  type AIScopeOrStageDisplayId
+  type AIScopeOrStageDisplayId,
+  type AmbitoId,
+  type CoverageLedgerEntry
 } from "@/lib/ai-scope-ui";
 import { buildPipelineView, type PipelineViewStage } from "@/lib/ai-pipeline-view";
 import {
@@ -167,11 +174,29 @@ import {
   type PerformanceTechnicalViewData,
   type PerformanceTopPriority
 } from "@/lib/performance-visualization-service";
+import { deriveFindingRisk } from "@/lib/finding-risk";
 import { mapLegacyRemediation, remediationCategoryLabels } from "@/lib/types";
-import type { Assessment, Client, Domain, EvidenceFile, Finding, NeighborRelation, ParsedAssessment, RemediationCategory, RiskLevel } from "@/lib/types";
+import type { Assessment, Client, Domain, EvidenceFile, Finding, InterfaceRecord, NeighborRelation, ParsedAssessment, RemediationCategory, RiskLevel } from "@/lib/types";
 import { assessmentTabLabel, assessmentTabs as tabs, type AssessmentTab as Tab } from "@/lib/assessment-navigation";
 import type { AIAnalysisJobSnapshot, AIAnalysisScopeId } from "@/lib/ai-analysis-jobs";
 import { cn, formatDate, uid } from "@/lib/utils";
+import {
+  canonicalInterfaceKey,
+  confidenceForMatch,
+  emptyDeviceProfile,
+  generateProfileSlots,
+  mediaIsFiber,
+  normalizeDeviceProfile,
+  resolveDeviceProfile,
+  DEFAULT_DEVICE_PROFILES,
+  LAYOUT_CONFIDENCE_LABEL,
+  type DeviceCategory,
+  type DeviceVisualProfile,
+  type LayoutConfidence,
+  type PortMedia,
+  type ProfileSection,
+  type SectionRole
+} from "@/lib/device-profiles";
 
 const domains: Array<{ id: Domain; label: string }> = [
   { id: "enterprise-networking", label: "Enterprise Networking" },
@@ -183,18 +208,19 @@ type TabDefinition = {
   eyebrow: string;
 };
 type WorkspaceView = "dashboard" | "detail" | "settings";
-type TopologyView = "relations" | "graph";
+type TopologyView = "relations" | "graph" | "interfaces" | "catalog";
 
-type EvaluationArea = "topology" | "configuration" | "security" | "lifecycle" | "operations" | "logs";
+type EvaluationArea = AmbitoId;
 type AIEvaluationSubtab = "evaluation" | "findings" | "settings";
 type AISettingsSubtab = "playbook" | "guidelines" | "debug";
-type PlaybookScopeId = "configuration" | "security" | "evidence" | "performance";
+type PlaybookScopeId = "configuration" | "security" | "evidence" | "performance" | "topology" | "operations";
 type PlaybookEditorSubtab = "criteria" | "expected" | "exclusions";
 type ScopePlaybookOsFamily = "all" | "ios" | "ios-xe" | "nxos" | "asa" | "unknown";
-type DeviceType = "switch" | "router" | "nexus-switch" | "aci" | "wireless-controller" | "firewall" | "other";
+type DeviceType = "switch-l2" | "switch-l3" | "router" | "nexus-switch" | "aci" | "wireless-controller" | "firewall" | "other";
+type PlatformId = "ios-xe" | "ios" | "nx-os" | "asa" | "ftd" | "aci" | "unknown";
 type SortDirection = "asc" | "desc";
 type InventorySortKey = "included" | "hostname" | "managementIp" | "serial" | "model" | "deviceType" | "role" | "topologyLayer" | "priority";
-type EvidenceRequirementId = "identity" | "configuration" | "interfaces" | "topology-l2" | "routing-overlay" | "operations-security";
+type EvidenceRequirementId = string;
 type UiMode = "dark" | "light";
 type UserRole = "admin" | "architect" | "viewer";
 type UserStatus = "active" | "disabled";
@@ -226,6 +252,20 @@ type EvidenceSkip = {
   requirementId: EvidenceRequirementId;
   skippedAt: string;
 };
+type CollectionCommandGroup = {
+  id: EvidenceRequirementId;
+  label: string;
+  shortLabel: string;
+  description?: string;
+};
+type DeviceCommandProfile = {
+  description: string;
+  commandGroups: Record<EvidenceRequirementId, string[]>;
+};
+type CollectionCommandProfile = {
+  groups: CollectionCommandGroup[];
+  profiles: Record<DeviceType, DeviceCommandProfile>;
+};
 type EvidenceRequirementStatus = "collected" | "missing" | "skipped";
 type EvidenceCoverageCell = {
   requirementId: EvidenceRequirementId;
@@ -239,6 +279,7 @@ type EvidenceCoverageRow = {
   serial: string;
   model: string;
   role: string;
+  deviceType: DeviceType;
   cells: EvidenceCoverageCell[];
   collectedCount: number;
   skippedCount: number;
@@ -313,12 +354,16 @@ type InventoryAsset = {
   serial: string;
   model: string;
   deviceType: DeviceType;
-  platform: string;
+  platform: PlatformId;
   role: string;
   site: string;
   topologyLayer?: TopologyLayerId;
   priority: "critical" | "high" | "medium" | "low";
   included: boolean;
+};
+
+type InventoryAssetPatch = Partial<Omit<InventoryAsset, "id" | "topologyLayer">> & {
+  topologyLayer?: TopologyLayerId | null;
 };
 
 type LifecycleEoxRecord = SharedLifecycleEoxRecord & {
@@ -329,7 +374,7 @@ type LifecycleEoxLookupResult = {
   productId: string;
   normalizedProductId: string;
   source: "support-api" | "public-cisco";
-  status: "matched" | "not-found";
+  status: "matched" | "not-found" | "error";
   matchedProductId: string;
   bulletinNumber: string;
   bulletinUrl: string;
@@ -382,6 +427,7 @@ type SupportCoverageRow = LifecycleHardwareRow & {
 
 type AIAssessmentAnalysisStatus = {
   assessmentId: string;
+  topologyPlaybookEnabled?: boolean;
   jobs: AIAnalysisJobSnapshot[];
   scopes: Array<{
     id: AIAnalysisScopeId;
@@ -390,6 +436,7 @@ type AIAssessmentAnalysisStatus = {
     status: string;
     inputHash: string | null;
     updatedAt: string | null;
+    coverageLedger?: CoverageLedgerEntry[] | null;
     stale: boolean;
   }>;
 };
@@ -507,6 +554,20 @@ type RunEvaluationOptions = {
   forceReevaluate?: boolean;
 };
 
+type FindingsAreaSelection = EvaluationArea | "all";
+
+type FindingsFilterState = {
+  query: string;
+  device: string;
+  risk: RiskLevel | "";
+  topologyLayer: TopologyLayerId | "";
+  site: string;
+  role: string;
+  status: Finding["status"] | "";
+  findingType: string;
+  remediationCategory: RemediationCategory | "";
+};
+
 type LifecyclePrestepState = {
   running: boolean;
   error: string;
@@ -529,6 +590,7 @@ type AssessmentRecord = {
   supportCoverageMessage?: string;
   operationalAssessment: OperationalAssessment;
   performance: PerformanceState;
+  collectionProfile: CollectionCommandProfile;
   evidenceSkips: EvidenceSkip[];
   evidenceFiles: EvidenceFile[];
   parsed: ParsedAssessment;
@@ -676,7 +738,7 @@ const findingTypeSummaryLabel: Record<string, string> = {
   sin_tipo: "Sin tipo"
 };
 
-const scopeDisplayGroupOrder: AIScopeDisplayGroup[] = ["Fundamentos", "Riesgo", "Dominios", "Operación", "Síntesis"];
+const scopeDisplayGroupOrder: AIScopeDisplayGroup[] = ["Configuraciones", "Seguridad", "Logs y Eventos", "Vigencia tecnológica", "Topología", "Operaciones", "Performance", "Síntesis"];
 
 const statusLabel: Record<Assessment["status"], string> = {
   draft: "Draft",
@@ -695,14 +757,11 @@ const statusTone: Record<Assessment["status"], "neutral" | "info" | "success" | 
 const remediationCategoryLabel: Record<RemediationCategory, string> = remediationCategoryLabels;
 const legacyRemediationField = "remediation" + "Type";
 
-const evaluationAreas: Array<{ id: EvaluationArea; label: string; description: string }> = [
-  { id: "topology", label: "Analisis topologico", description: "Vecinos, redundancia, puntos unicos de falla y consistencia fisica/logica." },
-  { id: "configuration", label: "Configuraciones", description: "Running-config, estandares, desviaciones y parametros operativos." },
-  { id: "security", label: "Seguridad", description: "Plano de administracion, protocolos inseguros, SNMP, AAA y hardening." },
-  { id: "lifecycle", label: "Vigencia tecnologica", description: "Versiones de software, hardware, modelos y obsolescencia potencial." },
-  { id: "operations", label: "Operaciones", description: "Estado de interfaces, documentacion, administracion y mantenibilidad." },
-  { id: "logs", label: "Logs y eventos", description: "Eventos relevantes, errores recurrentes y senales de degradacion." }
-];
+const evaluationAreas: Array<{ id: EvaluationArea; label: string; description: string }> = ambitoOrder.map((id) => ({
+  id,
+  label: ambitoMeta[id].label,
+  description: ambitoMeta[id].description
+}));
 
 const defaultObjectives = [
   "Validar inventario objetivo y alcance tecnico",
@@ -719,7 +778,7 @@ const defaultDeliverables = [
   "Scripts de levantamiento"
 ];
 
-const evidenceRequirements: Array<{ id: EvidenceRequirementId; label: string; shortLabel: string }> = [
+const defaultCollectionCommandGroups: CollectionCommandGroup[] = [
   { id: "identity", label: "Identidad, version, inventario, modulos y licencias", shortLabel: "Identidad" },
   { id: "configuration", label: "Configuracion running-config y startup-config", shortLabel: "Config" },
   { id: "interfaces", label: "Estado, descripcion y detalle de interfaces", shortLabel: "Interfaces" },
@@ -727,6 +786,8 @@ const evidenceRequirements: Array<{ id: EvidenceRequirementId; label: string; sh
   { id: "routing-overlay", label: "Rutas, protocolos, OSPF, BGP, VRF, NVE y EVPN", shortLabel: "Routing" },
   { id: "operations-security", label: "Logs, NTP, reloj, redundancia, ambiente y seguridad/perimetro", shortLabel: "Operacion" }
 ];
+
+const evidenceRequirements = defaultCollectionCommandGroups;
 
 const topologyLayerOrder: TopologyLayerId[] = ["branches", "perimeter", "core", "datacenter", "campus", "other"];
 
@@ -825,7 +886,8 @@ export default function HomePage() {
   const [uiMode, setUiMode] = useState<UiMode>("dark");
   const [openAiApiKey, setOpenAiApiKey] = useState("");
   const [openAiCredential, setOpenAiCredential] = useState<ApiCredentialMetadata>(() => emptyOpenAiCredentialMetadata());
-  const [ciscoApiToken, setCiscoApiToken] = useState("");
+  const [ciscoClientId, setCiscoClientId] = useState("");
+  const [ciscoClientSecret, setCiscoClientSecret] = useState("");
   const [ciscoCredential, setCiscoCredential] = useState<ApiCredentialMetadata>(() => emptyCiscoCredentialMetadata());
   const [openAiCheck, setOpenAiCheck] = useState<CredentialCheckStatus>({ state: "idle", message: "" });
   const [ciscoTokenCheck, setCiscoTokenCheck] = useState<CredentialCheckStatus>({ state: "idle", message: "" });
@@ -849,7 +911,6 @@ export default function HomePage() {
       setRecords(cachedRecords);
       setUiMode(readInitialUiMode());
       setOpenAiApiKey(readInitialOpenAiApiKey());
-      setCiscoApiToken(readInitialCiscoApiToken());
       setDocumentTemplates(readInitialDocumentTemplates());
 
       try {
@@ -873,10 +934,7 @@ export default function HomePage() {
           setOpenAiCredential(persistedOpenAiCredential);
           if (persistedOpenAiCredential.configured) setOpenAiApiKey("");
         }
-        if (persistedCiscoCredential) {
-          setCiscoCredential(persistedCiscoCredential);
-          if (persistedCiscoCredential.configured) setCiscoApiToken("");
-        }
+        if (persistedCiscoCredential) setCiscoCredential(persistedCiscoCredential);
         setPersistenceState({
           mode: "postgres",
           message:
@@ -1210,22 +1268,26 @@ export default function HomePage() {
   }
 
   async function testCiscoCredential() {
-    if (!ciscoApiToken.trim() && !ciscoCredential.configured) {
-      setCiscoTokenCheck({ state: "invalid", message: "Agrega un access token o guarda una credencial persistente antes de probar." });
+    const hasDraftCredential = ciscoClientId.trim() || ciscoClientSecret.trim();
+    if (!hasDraftCredential && !ciscoCredential.configured) {
+      setCiscoTokenCheck({ state: "invalid", message: "Agrega Cisco Client ID y Client Secret o guarda una credencial persistente antes de probar." });
       return;
     }
 
-    setCiscoTokenCheck({ state: "checking", message: "Validando token Cisco EoX..." });
+    setCiscoTokenCheck({ state: "checking", message: "Validando credencial Cisco EoX..." });
     try {
-      const headers = ciscoApiToken.trim() ? { "x-cisco-api-token": ciscoApiToken.trim() } : undefined;
       const response = await fetch("/api/cisco/eox/test-token", {
         method: "POST",
-        headers
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clientId: ciscoClientId.trim() || undefined,
+          clientSecret: ciscoClientSecret.trim() || undefined
+        })
       });
       const payload = await response.json().catch(() => null);
       setCiscoTokenCheck({
         state: response.ok && payload?.ok ? "valid" : "invalid",
-        message: payload?.message || (response.ok ? "Token valido." : "No se pudo validar el token.")
+        message: payload?.message || (response.ok ? "Credencial valida." : "No se pudo validar la credencial.")
       });
     } catch {
       setCiscoTokenCheck({ state: "invalid", message: "No se pudo contactar el endpoint local de validacion." });
@@ -1233,43 +1295,44 @@ export default function HomePage() {
   }
 
   async function saveCiscoCredential() {
-    if (!ciscoApiToken.trim()) {
-      setCiscoTokenCheck({ state: "invalid", message: "Pega un access token Cisco antes de guardar." });
+    if (!ciscoClientId.trim() || !ciscoClientSecret.trim()) {
+      setCiscoTokenCheck({ state: "invalid", message: "Cisco Client ID y Client Secret son requeridos antes de guardar." });
       return;
     }
 
-    setCiscoTokenCheck({ state: "saving", message: "Guardando token Cisco cifrado en PostgreSQL..." });
+    setCiscoTokenCheck({ state: "saving", message: "Guardando credencial Cisco cifrada en PostgreSQL..." });
     try {
       const response = await fetch("/api/credentials/cisco", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          apiToken: ciscoApiToken.trim(),
+          clientId: ciscoClientId.trim(),
+          clientSecret: ciscoClientSecret.trim(),
           updatedBy: currentUser?.email ?? currentUser?.name ?? "local-user"
         })
       });
       const payload = await response.json().catch(() => null);
-      if (!response.ok || !payload?.credential) throw new Error(payload?.error || "No se pudo guardar el token Cisco.");
+      if (!response.ok || !payload?.credential) throw new Error(payload?.error || "No se pudo guardar la credencial Cisco.");
       setCiscoCredential(payload.credential as ApiCredentialMetadata);
-      setCiscoApiToken("");
-      window.localStorage.removeItem("assessment-tool.cisco-api-token.v1");
-      setCiscoTokenCheck({ state: "valid", message: "Token Cisco guardado cifrado en almacenamiento persistente." });
+      setCiscoClientId("");
+      setCiscoClientSecret("");
+      setCiscoTokenCheck({ state: "valid", message: "Credencial Cisco guardada cifrada en almacenamiento persistente." });
     } catch (error) {
-      setCiscoTokenCheck({ state: "invalid", message: error instanceof Error ? error.message : "No se pudo guardar el token Cisco." });
+      setCiscoTokenCheck({ state: "invalid", message: error instanceof Error ? error.message : "No se pudo guardar la credencial Cisco." });
     }
   }
 
   async function deleteCiscoCredential() {
-    if (!confirmAction("Esto eliminara el token Cisco persistido. Deseas continuar?")) return;
+    if (!confirmAction("Esto eliminara la credencial Cisco persistida. Deseas continuar?")) return;
     setCiscoTokenCheck({ state: "saving", message: "Eliminando credencial Cisco persistida..." });
     try {
       const response = await fetch("/api/credentials/cisco", { method: "DELETE" });
       const payload = await response.json().catch(() => null);
       if (!response.ok || !payload?.credential) throw new Error(payload?.error || "No se pudo eliminar la credencial Cisco.");
       setCiscoCredential(payload.credential as ApiCredentialMetadata);
-      setCiscoApiToken("");
-      window.localStorage.removeItem("assessment-tool.cisco-api-token.v1");
-      setCiscoTokenCheck({ state: "valid", message: payload.credential.configured ? "Credencial persistida eliminada. Se usara CISCO_API_TOKEN de entorno." : "Credencial Cisco eliminada." });
+      setCiscoClientId("");
+      setCiscoClientSecret("");
+      setCiscoTokenCheck({ state: "valid", message: payload.credential.configured ? "Credencial persistida eliminada. Se usara CISCO_CLIENT_ID/CISCO_CLIENT_SECRET de entorno." : "Credencial Cisco eliminada." });
     } catch (error) {
       setCiscoTokenCheck({ state: "invalid", message: error instanceof Error ? error.message : "No se pudo eliminar la credencial Cisco." });
     }
@@ -1331,7 +1394,7 @@ export default function HomePage() {
   function addInventoryAsset(asset: Omit<InventoryAsset, "id">) {
     updateSelectedRecord((record) => ({
       ...record,
-      targetInventory: [{ id: uid("asset"), ...asset, included: asset.included ?? true }, ...record.targetInventory],
+      targetInventory: [{ id: uid("asset"), ...asset, deviceType: normalizeDeviceType(asset.deviceType), platform: normalizePlatform(asset.platform), included: asset.included ?? true }, ...record.targetInventory],
       updatedAt: new Date().toISOString()
     }));
   }
@@ -1339,7 +1402,7 @@ export default function HomePage() {
   function importInventoryAssets(assets: Array<Omit<InventoryAsset, "id">>) {
     if (assets.length === 0) return;
     updateSelectedRecord((record) => {
-      const imported = assets.map((asset) => ({ id: uid("asset"), ...asset, included: asset.included ?? true }));
+      const imported = assets.map((asset) => ({ id: uid("asset"), ...asset, deviceType: normalizeDeviceType(asset.deviceType), platform: normalizePlatform(asset.platform), included: asset.included ?? true }));
       const importedHostnames = new Set(imported.map((asset) => asset.hostname.toLowerCase()));
       return {
         ...record,
@@ -1357,6 +1420,24 @@ export default function HomePage() {
     }));
   }
 
+  function updateInventoryAsset(assetId: string, patch: InventoryAssetPatch) {
+    updateSelectedRecord((record) => ({
+      ...record,
+      targetInventory: record.targetInventory.map((asset) => (
+        asset.id === assetId
+          ? {
+              ...asset,
+              ...patch,
+              deviceType: patch.deviceType ? normalizeDeviceType(patch.deviceType) : asset.deviceType,
+              platform: patch.platform ? normalizePlatform(patch.platform) : asset.platform,
+              topologyLayer: patch.topologyLayer === null ? undefined : patch.topologyLayer
+            }
+          : asset
+      )),
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
   function clearInventoryAssets() {
     if (!confirmAction("Esto borrara todos los equipos del inventario objetivo para cargar una nueva version. Deseas continuar?")) return;
     updateSelectedRecord((record) => ({
@@ -1370,18 +1451,6 @@ export default function HomePage() {
     updateSelectedRecord((record) => ({
       ...record,
       targetInventory: record.targetInventory.map((asset) => (asset.id === assetId ? { ...asset, included: !asset.included } : asset)),
-      updatedAt: new Date().toISOString()
-    }));
-  }
-
-  function updateInventoryAssetTopologyLayer(assetId: string, topologyLayer: TopologyLayerId | null) {
-    updateSelectedRecord((record) => ({
-      ...record,
-      targetInventory: record.targetInventory.map((asset) => (
-        asset.id === assetId
-          ? { ...asset, topologyLayer: topologyLayer ?? undefined }
-          : asset
-      )),
       updatedAt: new Date().toISOString()
     }));
   }
@@ -1730,7 +1799,7 @@ export default function HomePage() {
     }
 
     try {
-      const result = await fetchLifecycleEoxRecords(productIds, ciscoApiToken);
+      const result = await fetchLifecycleEoxRecords(productIds);
       const recordsMap = result.records;
       const lookupResults = result.lookupResults;
       const sourceLabel = result.source === "public-cisco" ? "fuente publica Cisco" : "Cisco Support EoX API";
@@ -1785,7 +1854,7 @@ export default function HomePage() {
     }));
 
     try {
-      const result = await fetchSupportCoverageRecords(serials, ciscoApiToken);
+      const result = await fetchSupportCoverageRecords(serials);
       const message = `${Object.keys(result.records).length} registros de soporte encontrados para ${serials.length} seriales consultados via Cisco SN2INFO.`;
       const nextRecord = {
         ...record,
@@ -1816,13 +1885,12 @@ export default function HomePage() {
 
     updateSelectedRecord((record) => {
       const areas = area === "complete" ? evaluationAreas.map((item) => item.id) : [area];
-      const fallbackCategories = new Set(areas.map(areaToCategory));
       const clearLifecycle = areas.includes("lifecycle");
       const clearPerformance = area === "complete";
       const nextFindings =
         area === "complete"
           ? []
-          : record.parsed.findings.filter((finding) => !fallbackCategories.has(finding.category));
+          : record.parsed.findings.filter((finding) => !findingBelongsToAnyEvaluationArea(finding, areas));
       const nextAIAnalysis =
         area === "complete"
           ? createDefaultAIAnalysisState()
@@ -1854,8 +1922,11 @@ export default function HomePage() {
       };
     });
 
-    const scopeId = area === "complete" ? null : evaluationAreaToAIScope(area);
-    const status = await resetPersistentAIAnalysisStatus(recordId, scopeId).catch(() => null);
+    const resetScopeIds = area === "complete" ? [null] : ambitoScopeIds(area);
+    let status: AIAssessmentAnalysisStatus | null = null;
+    for (const scopeId of resetScopeIds) {
+      status = await resetPersistentAIAnalysisStatus(recordId, scopeId).catch(() => status);
+    }
     setAiAnalysisStatusByAssessment((current) => {
       if (status) return { ...current, [recordId]: status };
       const next = { ...current };
@@ -1876,6 +1947,14 @@ export default function HomePage() {
       supportCoverageRecords: {},
       supportCoverageConsultedSerials: [],
       supportCoverageMessage: "",
+      updatedAt: new Date().toISOString()
+    }));
+  }
+
+  function updateCollectionProfile(updater: (profile: CollectionCommandProfile) => CollectionCommandProfile) {
+    updateSelectedRecord((record) => ({
+      ...record,
+      collectionProfile: normalizeCollectionCommandProfile(updater(collectionCommandProfileForRecord(record))),
       updatedAt: new Date().toISOString()
     }));
   }
@@ -2025,6 +2104,7 @@ export default function HomePage() {
       supportCoverageMessage: "",
       operationalAssessment: createDefaultOperationalAssessment(assessmentId, clientId),
       performance: createDefaultPerformanceState(assessmentId),
+      collectionProfile: createDefaultCollectionCommandProfile(),
       aiAnalysis: createDefaultAIAnalysisState(),
       updatedAt: new Date().toISOString()
     };
@@ -2276,9 +2356,11 @@ export default function HomePage() {
           onTestOpenAiCredential={testOpenAiCredential}
           onSaveOpenAiCredential={saveOpenAiCredential}
           onDeleteOpenAiCredential={deleteOpenAiCredential}
-          ciscoApiToken={ciscoApiToken}
+          ciscoClientId={ciscoClientId}
+          ciscoClientSecret={ciscoClientSecret}
           ciscoCredential={ciscoCredential}
-          onCiscoApiTokenChange={setCiscoApiToken}
+          onCiscoClientIdChange={setCiscoClientId}
+          onCiscoClientSecretChange={setCiscoClientSecret}
           ciscoTokenCheck={ciscoTokenCheck}
           onCiscoTokenCheckChange={setCiscoTokenCheck}
           onTestCiscoCredential={testCiscoCredential}
@@ -2336,8 +2418,8 @@ export default function HomePage() {
           onAddAsset={addInventoryAsset}
           onImportAssets={importInventoryAssets}
           onRemoveAsset={removeInventoryAsset}
+          onUpdateAsset={updateInventoryAsset}
           onToggleAssetIncluded={toggleInventoryAssetIncluded}
-          onUpdateAssetTopologyLayer={updateInventoryAssetTopologyLayer}
           onClearAssets={clearInventoryAssets}
           onRemoveDuplicateAssets={removeDuplicateInventoryAssets}
           onEvidenceUpload={handleEvidenceUpload}
@@ -2357,6 +2439,7 @@ export default function HomePage() {
           onConsultLifecycleEox={(recordId) => consultLifecycleEox(recordId)}
           onConsultSupportCoverage={(recordId) => consultSupportCoverage(recordId)}
           onResetLifecycleEox={resetLifecycleEox}
+          onUpdateCollectionProfile={updateCollectionProfile}
           onUpdateOperationalAssessment={updateOperationalAssessment}
           onUpdateFinding={updateFinding}
           onShareAssessment={shareAssessment}
@@ -2524,9 +2607,11 @@ function SettingsWorkspace({
   onTestOpenAiCredential,
   onSaveOpenAiCredential,
   onDeleteOpenAiCredential,
-  ciscoApiToken,
+  ciscoClientId,
+  ciscoClientSecret,
   ciscoCredential,
-  onCiscoApiTokenChange,
+  onCiscoClientIdChange,
+  onCiscoClientSecretChange,
   ciscoTokenCheck,
   onCiscoTokenCheckChange,
   onTestCiscoCredential,
@@ -2553,9 +2638,11 @@ function SettingsWorkspace({
   onTestOpenAiCredential: () => void;
   onSaveOpenAiCredential: () => void;
   onDeleteOpenAiCredential: () => void;
-  ciscoApiToken: string;
+  ciscoClientId: string;
+  ciscoClientSecret: string;
   ciscoCredential: ApiCredentialMetadata;
-  onCiscoApiTokenChange: (value: string) => void;
+  onCiscoClientIdChange: (value: string) => void;
+  onCiscoClientSecretChange: (value: string) => void;
   ciscoTokenCheck: CredentialCheckStatus;
   onCiscoTokenCheckChange: (status: CredentialCheckStatus) => void;
   onTestCiscoCredential: () => void;
@@ -2693,13 +2780,13 @@ function SettingsWorkspace({
 
             <div className="space-y-1">
               <div className="flex items-center justify-between gap-2">
-                <span className="text-xs font-medium text-muted-foreground">Cisco EoX OAuth access token</span>
+                <span className="text-xs font-medium text-muted-foreground">Cisco API OAuth client credentials</span>
                 <div className="flex items-center gap-2">
-                  <Button size="sm" variant="primary" onClick={onSaveCiscoCredential} disabled={!isAdmin || !ciscoApiToken.trim() || ciscoTokenCheck.state === "saving"}>
+                  <Button size="sm" variant="primary" onClick={onSaveCiscoCredential} disabled={!isAdmin || !ciscoClientId.trim() || !ciscoClientSecret.trim() || ciscoTokenCheck.state === "saving"}>
                     <Save size={13} />
                     {ciscoTokenCheck.state === "saving" ? "Guardando" : "Guardar"}
                   </Button>
-                  <Button size="sm" variant="secondary" onClick={onTestCiscoCredential} disabled={!isAdmin || ciscoTokenCheck.state === "checking" || ciscoTokenCheck.state === "saving" || (!ciscoApiToken.trim() && !ciscoCredential.configured)}>
+                  <Button size="sm" variant="secondary" onClick={onTestCiscoCredential} disabled={!isAdmin || ciscoTokenCheck.state === "checking" || ciscoTokenCheck.state === "saving" || ((!ciscoClientId.trim() || !ciscoClientSecret.trim()) && !ciscoCredential.configured)}>
                     <Search size={13} />
                     {ciscoTokenCheck.state === "checking" ? "Probando" : "Probar"}
                   </Button>
@@ -2707,13 +2794,14 @@ function SettingsWorkspace({
                     size="sm"
                     variant="ghost"
                     onClick={() => {
-                      onCiscoApiTokenChange("");
+                      onCiscoClientIdChange("");
+                      onCiscoClientSecretChange("");
                       onCiscoTokenCheckChange({ state: "idle", message: "" });
                     }}
-                    disabled={!isAdmin || !ciscoApiToken}
+                    disabled={!isAdmin || (!ciscoClientId && !ciscoClientSecret)}
                   >
                     <X size={13} />
-                    Limpiar campo
+                    Limpiar campos
                   </Button>
                   <Button
                     size="sm"
@@ -2742,16 +2830,34 @@ function SettingsWorkspace({
                   </p>
                 )}
               </div>
-              <Input
-                type="password"
-                value={ciscoApiToken}
-                onChange={(event) => {
-                  onCiscoApiTokenChange(event.target.value);
-                  onCiscoTokenCheckChange({ state: "idle", message: "" });
-                }}
-                placeholder={ciscoCredential.configured ? "Pega un nuevo token para reemplazar el actual" : "Pega el access token, con o sin Bearer"}
-                disabled={!isAdmin}
-              />
+              <div className="grid gap-2 md:grid-cols-2">
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-muted-foreground">Cisco Client ID</span>
+                  <Input
+                    type="password"
+                    value={ciscoClientId}
+                    onChange={(event) => {
+                      onCiscoClientIdChange(event.target.value);
+                      onCiscoTokenCheckChange({ state: "idle", message: "" });
+                    }}
+                    placeholder={ciscoCredential.configured ? "Nuevo client ID para reemplazar" : "client_id"}
+                    disabled={!isAdmin}
+                  />
+                </label>
+                <label className="space-y-1">
+                  <span className="text-xs font-medium text-muted-foreground">Cisco Client Secret</span>
+                  <Input
+                    type="password"
+                    value={ciscoClientSecret}
+                    onChange={(event) => {
+                      onCiscoClientSecretChange(event.target.value);
+                      onCiscoTokenCheckChange({ state: "idle", message: "" });
+                    }}
+                    placeholder={ciscoCredential.configured ? "Nuevo client secret para reemplazar" : "client_secret"}
+                    disabled={!isAdmin}
+                  />
+                </label>
+              </div>
               <CredentialCheckMessage status={ciscoTokenCheck} />
             </div>
 
@@ -3061,8 +3167,8 @@ function AssessmentWorkspace({
   onAddAsset,
   onImportAssets,
   onRemoveAsset,
+  onUpdateAsset,
   onToggleAssetIncluded,
-  onUpdateAssetTopologyLayer,
   onClearAssets,
   onRemoveDuplicateAssets,
   onEvidenceUpload,
@@ -3082,6 +3188,7 @@ function AssessmentWorkspace({
   onConsultLifecycleEox,
   onConsultSupportCoverage,
   onResetLifecycleEox,
+  onUpdateCollectionProfile,
   onUpdateOperationalAssessment,
   onUpdateFinding,
   onShareAssessment,
@@ -3109,8 +3216,8 @@ function AssessmentWorkspace({
   onAddAsset: (asset: Omit<InventoryAsset, "id">) => void;
   onImportAssets: (assets: Array<Omit<InventoryAsset, "id">>) => void;
   onRemoveAsset: (assetId: string) => void;
+  onUpdateAsset: (assetId: string, patch: InventoryAssetPatch) => void;
   onToggleAssetIncluded: (assetId: string) => void;
-  onUpdateAssetTopologyLayer: (assetId: string, topologyLayer: TopologyLayerId | null) => void;
   onClearAssets: () => void;
   onRemoveDuplicateAssets: () => void;
   onEvidenceUpload: (event: React.ChangeEvent<HTMLInputElement>) => void;
@@ -3130,6 +3237,7 @@ function AssessmentWorkspace({
   onConsultLifecycleEox: (recordId: string) => Promise<AssessmentRecord>;
   onConsultSupportCoverage: (recordId: string) => Promise<AssessmentRecord>;
   onResetLifecycleEox: (recordId: string) => void;
+  onUpdateCollectionProfile: (updater: (profile: CollectionCommandProfile) => CollectionCommandProfile) => void;
   onUpdateOperationalAssessment: (updater: (assessment: OperationalAssessment) => OperationalAssessment) => void;
   onUpdateFinding: (id: string, patch: Partial<Finding>) => void;
   onShareAssessment: (recordId: string, userId: string, permission: SharePermission) => void;
@@ -3251,8 +3359,8 @@ function AssessmentWorkspace({
             onAddAsset={canEdit ? onAddAsset : () => undefined}
             onImportAssets={canEdit ? onImportAssets : () => undefined}
             onRemoveAsset={canEdit ? onRemoveAsset : () => undefined}
+            onUpdateAsset={canEdit ? onUpdateAsset : () => undefined}
             onToggleAssetIncluded={canEdit ? onToggleAssetIncluded : () => undefined}
-            onUpdateAssetTopologyLayer={canEdit ? onUpdateAssetTopologyLayer : () => undefined}
             onClearAssets={canEdit ? onClearAssets : () => undefined}
             onRemoveDuplicateAssets={canEdit ? onRemoveDuplicateAssets : () => undefined}
           />
@@ -3260,7 +3368,7 @@ function AssessmentWorkspace({
 
         {activeTab === "SOW" && <SowTab record={record} documentTemplates={documentTemplates} />}
 
-        {activeTab === "Scripts" && <ScriptsTab record={record} />}
+        {activeTab === "Scripts" && <ScriptsTab record={record} canEdit={canEdit} onUpdateCollectionProfile={canEdit ? onUpdateCollectionProfile : () => undefined} />}
 
         {activeTab === "Data" && (
           <EvidenceTab
@@ -3276,7 +3384,7 @@ function AssessmentWorkspace({
           />
         )}
 
-        {activeTab === "Estado Actual" && <ArchitectureCurrentTab record={record} />}
+        {activeTab === "Estado Actual" && <ArchitectureCurrentTab record={record} currentUser={currentUser} />}
 
         {activeTab === "performance" && (
           <PerformanceTab
@@ -3424,8 +3532,8 @@ function AssessmentSharingPanel({
   );
 }
 
-function ArchitectureCurrentTab({ record }: { record: AssessmentRecord }) {
-  return <TopologyTab key={record.id} record={record} />;
+function ArchitectureCurrentTab({ record, currentUser }: { record: AssessmentRecord; currentUser: AppUser | null }) {
+  return <TopologyTab key={record.id} record={record} currentUser={currentUser} />;
 }
 
 function PerformanceTab({
@@ -3506,9 +3614,9 @@ function PerformanceTab({
         onResetPerformance={onResetPerformance}
       />
       <PerformanceKpiStickyStrip kpis={executiveData.kpiRings} analysisMode={performance.assessment.analysisMode} />
-      <PerformanceEmptyStateNotices dashboard={dashboard} performance={performance} />
+      <PerformanceEmptyStateNotices dashboard={dashboard} performance={performance} showQualityNotices={viewMode !== "executive"} />
       {viewMode === "executive" ? (
-        <PerformanceExecutiveFilters filters={filters} onChange={setFilters} onClear={clearFilters} />
+        <PerformanceExecutiveFilters filters={filters} deviceOptions={deviceOptions} onChange={setFilters} onClear={clearFilters} />
       ) : (
         <PerformanceTechnicalFilters
           filters={filters}
@@ -3634,7 +3742,7 @@ function PerformanceKpiStickyStrip({ kpis }: { kpis: PerformanceKpiRingData[]; a
 
   return (
     <div ref={stripRef} className="relative sticky top-0 z-20 rounded-md border border-border bg-background/95 p-2 shadow-sm backdrop-blur">
-      <div className="grid grid-cols-[repeat(6,minmax(118px,1fr))] gap-2 overflow-x-auto">
+      <div className="grid grid-cols-[repeat(4,minmax(150px,1fr))] gap-2 overflow-x-auto">
         {kpis.map((kpi) => (
           <PerformanceKpiCompactCard
             key={kpi.key}
@@ -3716,22 +3824,18 @@ function PerformanceKpiTooltip({ tooltip }: { tooltip: PerformanceKpiTooltipStat
 
 function PerformanceKpiIcon({ kpiKey }: { kpiKey: string }) {
   if (kpiKey === "risk") return <AlertTriangle size={16} />;
-  if (kpiKey === "confidence") return <ShieldCheck size={16} />;
-  if (kpiKey === "device-coverage") return <Network size={16} />;
-  if (kpiKey === "historical-depth") return <GitBranch size={16} />;
   if (kpiKey === "alert-interfaces") return <AlertTriangle size={16} />;
-  if (kpiKey === "validated") return <ClipboardList size={16} />;
+  if (kpiKey === "metric-alerts") return <Activity size={16} />;
+  if (kpiKey === "critical-priorities") return <ClipboardList size={16} />;
   return <Server size={16} />;
 }
 
 function kpiCompactLabel(kpi: PerformanceKpiRingData) {
   const labels: Record<string, string> = {
     risk: "Risk",
-    confidence: "Confidence",
-    "device-coverage": "Device",
-    "historical-depth": "Historical",
     "alert-interfaces": "Alert IFs",
-    validated: "Validated"
+    "metric-alerts": "Alert Metrics",
+    "critical-priorities": "Critical"
   };
   return labels[kpi.key] ?? kpi.label;
 }
@@ -3744,7 +3848,8 @@ function kpiCompactValue(kpi: PerformanceKpiRingData) {
 function kpiCompactContext(kpi: PerformanceKpiRingData) {
   if (kpi.key === "risk") return kpi.severity === "critical" ? "critico" : kpi.severity;
   if (kpi.key === "alert-interfaces") return "interfaces";
-  if (kpi.key === "validated") return "hallazgos";
+  if (kpi.key === "metric-alerts") return "metricas";
+  if (kpi.key === "critical-priorities") return "prioridades";
   return kpi.max === 100 ? "score" : `max ${kpi.max}`;
 }
 
@@ -3754,30 +3859,20 @@ const performanceKpiHelpContent: Record<string, { title: string; description: st
     description: "Riesgo agregado por saturacion, errores, drops, recursos e inestabilidad.",
     interpretation: "Mientras mas alto sea el valor, mayor es la probabilidad de degradacion o impacto operativo."
   },
-  confidence: {
-    title: "Confidence",
-    description: "Confianza del analisis segun cobertura, trazabilidad y profundidad de la evidencia.",
-    interpretation: "Un score bajo indica que se necesita mas evidencia antes de tomar conclusiones firmes."
-  },
-  "device-coverage": {
-    title: "Device Coverage",
-    description: "Equipos del alcance con al menos una metrica de performance reconocida.",
-    interpretation: "Ayuda a saber si el assessment representa la red completa o solo una parte del inventario."
-  },
-  "historical-depth": {
-    title: "Historical Depth",
-    description: "Evidencia historica disponible para analizar tendencias y recurrencia.",
-    interpretation: "0% indica que la data es principalmente puntual o snapshot, por lo que no confirma tendencias."
-  },
   "alert-interfaces": {
     title: "Alert IFs",
     description: "Interfaces con metricas en warning, high o critical.",
     interpretation: "Sirve para ubicar rapidamente donde hay senales de congestion o degradacion."
   },
-  validated: {
-    title: "Validated Findings",
-    description: "Hallazgos de performance confirmados por el arquitecto.",
-    interpretation: "Diferencia observaciones preliminares de hallazgos listos para reporte o plan de accion."
+  "metric-alerts": {
+    title: "Metricas con alerta",
+    description: "Metricas de performance sobre umbral warning, high o critical.",
+    interpretation: "Sirve para dimensionar el volumen de senales que requieren validacion."
+  },
+  "critical-priorities": {
+    title: "Prioridades criticas",
+    description: "Prioridades ejecutivas con severidad critical.",
+    interpretation: "Indica que sintomas deben convertirse primero en hallazgos validados."
   }
 };
 
@@ -3795,7 +3890,7 @@ function performanceKpiTooltipText(kpi: PerformanceKpiRingData) {
   ].join("\n");
 }
 
-function PerformanceEmptyStateNotices({ dashboard, performance }: { dashboard: ReturnType<typeof buildPerformanceDashboardData>; performance: PerformanceState }) {
+function PerformanceEmptyStateNotices({ dashboard, performance, showQualityNotices = true }: { dashboard: ReturnType<typeof buildPerformanceDashboardData>; performance: PerformanceState; showQualityNotices?: boolean }) {
   return (
     <div className="space-y-2">
       {dashboard.emptyState === "no_evidence" && (
@@ -3807,12 +3902,12 @@ function PerformanceEmptyStateNotices({ dashboard, performance }: { dashboard: R
       {dashboard.emptyState === "filtered_empty" && (
         <Panel><PanelBody><EmptyState icon={<Search size={24} />} title="No hay metricas que coincidan con los filtros actuales. Limpia filtros o amplia el criterio de busqueda." /></PanelBody></Panel>
       )}
-      {dashboard.hasSnapshotOnly && (
+      {showQualityNotices && dashboard.hasSnapshotOnly && (
         <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-950 dark:border-amber-500/40 dark:bg-amber-950/30 dark:text-amber-100">
           El analisis actual se basa en evidencia puntual. No permite confirmar tendencias historicas de saturacion o crecimiento.
         </div>
       )}
-      {performance.assessment.confidenceScore < 60 && (
+      {showQualityNotices && performance.assessment.confidenceScore < 60 && (
         <div className="rounded-md border border-sky-300 bg-sky-50 px-3 py-2 text-sm text-sky-950 dark:border-sky-500/40 dark:bg-sky-950/30 dark:text-sky-100">
           La cobertura de datos es limitada. Los resultados deben considerarse preliminares y la ausencia de evidencia reduce la confianza.
         </div>
@@ -3823,10 +3918,12 @@ function PerformanceEmptyStateNotices({ dashboard, performance }: { dashboard: R
 
 function PerformanceExecutiveFilters({
   filters,
+  deviceOptions,
   onChange,
   onClear
 }: {
   filters: PerformanceDashboardFilters;
+  deviceOptions: string[];
   onChange: (filters: PerformanceDashboardFilters) => void;
   onClear: () => void;
 }) {
@@ -3850,6 +3947,13 @@ function PerformanceExecutiveFilters({
             <option value="all">Todas</option>
             {(["utilization", "errors", "drops", "cpu", "memory", "instability", "qos"] as PerformanceHealthCategory[]).map((category) => <option key={category} value={category}>{category}</option>)}
           </select>
+          </div>
+          <div className="min-w-48 space-y-1.5">
+            <p className="text-[11px] font-semibold uppercase text-muted-foreground">Equipo</p>
+            <select className="h-9 w-44 rounded-md border border-input bg-background px-3 text-sm" value={filters.deviceId ?? ""} onChange={(event) => onChange({ ...filters, deviceId: event.target.value })}>
+              <option value="">Todos</option>
+              {deviceOptions.map((device) => <option key={device} value={device}>{device}</option>)}
+            </select>
           </div>
           <label className="flex h-9 items-center gap-2 rounded-md border border-border bg-muted/20 px-3 text-sm text-muted-foreground">
             <input type="checkbox" className="h-4 w-4 accent-primary" checked={filters.showVisibilityGaps !== false} onChange={(event) => onChange({ ...filters, showVisibilityGaps: event.target.checked })} />
@@ -3901,18 +4005,24 @@ function PerformanceExecutiveCommandCenter({
   onOpenTechnical: () => void;
 }) {
   const dashboard = data.dashboard;
+  const [expandedPriorityId, setExpandedPriorityId] = useState<string | null>(null);
+  const [processingOpen, setProcessingOpen] = useState(false);
   return (
     <div className="space-y-4">
-      <PerformanceExecutiveNarrativeCard data={data} />
-      <PerformanceTopPriorities priorities={data.topPriorities} onSelect={onSelectPriority} />
+      <PerformanceTopPriorities
+        priorities={data.topPriorities}
+        expandedPriorityId={expandedPriorityId}
+        onToggle={(priorityId) => setExpandedPriorityId((current) => current === priorityId ? null : priorityId)}
+        onSelect={onSelectPriority}
+      />
       <PerformanceExecutiveHeatmap data={data.executiveHeatmap} selectedCategory={selectedCategory} onSelectCategory={onSelectCategory} onOpenTechnical={onOpenTechnical} />
-      <PerformanceProcessingFunnel stages={data.processingFunnel} />
-      <div className="grid gap-4 xl:grid-cols-3">
+      <div className="grid gap-4 xl:grid-cols-2">
         <PerformanceDistributionPanel title="Severidad" data={data.severityDistribution} />
-        <PerformanceDistributionPanel title="Fuente de evidencia" data={data.sourceDistribution} />
         <PerformanceDistributionPanel title="Tipo de problema" data={data.categoryBreakdown} />
       </div>
-      <PerformanceExecutiveActionSummary priorities={data.topPriorities} insightCount={dashboard.insights.length} onSelect={onSelectPriority} />
+      <PerformanceEvidenceQualityPanel dashboard={dashboard} />
+      <PerformanceExecutiveNarrativeCard data={data} />
+      <PerformanceProcessingFunnel stages={data.processingFunnel} open={processingOpen} onOpenChange={setProcessingOpen} />
     </div>
   );
 }
@@ -3921,49 +4031,31 @@ function PerformanceExecutiveNarrativeCard({ data }: { data: PerformanceExecutiv
   const narrative = data.narrative;
   return (
     <Panel>
-      <PanelHeader className="flex flex-wrap items-start justify-between gap-3">
+      <PanelBody className="grid gap-3 p-4 lg:grid-cols-[1.2fr_1fr_auto] lg:items-center">
         <div>
-          <h2 className="text-sm font-semibold">Resumen interpretativo</h2>
-          <p className="text-xs text-muted-foreground">Lectura ejecutiva basada en evidencia disponible, cobertura y limitaciones de confianza.</p>
+          <p className="text-[11px] font-semibold uppercase text-muted-foreground">Lectura principal</p>
+          <p className="mt-1 text-sm font-semibold leading-relaxed text-foreground">{narrative.status}</p>
         </div>
-        <Badge tone={data.dashboard.dataCoverage.confidenceScore >= 70 ? "success" : data.dashboard.dataCoverage.confidenceScore >= 45 ? "warning" : "danger"}>
-          {data.dashboard.dataCoverage.confidenceScore}% confianza
-        </Badge>
-      </PanelHeader>
-      <PanelBody className="space-y-4">
-        <div className="grid gap-3 xl:grid-cols-[1.15fr_0.85fr]">
-          <div className="rounded-md border border-rose-400/40 bg-rose-500/10 p-4">
-            <p className="text-[11px] font-semibold uppercase text-rose-200">Lectura principal</p>
-            <p className="mt-2 text-base font-semibold leading-snug text-foreground">{narrative.status}</p>
-            <p className="mt-2 text-sm leading-relaxed text-muted-foreground">Requiere validacion tecnica priorizada antes de convertir sintomas en hallazgos finales.</p>
-          </div>
-          <div className="rounded-md border border-primary/30 bg-primary/10 p-4">
-            <p className="text-[11px] font-semibold uppercase text-primary">Accion recomendada</p>
-            <p className="mt-2 text-sm font-semibold leading-relaxed text-foreground">{narrative.recommendedAction}</p>
-          </div>
+        <div>
+          <p className="text-[11px] font-semibold uppercase text-muted-foreground">Accion recomendada</p>
+          <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{narrative.recommendedAction}</p>
         </div>
-
-        <div className="grid gap-3 md:grid-cols-3">
-          <ExecutiveBriefTile title="Causa dominante" value={narrative.primaryCause} />
-          <ExecutiveBriefTile title="Confianza" value={narrative.confidence} />
-          <ExecutiveBriefTile title="Alcance afectado" value={narrative.affectedArea} />
+        <div className="grid gap-2 sm:grid-cols-3 lg:min-w-[360px]">
+          <ExecutiveMiniDatum label="Causa dominante" value={narrative.primaryCause} />
+          <ExecutiveMiniDatum label="Confianza" value={narrative.confidence} />
+          <ExecutiveMiniDatum label="Alcance afectado" value={narrative.affectedArea} />
         </div>
-
-        <div className="grid gap-2 sm:grid-cols-3">
-          <ExecutiveCoverageTile label="Device Coverage" value={`${data.dashboard.dataCoverage.deviceCoverageScore}%`} helper={`${data.dashboard.dataCoverage.withData} con data · ${data.dashboard.dataCoverage.withoutData} sin data`} severity={data.dashboard.dataCoverage.deviceCoverageScore >= 70 ? "normal" : "high"} />
-          <ExecutiveCoverageTile label="Historical Depth" value={`${data.dashboard.dataCoverage.historicalCoverageScore}%`} helper={`${data.dashboard.dataCoverage.historicalAvailable} historico · ${data.dashboard.dataCoverage.snapshotOnly} solo snapshot`} severity={data.dashboard.dataCoverage.historicalCoverageScore >= 30 ? "warning" : "high"} />
-          <ExecutiveCoverageTile label="Data Traceability" value={`${data.dashboard.dataCoverage.traceabilityScore}%`} helper={`${data.dashboard.dataCoverage.unknownSourceMetrics} sourceType unknown`} severity={data.dashboard.dataCoverage.traceabilityScore >= 70 ? "normal" : "high"} />
-        </div>
-
-        {(narrative.limitation || narrative.visibilityGap || narrative.traceabilityGap) && (
-          <div className="grid gap-2">
-            {narrative.limitation && <ExecutiveNotice tone="warning" title="Limitacion historica" text={narrative.limitation} />}
-            {narrative.visibilityGap && <ExecutiveNotice tone="info" title="Brecha de visibilidad" text={narrative.visibilityGap} />}
-            {narrative.traceabilityGap && <ExecutiveNotice tone="danger" title="Brecha de trazabilidad" text={narrative.traceabilityGap} />}
-          </div>
-        )}
       </PanelBody>
     </Panel>
+  );
+}
+
+function ExecutiveMiniDatum({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-border bg-muted/15 px-2 py-2">
+      <p className="text-[10px] font-semibold uppercase text-muted-foreground">{label}</p>
+      <p className="mt-1 line-clamp-2 text-xs font-semibold leading-snug text-foreground">{value}</p>
+    </div>
   );
 }
 
@@ -4000,68 +4092,230 @@ function ExecutiveCoverageTile({ label, value, helper, severity }: { label: stri
   );
 }
 
-function PerformanceTopPriorities({ priorities, onSelect }: { priorities: PerformanceTopPriority[]; onSelect: (priority: PerformanceTopPriority) => void }) {
+function PerformanceEvidenceQualityPanel({ dashboard }: { dashboard: ReturnType<typeof buildPerformanceDashboardData> }) {
+  const coverage = dashboard.dataCoverage;
+  const confidenceSeverity: PerformanceSeverity = coverage.confidenceScore >= 70 ? "normal" : coverage.confidenceScore >= 45 ? "warning" : "high";
+  const traceabilityItems = [
+    `${coverage.unknownSourceMetrics} sourceType unknown`,
+    `${coverage.metricsWithoutCommand} metricas sin comando`
+  ];
+  const visibilityGaps = dashboard.visibilityGaps.length > 0 ? dashboard.visibilityGaps : ["Sin brechas de visibilidad registradas."];
+  const criticalInterfaceGaps = coverage.criticalInterfacesWithoutEvidenceRefs.length > 0
+    ? coverage.criticalInterfacesWithoutEvidenceRefs
+    : ["Sin interfaces criticas pendientes de evidencia."];
+  const notices = [
+    dashboard.hasSnapshotOnly ? "Analisis basado solo en snapshot; no confirma recurrencia ni crecimiento sostenido." : "",
+    coverage.confidenceScore < 60 ? "Confianza baja: priorizar recoleccion antes de validar hallazgos no criticos." : "",
+    dashboard.hasHistoricalData ? "Hay evidencia historica disponible para soportar tendencias en parte del alcance." : ""
+  ].filter(Boolean);
+
   return (
     <Panel>
-      <PanelHeader>
+      <PanelHeader className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="text-sm font-semibold">Top 5 prioridades</h2>
-          <p className="text-xs text-muted-foreground">Agrupadas por patron de problema, activo y accion recomendada.</p>
+          <h2 className="text-sm font-semibold">Calidad de evidencia</h2>
+          <p className="text-xs text-muted-foreground">Confianza, cobertura, historico, trazabilidad y brechas accionables en un solo bloque.</p>
         </div>
+        <Badge tone={performanceSeverityTone(confidenceSeverity)}>{coverage.confidenceScore}% confianza</Badge>
+      </PanelHeader>
+      <PanelBody className="space-y-4">
+        <div className="grid gap-3 lg:grid-cols-[0.9fr_repeat(3,1fr)]">
+          <div className="rounded-md border border-primary/30 bg-primary/10 p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-[11px] font-semibold uppercase text-primary">Confianza global</p>
+                <p className="mt-1 text-3xl font-semibold text-foreground">{coverage.confidenceScore}%</p>
+              </div>
+              <ShieldCheck className={cn("h-9 w-9", performanceSeverityText(confidenceSeverity))} />
+            </div>
+            <div className="mt-3 h-2 overflow-hidden rounded-full bg-muted">
+              <div className={cn("h-full rounded-full", performanceSeverityBar(confidenceSeverity))} style={{ width: `${coverage.confidenceScore}%` }} />
+            </div>
+          </div>
+          <EvidenceQualityTile title="Cobertura de equipos" value={`${coverage.withData} con data`} helper={`${coverage.withoutData} sin data`} icon={<Server size={18} />} severity={coverage.withoutData === 0 ? "normal" : "warning"} />
+          <EvidenceQualityTile title="Profundidad historica" value={`${coverage.historicalAvailable} historico`} helper={`${coverage.snapshotOnly} solo snapshot`} icon={<GitBranch size={18} />} severity={coverage.historicalCoverageScore >= 30 ? "warning" : "high"} />
+          <EvidenceQualityTile title="Trazabilidad" value={traceabilityItems[0]} helper={traceabilityItems[1]} icon={<FileText size={18} />} severity={coverage.traceabilityScore >= 70 ? "normal" : "high"} />
+        </div>
+
+        <div className="grid gap-3 lg:grid-cols-3">
+          <EvidenceGapList title="Brechas de visibilidad" icon={<AlertTriangle size={13} />} items={visibilityGaps} />
+          <CriticalInterfaceGapPills items={criticalInterfaceGaps} />
+          <EvidenceGapList title="Avisos integrados" icon={<ClipboardList size={13} />} items={notices.length > 0 ? notices : ["Sin avisos de snapshot-only o baja confianza."]} />
+        </div>
+      </PanelBody>
+    </Panel>
+  );
+}
+
+function EvidenceQualityTile({ title, value, helper, icon, severity }: { title: string; value: string; helper: string; icon: React.ReactNode; severity: PerformanceSeverity }) {
+  return (
+    <div className={cn("rounded-md border border-border bg-card px-3 py-3", performanceSeveritySubtleBg(severity))}>
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <p className="text-[11px] font-semibold uppercase text-muted-foreground">{title}</p>
+          <p className="mt-2 text-lg font-semibold text-foreground">{value}</p>
+          <p className="mt-1 text-xs text-muted-foreground">{helper}</p>
+        </div>
+        <span className={performanceSeverityText(severity)}>{icon}</span>
+      </div>
+    </div>
+  );
+}
+
+function EvidenceGapList({ title, icon, items }: { title: string; icon: React.ReactNode; items: string[] }) {
+  return (
+    <div className="rounded-md border border-border bg-muted/15 p-3">
+      <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase text-muted-foreground">
+        {icon}
+        {title}
+      </p>
+      <div className="mt-2 space-y-2">
+        {items.map((item) => (
+          <div key={item} className="flex gap-2 text-xs leading-relaxed text-foreground">
+            <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
+            <span>{item}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CriticalInterfaceGapPills({ items }: { items: string[] }) {
+  const grouped = groupCriticalInterfaceRefs(items);
+  return (
+    <div className="rounded-md border border-border bg-muted/15 p-3">
+      <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase text-muted-foreground">
+        <Network size={13} />
+        Interfaces criticas sin evidencia
+      </p>
+      <div className="mt-2 space-y-2">
+        {grouped.map((group) => (
+          <div key={group.device} className="rounded-md border border-border/80 bg-card/60 px-2 py-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-semibold text-foreground">{group.device}</span>
+              <span className="text-[10px] font-semibold uppercase text-muted-foreground">{group.interfaces.length} IFs</span>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {group.interfaces.map((interfaceName) => (
+                <span key={`${group.device}:${interfaceName}`} className="inline-flex h-6 items-center rounded-md border border-amber-300/40 bg-amber-500/10 px-2 text-[11px] font-semibold text-amber-300">
+                  {interfaceName}
+                </span>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function groupCriticalInterfaceRefs(items: string[]) {
+  const grouped = new Map<string, string[]>();
+  for (const item of items) {
+    const [deviceRaw, interfaceRaw] = item.split(" · ");
+    const device = deviceRaw?.trim() || "Sin dispositivo";
+    const interfaceName = interfaceRaw?.trim() || item;
+    grouped.set(device, [...(grouped.get(device) ?? []), interfaceName]);
+  }
+  return Array.from(grouped.entries())
+    .map(([device, interfaces]) => ({ device, interfaces: Array.from(new Set(interfaces)).sort() }))
+    .sort((left, right) => left.device.localeCompare(right.device));
+}
+
+function PerformanceTopPriorities({
+  priorities,
+  expandedPriorityId,
+  onToggle,
+  onSelect
+}: {
+  priorities: PerformanceTopPriority[];
+  expandedPriorityId: string | null;
+  onToggle: (priorityId: string) => void;
+  onSelect: (priority: PerformanceTopPriority) => void;
+}) {
+  return (
+    <Panel>
+      <PanelHeader className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold">Prioridades accionables</h2>
+          <p className="text-xs text-muted-foreground">Problema, activo, estado, umbral y evidencia para convertir sintomas en hallazgos.</p>
+        </div>
+        <Badge tone="info">{priorities.length} prioridades</Badge>
       </PanelHeader>
       <PanelBody className="space-y-2">
         {priorities.length === 0 ? (
           <EmptyState icon={<ShieldCheck size={22} />} title="Sin prioridades con la evidencia actual" />
         ) : priorities.map((priority) => (
-          <button
+          <div
             key={priority.id}
-            className="group relative w-full overflow-hidden rounded-md border border-border bg-card px-3 py-2 text-left transition-colors hover:border-primary/60 hover:bg-muted/20"
-            onClick={() => onSelect(priority)}
+            className={cn(
+              "group relative overflow-hidden rounded-md border bg-card text-left transition-colors hover:border-primary/60 hover:bg-muted/20",
+              expandedPriorityId === priority.id ? "border-primary/60 ring-1 ring-primary/20" : "border-border"
+            )}
           >
             <span className={cn("absolute inset-y-0 left-0 w-1", performanceSeverityBar(priority.severity))} />
-            <div className="grid gap-3 pl-2 lg:grid-cols-[minmax(240px,1.25fr)_minmax(220px,1fr)_minmax(220px,1fr)_auto] lg:items-center">
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="rounded border border-border bg-muted/30 px-2 py-0.5 text-[11px] font-semibold text-muted-foreground">#{priority.rank}</span>
-                  <span className="text-xs font-semibold text-muted-foreground">{performanceInsightLabel(priority.category)}</span>
+            <button className="w-full px-3 py-2 text-left" onClick={() => onToggle(priority.id)}>
+              <div className="grid gap-3 pl-2 lg:grid-cols-[minmax(220px,1fr)_520px_216px] lg:items-center">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="rounded border border-border bg-muted/30 px-2 py-0.5 text-[11px] font-semibold text-muted-foreground">#{priority.rank}</span>
+                    <span className="text-xs font-semibold uppercase text-muted-foreground">{performanceInsightLabel(priority.category)}</span>
+                    {expandedPriorityId === priority.id && <Badge tone="info">seleccionada</Badge>}
+                  </div>
+                  <p className="mt-1 line-clamp-2 text-sm font-semibold leading-snug text-foreground">{priority.title}</p>
                 </div>
-                <p className="mt-1 line-clamp-1 text-sm font-semibold leading-snug text-foreground">{priority.title}</p>
-              </div>
 
-              <div className="grid grid-cols-3 gap-2">
-                <PriorityInlineMetric label="Activo" value={priority.affectedDevices.length || priority.affectedTarget} />
-                <PriorityInlineMetric label="IFs" value={priority.affectedInterfaces.length} />
-                <PriorityInlineMetric label="Metricas" value={priority.affectedMetricCount} />
-              </div>
+                <div className="grid gap-2 sm:grid-cols-[140px_92px_116px_160px] lg:w-[520px]">
+                  <PriorityInlineMetric label="Activo" value={priority.affectedTarget} />
+                  <PriorityInlineMetric label="IFs" value={priority.affectedInterfaces.length} />
+                  <PriorityInlineMetric label="Metricas" value={priority.affectedMetricCount} />
+                  <PriorityInlineMetric label="Observado" value={priority.observedSummary} strong />
+                </div>
 
-              <div className="min-w-0 space-y-1 text-xs leading-snug">
-                <p className="line-clamp-1 text-foreground">
-                  <span className="font-semibold text-muted-foreground">Impacto: </span>
-                  {priority.impact}
-                </p>
-                <p className="line-clamp-1 text-muted-foreground">
-                  <span className="font-semibold">Accion: </span>
-                  {priority.recommendation}
-                </p>
+                <div className="flex w-full shrink-0 flex-wrap items-center gap-1 sm:w-[216px] sm:justify-end lg:w-[216px]">
+                  <Badge tone={performanceSeverityTone(priority.severity)}>{priority.severity}</Badge>
+                  <Badge tone={performancePriorityStatusTone(priority.validationStatus)}>{performancePriorityStatusLabel(priority.validationStatus)}</Badge>
+                  <Badge tone={priority.confidence >= 80 ? "success" : priority.confidence >= 60 ? "warning" : "danger"}>{priority.confidence}%</Badge>
+                  {expandedPriorityId === priority.id ? <ChevronDown size={16} className="text-muted-foreground" /> : <ChevronRight size={16} className="text-muted-foreground" />}
+                </div>
               </div>
+            </button>
 
-              <div className="flex shrink-0 flex-wrap items-center gap-1 lg:justify-end">
-                <Badge tone={performanceSeverityTone(priority.severity)}>{priority.severity}</Badge>
-                <Badge tone={priority.sourceType === "architect_validated" ? "success" : priority.sourceType === "ai_suggested" ? "info" : "neutral"}>{priority.confidence}%</Badge>
+            {expandedPriorityId === priority.id && (
+              <div className="ml-4 grid gap-3 border-t border-border px-3 py-3 lg:grid-cols-[1fr_1fr_0.95fr]">
+                <PriorityTextBlock label="Impacto" text={priority.impact} />
+                <PriorityTextBlock label="Accion recomendada" text={priority.recommendation} />
+                <div className="rounded-md border border-border bg-muted/15 px-3 py-2">
+                  <p className="text-[10px] font-semibold uppercase text-muted-foreground">Evidencia</p>
+                  <div className="mt-1 space-y-1 text-xs leading-relaxed text-foreground">
+                    <p><span className="font-semibold text-muted-foreground">Comando:</span> {priority.evidenceCommand ?? "comando no identificado"}</p>
+                    <p><span className="font-semibold text-muted-foreground">Archivo:</span> {priority.evidenceFile ?? "sin archivo asociado"}</p>
+                    <p><span className="font-semibold text-muted-foreground">Muestra:</span> {priority.sampleType ?? "sin muestra"} · {priority.timeWindow ?? "sin ventana"}</p>
+                  </div>
+                </div>
+                <PriorityTextBlock label="Causa probable" text={priority.probableCause} />
+                <PriorityTextBlock label="Remediacion" text={priority.remediationCategory} />
+                <div className="flex items-end justify-end">
+                  <Button variant="secondary" size="sm" onClick={() => onSelect(priority)} disabled={!priority.point}>
+                    <Search size={14} />
+                    Ver metrica
+                  </Button>
+                </div>
               </div>
-            </div>
-          </button>
+            )}
+          </div>
         ))}
       </PanelBody>
     </Panel>
   );
 }
 
-function PriorityInlineMetric({ label, value }: { label: string; value: React.ReactNode }) {
+function PriorityInlineMetric({ label, value, strong = false }: { label: string; value: React.ReactNode; strong?: boolean }) {
   return (
     <div className="rounded-md border border-border/80 bg-muted/10 px-2 py-1">
       <p className="text-[10px] font-semibold uppercase text-muted-foreground">{label}</p>
-      <p className="truncate text-sm font-semibold text-foreground">{value}</p>
+      <p className={cn("truncate text-sm font-semibold text-foreground", strong && "text-amber-300")}>{value}</p>
     </div>
   );
 }
@@ -4101,7 +4355,7 @@ function PerformanceExecutiveHeatmap({
         ) : (
           <>
             <div className="w-full overflow-x-auto">
-              <div className="grid min-w-[820px] gap-1" style={{ gridTemplateColumns: `180px repeat(${data.categories.length}, minmax(86px, 1fr))` }}>
+              <div className="grid min-w-[940px] gap-1" style={{ gridTemplateColumns: `180px repeat(${data.categories.length}, minmax(120px, 1fr))` }}>
                 <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] font-semibold uppercase text-muted-foreground">Dispositivo</div>
                 {data.categories.map((category) => (
                   <button key={category} className={cn("rounded-md border border-border bg-muted/50 px-2 py-2 text-[11px] font-semibold uppercase text-muted-foreground", selectedCategory === category && "border-primary text-primary")} onClick={() => onSelectCategory(category)}>
@@ -4114,8 +4368,12 @@ function PerformanceExecutiveHeatmap({
                     {data.categories.map((category) => {
                       const cell = data.cells.find((item) => item.deviceId === device && item.category === category);
                       return (
-                        <button key={`${device}:${category}`} className={cn("h-10 rounded-md border text-xs font-semibold hover:border-primary/60", performanceSeverityHeatmap(cell?.severity ?? "normal"))} title={`${device} ${performanceHealthCategoryLabel(category)}: ${cell?.metrics.length ?? 0} metrica(s)`} onClick={() => onSelectCategory(category)}>
-                          {cell?.metrics.length ?? 0}
+                        <button key={`${device}:${category}`} className={cn("min-h-14 rounded-md border px-2 py-1 text-left text-xs font-semibold hover:border-primary/60", performanceSeverityHeatmap(cell?.severity ?? "normal"))} title={`${device} ${performanceHealthCategoryLabel(category)}: ${cell?.metrics.length ?? 0} metrica(s)`} onClick={() => onSelectCategory(category)}>
+                          <span className="flex items-center justify-between gap-2">
+                            <span>{cell?.metrics.length ?? 0}</span>
+                            <span className="text-[10px] uppercase opacity-70">{cell?.severity ?? "normal"}</span>
+                          </span>
+                          <span className="mt-1 block truncate text-[11px] font-medium opacity-90">{performanceHeatmapWorstValue(cell)}</span>
                         </button>
                       );
                     })}
@@ -4138,56 +4396,74 @@ function PerformanceExecutiveHeatmap({
   );
 }
 
-function PerformanceProcessingFunnel({ stages }: { stages: PerformanceProcessingFunnelStage[] }) {
+function PerformanceProcessingFunnel({ stages, open, onOpenChange }: { stages: PerformanceProcessingFunnelStage[]; open: boolean; onOpenChange: (open: boolean) => void }) {
   const max = Math.max(1, ...stages.map((stage) => stage.value));
   return (
     <Panel>
-      <PanelHeader>
+      <button className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left" onClick={() => onOpenChange(!open)}>
         <div>
-          <h2 className="text-sm font-semibold">Funnel de procesamiento</h2>
-          <p className="text-xs text-muted-foreground">Explica cobertura, confianza y conversion desde evidencia hasta hallazgos.</p>
+          <h2 className="text-sm font-semibold">Diagnostico del procesamiento</h2>
+          <p className="text-xs text-muted-foreground">Telemetria secundaria del pipeline, colapsada por defecto.</p>
         </div>
-      </PanelHeader>
-      <PanelBody>
-        <div className="grid gap-2 md:grid-cols-4 xl:grid-cols-8">
-          {stages.map((stage) => (
-            <div key={stage.key} className="rounded-md border border-border bg-card p-3" title={stage.helper}>
-              <div className="flex items-start justify-between gap-2">
-                <p className="text-[11px] font-semibold uppercase text-muted-foreground">{stage.label}</p>
-                <Badge tone={performanceSeverityTone(stage.severity)}>{stage.value}</Badge>
+        {open ? <ChevronDown className="text-muted-foreground" size={18} /> : <ChevronRight className="text-muted-foreground" size={18} />}
+      </button>
+      {open && (
+        <PanelBody className="border-t border-border">
+          <div className="grid gap-2 md:grid-cols-4 xl:grid-cols-8">
+            {stages.map((stage) => (
+              <div key={stage.key} className="rounded-md border border-border bg-card p-3" title={stage.helper}>
+                <div className="flex items-start justify-between gap-2">
+                  <p className="text-[11px] font-semibold uppercase text-muted-foreground">{stage.label}</p>
+                  <Badge tone={performanceSeverityTone(stage.severity)}>{stage.value}</Badge>
+                </div>
+                <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted">
+                  <div className={cn("h-full rounded-full", performanceSeverityBar(stage.severity))} style={{ width: `${Math.max(8, (stage.value / max) * 100)}%` }} />
+                </div>
               </div>
-              <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted">
-                <div className={cn("h-full rounded-full", performanceSeverityBar(stage.severity))} style={{ width: `${Math.max(8, (stage.value / max) * 100)}%` }} />
-              </div>
-            </div>
-          ))}
-        </div>
-      </PanelBody>
+            ))}
+          </div>
+        </PanelBody>
+      )}
     </Panel>
   );
 }
 
 function PerformanceDistributionPanel({ title, data }: { title: string; data: PerformanceDistributionDatum[] }) {
-  const total = Math.max(1, data.reduce((sum, item) => sum + item.value, 0));
+  const visibleData = data.filter((item) => item.value > 0).slice(0, 6);
+  const totalValue = data.reduce((sum, item) => sum + item.value, 0);
+  const total = Math.max(1, totalValue);
   return (
     <Panel>
-      <PanelHeader>
-        <h2 className="text-sm font-semibold">{title}</h2>
+      <PanelHeader className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold">{title}</h2>
+          <p className="text-xs text-muted-foreground">Distribucion de metricas filtradas</p>
+        </div>
+        <Badge tone="neutral">{totalValue} metricas</Badge>
       </PanelHeader>
-      <PanelBody className="space-y-2">
-        {data.filter((item) => item.value > 0).length === 0 ? (
+      <PanelBody className="space-y-3">
+        {visibleData.length === 0 ? (
           <EmptyState icon={<Network size={22} />} title="Sin datos para distribuir" />
-        ) : data.filter((item) => item.value > 0).slice(0, 6).map((item, index) => (
-          <div key={item.key} className="space-y-1">
-            <div className="flex items-center justify-between gap-2 text-xs">
-              <span className="truncate text-muted-foreground">{item.label}</span>
-              <span className="font-semibold">{item.value}</span>
+        ) : visibleData.map((item, index) => {
+          const percent = Math.round((item.value / total) * 100);
+          return (
+            <div key={item.key} className="rounded-md border border-border/80 bg-muted/10 px-3 py-2">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="truncate text-xs font-semibold text-foreground">{performanceDistributionLabel(item.label)}</p>
+                  <p className="mt-0.5 text-[11px] text-muted-foreground">{percent}% del total filtrado</p>
+                </div>
+                <div className="shrink-0 text-right">
+                  <p className="text-base font-semibold leading-none text-foreground">{item.value}</p>
+                  <p className="mt-0.5 text-[10px] font-semibold uppercase text-muted-foreground">metricas</p>
+                </div>
+              </div>
+              <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted">
+                <div className={cn("h-full rounded-full transition-all duration-500", item.severity ? performanceSeverityBar(item.severity) : stackedBarColor(index))} style={{ width: `${Math.max(4, percent)}%` }} />
+              </div>
             </div>
-            <div className="h-2 overflow-hidden rounded-full bg-muted">
-              <div className={cn("h-full rounded-full", item.severity ? performanceSeverityBar(item.severity) : stackedBarColor(index))} style={{ width: `${(item.value / total) * 100}%` }} />
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </PanelBody>
     </Panel>
   );
@@ -5179,6 +5455,23 @@ function performanceHealthCategoryLabel(category: PerformanceHealthCategory) {
   return labels[category];
 }
 
+function performanceDistributionLabel(label: string) {
+  const labels: Record<string, string> = {
+    critical: "Critical",
+    high: "High",
+    warning: "Warning",
+    normal: "Normal",
+    utilization: "Utilizacion",
+    errors: "Errores",
+    drops: "Drops",
+    cpu: "CPU",
+    memory: "Memoria",
+    instability: "Inestabilidad",
+    qos: "QoS"
+  };
+  return labels[label] ?? label.replace(/_/g, " ");
+}
+
 function performanceSeverityCssColor(severity: PerformanceSeverity) {
   const colors: Record<PerformanceSeverity, string> = {
     normal: "#22c55e",
@@ -5195,6 +5488,16 @@ function performanceSeveritySubtleBg(severity: PerformanceSeverity) {
     warning: "bg-sky-500/5",
     high: "bg-amber-500/5",
     critical: "bg-rose-500/5"
+  };
+  return classes[severity];
+}
+
+function performanceSeverityText(severity: PerformanceSeverity) {
+  const classes: Record<PerformanceSeverity, string> = {
+    normal: "text-emerald-300",
+    warning: "text-sky-300",
+    high: "text-amber-300",
+    critical: "text-rose-300"
   };
   return classes[severity];
 }
@@ -5288,6 +5591,20 @@ function performanceSeverityTone(severity: PerformanceSeverity): "neutral" | "in
   return "success";
 }
 
+function performancePriorityStatusTone(status: PerformanceTopPriority["validationStatus"]): "neutral" | "info" | "success" | "warning" | "danger" {
+  if (status === "validated") return "success";
+  if (status === "ai_suggested") return "info";
+  if (status === "discarded") return "danger";
+  if (status === "draft") return "neutral";
+  return "neutral";
+}
+
+function performancePriorityStatusLabel(status: PerformanceTopPriority["validationStatus"]) {
+  if (status === "ai_suggested") return "ai suggested";
+  if (status === "deterministic") return "draft";
+  return status;
+}
+
 function performanceSeverityBorder(severity: PerformanceSeverity) {
   const classes: Record<PerformanceSeverity, string> = {
     normal: "border-emerald-300/50",
@@ -5328,6 +5645,19 @@ function performanceSeverityHeatmap(severity: PerformanceSeverity) {
   return classes[severity];
 }
 
+function performanceHeatmapWorstValue(cell: PerformanceExecutiveHeatmapData["cells"][number] | undefined) {
+  if (!cell || cell.metrics.length === 0) return "-";
+  const worst = [...cell.metrics].sort((left, right) => performanceSeverityNumericScore(right.severityHint ?? metricSeverityFromPointValue(right.value, right.thresholdWarning, right.thresholdCritical)) - performanceSeverityNumericScore(left.severityHint ?? metricSeverityFromPointValue(left.value, left.thresholdWarning, left.thresholdCritical)) || right.value - left.value)[0];
+  const critical = worst.thresholdCritical ?? 100;
+  return `${worst.metricType.replace(/_/g, " ")} ${formatPerformanceMetricValue(worst.value, worst.unit)} / ${formatPerformanceMetricValue(critical, worst.unit)} crit`;
+}
+
+function formatPerformanceMetricValue(value: number, unit: string) {
+  if (!Number.isFinite(value) || value >= Number.MAX_SAFE_INTEGER / 2) return "N/A";
+  const rounded = Math.abs(value) >= 100 ? Math.round(value) : Math.round(value * 10) / 10;
+  return unit === "%" ? `${rounded}${unit}` : `${rounded} ${unit}`;
+}
+
 function stackedBarColor(index: number) {
   return ["bg-sky-500", "bg-amber-500", "bg-rose-500", "bg-violet-500", "bg-emerald-500", "bg-slate-500"][index % 6];
 }
@@ -5360,9 +5690,13 @@ function PerformanceChartCard({ chart }: { chart: PerformanceChartData }) {
   );
 }
 
-function TopologyTab({ record }: { record: AssessmentRecord }) {
+function TopologyTab({ record, currentUser }: { record: AssessmentRecord; currentUser: AppUser | null }) {
+  const isCatalogAdmin = currentUser?.role === "admin";
   const [view, setView] = useState<TopologyView>("relations");
+  const [deviceCatalog, setDeviceCatalog] = useState<{ profiles: DeviceVisualProfile[]; overrideIds: string[] }>(() => ({ profiles: DEFAULT_DEVICE_PROFILES, overrideIds: [] }));
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedInterfaceKey, setSelectedInterfaceKey] = useState<string | null>(null);
+  const [selectedInterfaceAnchor, setSelectedInterfaceAnchor] = useState<TopologyInterfacePopoverAnchor | null>(null);
   const [detailPanelOpen, setDetailPanelOpen] = useState(false);
   const [layerOverrides, setLayerOverrides] = useState<Record<string, TopologyLayerId>>(() => readTopologyLayerOverrides(record.id));
   const [visibleLayerIds, setVisibleLayerIds] = useState<Set<TopologyLayerId>>(() => new Set(topologyLayerOrder));
@@ -5377,6 +5711,10 @@ function TopologyTab({ record }: { record: AssessmentRecord }) {
   const focusedNodeIds = selectedNode ? directTopologyNodeIds(graph, selectedNode.id) : new Set<string>();
   const focusedEdgeIds = selectedNode ? directTopologyEdgeIds(graph, selectedNode.id) : new Set<string>();
   const hasRelations = effectiveParsed.relations.length > 0;
+  const hasInterfaces = effectiveParsed.interfaces.length > 0;
+  const hasTopologyData = hasRelations || hasInterfaces || effectiveParsed.devices.length > 0 || record.targetInventory.some((asset) => asset.included);
+  const interfaceDevices = useMemo(() => buildTopologyInterfaceDevices(record, deviceCatalog.profiles), [record, deviceCatalog.profiles]);
+  const selectedInterface = selectedInterfaceKey ? findTopologyInterfacePort(interfaceDevices, selectedInterfaceKey) : null;
   const graphViewportWidth = detailPanelOpen ? 940 : 1280;
   const graphViewportHeight = 680;
   const graphBounds = useMemo(() => topologyVisibleBounds(graph), [graph]);
@@ -5392,6 +5730,26 @@ function TopologyTab({ record }: { record: AssessmentRecord }) {
   useEffect(() => {
     writeTopologyLayerOverrides(record.id, layerOverrides);
   }, [layerOverrides, record.id]);
+
+  const loadDeviceCatalog = useCallback(async () => {
+    try {
+      const response = await fetch("/api/device-catalog", { cache: "no-store" });
+      if (!response.ok) return;
+      const payload = await response.json();
+      if (Array.isArray(payload?.profiles)) {
+        setDeviceCatalog({ profiles: payload.profiles, overrideIds: Array.isArray(payload.overrideIds) ? payload.overrideIds : [] });
+      }
+    } catch {
+      // Si el catalogo remoto no esta disponible se mantiene la semilla local.
+    }
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadDeviceCatalog();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [loadDeviceCatalog]);
 
   function showGraphView() {
     setView("graph");
@@ -5470,18 +5828,48 @@ function TopologyTab({ record }: { record: AssessmentRecord }) {
             Relaciones
           </button>
           <button
+            className={cn("h-8 rounded px-3 text-xs font-medium", view === "interfaces" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted")}
+            onClick={() => setView("interfaces")}
+          >
+            Interfaces
+          </button>
+          <button
             className={cn("h-8 rounded px-3 text-xs font-medium", view === "graph" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted")}
             onClick={showGraphView}
           >
             Grafo
           </button>
+          {isCatalogAdmin && (
+            <button
+              className={cn("h-8 rounded px-3 text-xs font-medium", view === "catalog" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted")}
+              onClick={() => setView("catalog")}
+            >
+              Catálogo
+            </button>
+          )}
         </div>
       </PanelHeader>
       <PanelBody>
-        {!hasRelations ? (
-          <EmptyState icon={<Network size={24} />} title="Sin vecinos CDP/LLDP identificados" />
+        {view === "catalog" && isCatalogAdmin ? (
+          <DeviceCatalogEditor catalog={deviceCatalog} currentUser={currentUser} onChange={(next) => setDeviceCatalog(next)} />
+        ) : !hasTopologyData ? (
+          <EmptyState icon={<Network size={24} />} title="Sin topologia identificada" />
         ) : view === "relations" ? (
-          <TopologyRelationsView record={record} />
+          hasRelations ? <TopologyRelationsView record={record} /> : <EmptyState icon={<Network size={24} />} title="Sin vecinos CDP/LLDP identificados" />
+        ) : view === "interfaces" ? (
+          <TopologyInterfacesView
+            devices={interfaceDevices}
+            selectedInterface={selectedInterface}
+            selectedAnchor={selectedInterfaceAnchor}
+            onSelectInterface={(interfaceKey, anchor) => {
+              setSelectedInterfaceKey(interfaceKey);
+              setSelectedInterfaceAnchor(anchor);
+            }}
+            onClearSelection={() => {
+              setSelectedInterfaceKey(null);
+              setSelectedInterfaceAnchor(null);
+            }}
+          />
         ) : (
           <div className={cn("grid gap-4", detailPanelOpen && "xl:grid-cols-[minmax(0,1fr)_320px]")}>
             <div className="overflow-hidden rounded-md border border-border bg-slate-50">
@@ -5581,6 +5969,1551 @@ function TopologyTab({ record }: { record: AssessmentRecord }) {
   );
 }
 
+type TopologyInterfacePort = {
+  key: string;
+  deviceId: string;
+  hostname: string;
+  name: string;
+  label: string;
+  physicalIndex: number | null;
+  inferred: boolean;
+  status: string;
+  state: "up" | "down" | "disabled" | "warning" | "unknown";
+  vlan: string;
+  mode: string;
+  duplex: string;
+  speed: string;
+  medium: string;
+  type: string;
+  description: string;
+  kind: "copper" | "copper-uplink" | "sfp" | "virtual";
+  role: SectionRole;
+  profileSectionId?: string;
+  profileRows?: 1 | 2;
+  profileBlockSize?: number;
+  evidence: string[];
+  neighbors: NeighborRelation[];
+};
+
+type TopologyInterfaceDevice = {
+  id: string;
+  hostname: string;
+  model: string;
+  role: string;
+  site: string;
+  deviceType: string;
+  layout: "switch" | "router";
+  confidence: LayoutConfidence;
+  profileId: string | null;
+  profileTitle: string | null;
+  ports: TopologyInterfacePort[];
+};
+
+type TopologyInterfacePopoverAnchor = {
+  x: number;
+  y: number;
+};
+
+type TopologyInterfaceFilterKey = "up" | "down" | "disabled" | "warning" | "neighbor";
+
+type TopologyInterfaceVisibleDevice = TopologyInterfaceDevice & {
+  visiblePorts: TopologyInterfacePort[];
+  problemCount: number;
+};
+
+type TopologyInterfaceHoverState = {
+  port: TopologyInterfacePort;
+  anchor: TopologyInterfacePopoverAnchor;
+};
+
+function TopologyInterfacesView({
+  devices,
+  selectedInterface,
+  selectedAnchor,
+  onSelectInterface,
+  onClearSelection
+}: {
+  devices: TopologyInterfaceDevice[];
+  selectedInterface: TopologyInterfacePort | null;
+  selectedAnchor: TopologyInterfacePopoverAnchor | null;
+  onSelectInterface: (interfaceKey: string, anchor: TopologyInterfacePopoverAnchor) => void;
+  onClearSelection: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [activeFilters, setActiveFilters] = useState<TopologyInterfaceFilterKey[]>([]);
+  const [collapsedDevices, setCollapsedDevices] = useState<Record<string, boolean>>({});
+  const [hoveredInterface, setHoveredInterface] = useState<TopologyInterfaceHoverState | null>(null);
+  const totalPorts = devices.reduce((total, device) => total + device.ports.length, 0);
+  const upPorts = devices.reduce((total, device) => total + device.ports.filter((port) => port.state === "up").length, 0);
+  const warningPorts = devices.reduce((total, device) => total + device.ports.filter((port) => port.state === "warning").length, 0);
+  const downPorts = devices.reduce((total, device) => total + device.ports.filter((port) => port.state === "down" || port.state === "disabled").length, 0);
+  const filteredDevices = useMemo(() => {
+    return devices
+      .map<TopologyInterfaceVisibleDevice>((device) => {
+        const visiblePorts = device.ports.filter((port) => topologyInterfaceMatchesFilters(port, query, activeFilters));
+        const problemCount = device.ports.filter((port) => port.state === "warning" || port.state === "down" || port.state === "disabled").length;
+        return { ...device, visiblePorts, problemCount };
+      })
+      .filter((device) => device.visiblePorts.length > 0)
+      .sort((left, right) => (
+        right.problemCount - left.problemCount ||
+        right.visiblePorts.length - left.visiblePorts.length ||
+        left.hostname.localeCompare(right.hostname, undefined, { numeric: true, sensitivity: "base" })
+      ));
+  }, [activeFilters, devices, query]);
+  const selectedVisiblePorts = selectedInterface
+    ? filteredDevices.find((device) => device.id === selectedInterface.deviceId)?.visiblePorts ?? []
+    : [];
+
+  if (devices.length === 0 || totalPorts === 0) {
+    return <EmptyState icon={<Network size={24} />} title="Sin interfaces parseadas" />;
+  }
+
+  function toggleFilter(filter: TopologyInterfaceFilterKey) {
+    setActiveFilters((current) => (
+      current.includes(filter)
+        ? current.filter((item) => item !== filter)
+        : [...current, filter]
+    ));
+  }
+
+  function applyExclusiveFilters(filters: TopologyInterfaceFilterKey[]) {
+    setActiveFilters(filters);
+  }
+
+  function toggleDeviceCollapsed(deviceId: string) {
+    setCollapsedDevices((current) => ({ ...current, [deviceId]: !current[deviceId] }));
+  }
+
+  function handleHoverInterface(port: TopologyInterfacePort, anchor: TopologyInterfacePopoverAnchor) {
+    setHoveredInterface({ port, anchor });
+  }
+
+  return (
+    <div className="relative space-y-4">
+      <div className="space-y-3 rounded-lg border border-border bg-background p-3 text-foreground shadow-subtle">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold">Estado visual de interfaces</p>
+            <p className="text-xs text-muted-foreground">Vista frontal por equipo; filtra puertos y abre el detalle técnico desde cada socket.</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <TopologySummaryFilterBadge tone="success" active={activeFilters.length === 1 && activeFilters[0] === "up"} onClick={() => applyExclusiveFilters(["up"])}>
+              {upPorts} arriba
+            </TopologySummaryFilterBadge>
+            {warningPorts > 0 && (
+              <TopologySummaryFilterBadge tone="warning" active={activeFilters.length === 1 && activeFilters[0] === "warning"} onClick={() => applyExclusiveFilters(["warning"])}>
+                {warningPorts} alerta
+              </TopologySummaryFilterBadge>
+            )}
+            <TopologySummaryFilterBadge tone="neutral" active={activeFilters.includes("down") || activeFilters.includes("disabled")} onClick={() => applyExclusiveFilters(["down", "disabled"])}>
+              {downPorts} apagados/admin
+            </TopologySummaryFilterBadge>
+            <TopologySummaryFilterBadge tone="info" active={activeFilters.length === 0 && query.trim().length === 0} onClick={() => {
+              setQuery("");
+              applyExclusiveFilters([]);
+            }}>
+              {totalPorts} puertos
+            </TopologySummaryFilterBadge>
+          </div>
+        </div>
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <label className="relative min-w-0 flex-1">
+            <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Buscar interfaz, descripcion o vecino"
+              className="pl-9"
+            />
+          </label>
+          <div className="flex flex-wrap items-center gap-2">
+            <TopologyFilterToggle active={activeFilters.includes("up")} onClick={() => toggleFilter("up")}>Up</TopologyFilterToggle>
+            <TopologyFilterToggle active={activeFilters.includes("down")} onClick={() => toggleFilter("down")}>Down</TopologyFilterToggle>
+            <TopologyFilterToggle active={activeFilters.includes("disabled")} onClick={() => toggleFilter("disabled")}>Admin</TopologyFilterToggle>
+            <TopologyFilterToggle active={activeFilters.includes("warning")} onClick={() => toggleFilter("warning")}>Alerta</TopologyFilterToggle>
+            <TopologyFilterToggle active={activeFilters.includes("neighbor")} onClick={() => toggleFilter("neighbor")}>Con vecino</TopologyFilterToggle>
+            <Button
+              size="sm"
+              variant={activeFilters.includes("down") && activeFilters.includes("warning") && activeFilters.length === 2 ? "primary" : "secondary"}
+              className={cn(!(activeFilters.includes("down") && activeFilters.includes("warning") && activeFilters.length === 2) && "border-border bg-background text-foreground hover:bg-muted/70")}
+              onClick={() => applyExclusiveFilters(["down", "warning"])}
+            >
+              Solo con problemas
+            </Button>
+          </div>
+        </div>
+        <TopologyPortLegend />
+      </div>
+      {filteredDevices.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-border bg-muted/20 p-6">
+          <EmptyState icon={<Search size={24} />} title="Sin interfaces para los filtros actuales" />
+        </div>
+      ) : (
+        <div className="grid gap-4">
+          {filteredDevices.map((device) => (
+            <TopologyDeviceInterfaceCard
+              key={device.id}
+              device={device}
+              selectedInterfaceKey={selectedInterface?.key ?? null}
+              collapsed={collapsedDevices[device.id] ?? false}
+              onToggleCollapsed={() => toggleDeviceCollapsed(device.id)}
+              onSelectInterface={onSelectInterface}
+              onHoverInterface={handleHoverInterface}
+              onClearHover={() => setHoveredInterface(null)}
+            />
+          ))}
+        </div>
+      )}
+      {hoveredInterface && (
+        <TopologyInterfaceHoverTooltip port={hoveredInterface.port} anchor={hoveredInterface.anchor} />
+      )}
+      {selectedInterface && selectedAnchor && (
+        <TopologyInterfaceFloatingPanel
+          port={selectedInterface}
+          anchor={selectedAnchor}
+          siblingPorts={selectedVisiblePorts}
+          onSelectInterface={onSelectInterface}
+          onClose={onClearSelection}
+        />
+      )}
+    </div>
+  );
+}
+
+function TopologyDeviceInterfaceCard({
+  device,
+  selectedInterfaceKey,
+  collapsed,
+  onToggleCollapsed,
+  onSelectInterface,
+  onHoverInterface,
+  onClearHover
+}: {
+  device: TopologyInterfaceVisibleDevice;
+  selectedInterfaceKey: string | null;
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
+  onSelectInterface: (interfaceKey: string, anchor: TopologyInterfacePopoverAnchor) => void;
+  onHoverInterface: (port: TopologyInterfacePort, anchor: TopologyInterfacePopoverAnchor) => void;
+  onClearHover: () => void;
+}) {
+  const physicalPorts = device.visiblePorts.filter((port) => port.kind !== "virtual");
+  const copperPorts = physicalPorts.filter((port) => port.role === "downlink" && port.kind === "copper");
+  const sfpDownlinkPorts = physicalPorts.filter((port) => port.role === "downlink" && port.kind === "sfp");
+  const copperUplinkPorts = physicalPorts.filter((port) => port.role === "uplink" && port.kind === "copper-uplink");
+  const sfpUplinkPorts = physicalPorts.filter((port) => port.role === "uplink" && port.kind === "sfp");
+  const mgmtPorts = physicalPorts.filter((port) => port.role === "mgmt");
+  const virtualPorts = device.visiblePorts.filter((port) => port.kind === "virtual");
+  const isRouterLayout = device.layout === "router";
+  const deviceProblemCount = device.visiblePorts.filter((port) => port.state === "warning" || port.state === "down" || port.state === "disabled").length;
+  const approximate = device.confidence === "inferred" || device.confidence === "generic";
+
+  return (
+    <article className="overflow-hidden rounded-lg border border-border bg-background text-foreground shadow-subtle">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/25 px-4 py-3">
+        <button type="button" className="flex min-w-0 items-center gap-2 text-left" onClick={onToggleCollapsed}>
+          {collapsed ? <ChevronRight size={16} className="shrink-0 text-muted-foreground" /> : <ChevronDown size={16} className="shrink-0 text-muted-foreground" />}
+          <span className="min-w-0">
+            <span className="block truncate text-sm font-semibold text-foreground">{device.hostname}</span>
+            <span className="block truncate text-xs text-muted-foreground">{[device.model, device.role, device.site].filter(Boolean).join(" · ") || "Equipo sin metadata"}</span>
+          </span>
+        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {deviceProblemCount > 0 && <Badge tone="warning">{deviceProblemCount} revisar</Badge>}
+          <Badge tone="info">{device.deviceType}</Badge>
+          <TopologyConfidenceBadge confidence={device.confidence} title={device.profileTitle} />
+          <Badge tone="neutral">{device.visiblePorts.length}/{device.ports.length} visibles</Badge>
+        </div>
+      </div>
+      {!collapsed && (
+      <div className="space-y-4 bg-background p-4">
+        {approximate && (
+          <div className="flex items-start gap-2 rounded-md border border-amber-300/70 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+            <span>
+              Layout aproximado: no hay un perfil de equipo para <span className="font-semibold">{device.model || "este modelo"}</span>.
+              La distribucion se infiere de las interfaces observadas; agrega un perfil en el catalogo para una vista exacta.
+            </span>
+          </div>
+        )}
+        {isRouterLayout ? (
+          <TopologyPhysicalChassis
+            device={device}
+            copperPorts={[...copperPorts, ...mgmtPorts, ...copperUplinkPorts, ...sfpDownlinkPorts, ...sfpUplinkPorts]}
+            sfpPorts={[]}
+            isRouterLayout
+            selectedInterfaceKey={selectedInterfaceKey}
+            onSelectInterface={onSelectInterface}
+            onHoverInterface={onHoverInterface}
+            onClearHover={onClearHover}
+          />
+        ) : (
+          <TopologyPhysicalChassis
+            device={device}
+            copperPorts={[...copperPorts, ...mgmtPorts]}
+            copperUplinkPorts={copperUplinkPorts}
+            sfpDownlinkPorts={sfpDownlinkPorts}
+            sfpPorts={sfpUplinkPorts}
+            selectedInterfaceKey={selectedInterfaceKey}
+            onSelectInterface={onSelectInterface}
+            onHoverInterface={onHoverInterface}
+            onClearHover={onClearHover}
+          />
+        )}
+        {virtualPorts.length > 0 && (
+          <TopologyPortSection
+            title="Interfaces logicas"
+            ports={virtualPorts}
+            variant="virtual"
+            selectedInterfaceKey={selectedInterfaceKey}
+            onSelectInterface={onSelectInterface}
+            onHoverInterface={onHoverInterface}
+            onClearHover={onClearHover}
+          />
+        )}
+      </div>
+      )}
+    </article>
+  );
+}
+
+function TopologyPhysicalChassis({
+  device,
+  copperPorts,
+  copperUplinkPorts = [],
+  sfpDownlinkPorts = [],
+  sfpPorts,
+  isRouterLayout = false,
+  selectedInterfaceKey,
+  onSelectInterface,
+  onHoverInterface,
+  onClearHover
+}: {
+  device: TopologyInterfaceDevice;
+  copperPorts: TopologyInterfacePort[];
+  copperUplinkPorts?: TopologyInterfacePort[];
+  sfpDownlinkPorts?: TopologyInterfacePort[];
+  sfpPorts: TopologyInterfacePort[];
+  isRouterLayout?: boolean;
+  selectedInterfaceKey: string | null;
+  onSelectInterface: (interfaceKey: string, anchor: TopologyInterfacePopoverAnchor) => void;
+  onHoverInterface: (port: TopologyInterfacePort, anchor: TopologyInterfacePopoverAnchor) => void;
+  onClearHover: () => void;
+}) {
+  const physicalCount = copperPorts.length + copperUplinkPorts.length + sfpDownlinkPorts.length + sfpPorts.length;
+  const switchDownlinkPorts = [...copperPorts, ...sfpDownlinkPorts];
+  const switchUplinkPorts = [...copperUplinkPorts, ...sfpPorts];
+
+  if (physicalCount === 0) {
+    return (
+      <div className="rounded-lg border border-border bg-muted/20 px-3 py-3 text-xs text-muted-foreground">
+        Sin puertos fisicos visibles con los filtros actuales.
+      </div>
+    );
+  }
+
+  return (
+    <div className="overflow-x-auto rounded-xl border border-border bg-muted/35 p-2 shadow-inner">
+      <div className="flex w-full min-w-max items-center rounded-lg border border-border bg-background p-2 shadow-sm">
+        {isRouterLayout ? (
+          <div className="flex items-center gap-3">
+            <TopologyPortSection
+              title="Interfaces"
+              ports={copperPorts}
+              variant="physical-row"
+              selectedInterfaceKey={selectedInterfaceKey}
+              onSelectInterface={onSelectInterface}
+              onHoverInterface={onHoverInterface}
+              onClearHover={onClearHover}
+            />
+          </div>
+        ) : (
+          <TopologySwitchFaceplate
+            downlinkPorts={switchDownlinkPorts}
+            uplinkPorts={switchUplinkPorts}
+            selectedInterfaceKey={selectedInterfaceKey}
+            onSelectInterface={onSelectInterface}
+            onHoverInterface={onHoverInterface}
+            onClearHover={onClearHover}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TopologySwitchFaceplate({
+  downlinkPorts,
+  uplinkPorts,
+  selectedInterfaceKey,
+  onSelectInterface,
+  onHoverInterface,
+  onClearHover
+}: {
+  downlinkPorts: TopologyInterfacePort[];
+  uplinkPorts: TopologyInterfacePort[];
+  selectedInterfaceKey: string | null;
+  onSelectInterface: (interfaceKey: string, anchor: TopologyInterfacePopoverAnchor) => void;
+  onHoverInterface: (port: TopologyInterfacePort, anchor: TopologyInterfacePopoverAnchor) => void;
+  onClearHover: () => void;
+}) {
+  return (
+    <div className="relative flex w-full min-w-[60rem] items-center rounded-md border border-border bg-muted/20 p-3 shadow-inner">
+      <span aria-hidden className="absolute left-3 top-3 h-1.5 w-1.5 rounded-full border border-border bg-background" />
+      <span aria-hidden className="absolute right-3 top-3 h-1.5 w-1.5 rounded-full border border-border bg-background" />
+      <span aria-hidden className="absolute bottom-3 left-3 h-1.5 w-1.5 rounded-full border border-border bg-background" />
+      <span aria-hidden className="absolute bottom-3 right-3 h-1.5 w-1.5 rounded-full border border-border bg-background" />
+      <div className="flex w-full items-center gap-4 px-4 py-3">
+        <TopologySwitchDownlinkBay
+          ports={downlinkPorts}
+          selectedInterfaceKey={selectedInterfaceKey}
+          onSelectInterface={onSelectInterface}
+          onHoverInterface={onHoverInterface}
+          onClearHover={onClearHover}
+        />
+        <TopologySwitchUplinkBay
+          ports={uplinkPorts}
+          selectedInterfaceKey={selectedInterfaceKey}
+          onSelectInterface={onSelectInterface}
+          onHoverInterface={onHoverInterface}
+          onClearHover={onClearHover}
+        />
+      </div>
+    </div>
+  );
+}
+
+function TopologySwitchDownlinkBay({
+  ports,
+  selectedInterfaceKey,
+  onSelectInterface,
+  onHoverInterface,
+  onClearHover
+}: {
+  ports: TopologyInterfacePort[];
+  selectedInterfaceKey: string | null;
+  onSelectInterface: (interfaceKey: string, anchor: TopologyInterfacePopoverAnchor) => void;
+  onHoverInterface: (port: TopologyInterfacePort, anchor: TopologyInterfacePopoverAnchor) => void;
+  onClearHover: () => void;
+}) {
+  const rows = topologySwitchPanelRows(ports);
+  const columnsPerBlock = topologySwitchColumnsPerBlock(ports, rows.length);
+  const blocks = topologySwitchPortBlocks(rows, columnsPerBlock);
+
+  return (
+    <section className="min-w-0 flex-1 space-y-2">
+      <div className="flex items-center justify-between gap-4">
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Downlinks</p>
+        <span className="text-[11px] text-muted-foreground">{ports.length}/48 puertos</span>
+      </div>
+      <div className="rounded-md border border-border/70 bg-background/35 p-2">
+        {ports.length === 0 ? (
+          <div className="flex h-[84px] w-56 items-center justify-center rounded border border-dashed border-border/70 text-[11px] text-muted-foreground">
+            Sin downlinks detectados
+          </div>
+        ) : (
+          <div className="flex items-end justify-between gap-3">
+            {blocks.map((block, blockIndex) => (
+              <div key={`downlink-block-${blockIndex}`} className="space-y-2">
+                {block.map((row, rowIndex) => (
+                  <div key={`downlink-block-${blockIndex}-row-${rowIndex}`} className="flex items-end gap-1.5">
+                    {row.map((port) => (
+                      <TopologyPortButton
+                        key={port.key}
+                        port={port}
+                        selected={selectedInterfaceKey === port.key}
+                        compact
+                        showNumberAbove
+                        labelMode="number"
+                        onSelect={onSelectInterface}
+                        onHover={onHoverInterface}
+                        onClearHover={onClearHover}
+                      />
+                    ))}
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+type TopologyUplinkSlot =
+  | { key: string; port: TopologyInterfacePort }
+  | { key: string; port: null };
+
+function TopologySwitchUplinkBay({
+  ports,
+  selectedInterfaceKey,
+  onSelectInterface,
+  onHoverInterface,
+  onClearHover
+}: {
+  ports: TopologyInterfacePort[];
+  selectedInterfaceKey: string | null;
+  onSelectInterface: (interfaceKey: string, anchor: TopologyInterfacePopoverAnchor) => void;
+  onHoverInterface: (port: TopologyInterfacePort, anchor: TopologyInterfacePopoverAnchor) => void;
+  onClearHover: () => void;
+}) {
+  const slotRows = topologyUplinkSlotRows(ports);
+
+  return (
+    <section className="w-[9.5rem] space-y-2 border-l border-border/60 pl-4">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Uplinks</p>
+        <span className="text-[11px] text-muted-foreground">{ports.length}/6</span>
+      </div>
+      <div className="rounded-md border border-border/70 bg-background/35 p-2">
+        <div className="space-y-2">
+          {slotRows.map((row, rowIndex) => (
+            <div key={`uplink-row-${rowIndex}`} className="flex items-end gap-1">
+              {row.map((slot) => (
+                slot.port ? (
+                  <TopologyPortButton
+                    key={slot.key}
+                    port={slot.port}
+                    selected={selectedInterfaceKey === slot.port.key}
+                    compact
+                    showNumberAbove
+                    labelMode="number"
+                    onSelect={onSelectInterface}
+                    onHover={onHoverInterface}
+                    onClearHover={onClearHover}
+                  />
+                ) : (
+                  <TopologyEmptyPortSlot key={slot.key} />
+                )
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function TopologyPortSection({
+  title,
+  ports,
+  variant,
+  selectedInterfaceKey,
+  onSelectInterface,
+  onHoverInterface,
+  onClearHover
+}: {
+  title: string;
+  ports: TopologyInterfacePort[];
+  variant: "physical-row" | "sfp" | "virtual";
+  selectedInterfaceKey: string | null;
+  onSelectInterface: (interfaceKey: string, anchor: TopologyInterfacePopoverAnchor) => void;
+  onHoverInterface: (port: TopologyInterfacePort, anchor: TopologyInterfacePopoverAnchor) => void;
+  onClearHover: () => void;
+}) {
+  if (ports.length === 0) {
+    return (
+      <div className="rounded-md border border-border bg-muted/20 px-3 py-3 text-xs text-muted-foreground">
+        Sin puertos {title.toLowerCase()} detectados.
+      </div>
+    );
+  }
+
+  const isVirtual = variant === "virtual";
+  const sortedPorts = [...ports].sort(compareTopologyPorts);
+  const shouldUseUplinkRows = !isVirtual && (variant === "sfp" || sortedPorts.every((port) => port.kind === "copper-uplink"));
+  const physicalRows = shouldUseUplinkRows ? topologyCompactPanelRows(sortedPorts) : [sortedPorts];
+
+  return (
+    <section className={cn(
+      "w-max space-y-2",
+      !isVirtual && "min-w-44",
+      isVirtual && "w-auto rounded-lg border border-dashed border-border bg-muted/15 p-3"
+    )}>
+      <div className="space-y-0.5">
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{title}</p>
+        {isVirtual && <p className="text-[10px] text-muted-foreground">{ports.length} interfaces</p>}
+      </div>
+      {isVirtual ? (
+        <div className="flex flex-wrap gap-2">
+          {sortedPorts.map((port) => (
+            <TopologyPortButton
+              key={port.key}
+              port={port}
+              selected={selectedInterfaceKey === port.key}
+              compact={false}
+              showNumberAbove
+              labelMode="number"
+              onSelect={onSelectInterface}
+              onHover={onHoverInterface}
+              onClearHover={onClearHover}
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="rounded-md border border-border/70 bg-background/35 p-2">
+          <div className="min-w-max space-y-2">
+            {physicalRows.map((row, rowIndex) => (
+              <div key={`physical-row-${title}-${rowIndex}`} className="flex items-end gap-1">
+                {row.map((port) => (
+                  <TopologyPortButton
+                    key={port.key}
+                    port={port}
+                    selected={selectedInterfaceKey === port.key}
+                    compact
+                    showNumberAbove
+                    labelMode={variant === "physical-row" ? "interface" : "number"}
+                    onSelect={onSelectInterface}
+                    onHover={onHoverInterface}
+                    onClearHover={onClearHover}
+                  />
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function TopologyFrontPanelSection({
+  title,
+  ports,
+  selectedInterfaceKey,
+  onSelectInterface,
+  onHoverInterface,
+  onClearHover
+}: {
+  title: string;
+  ports: TopologyInterfacePort[];
+  selectedInterfaceKey: string | null;
+  onSelectInterface: (interfaceKey: string, anchor: TopologyInterfacePopoverAnchor) => void;
+  onHoverInterface: (port: TopologyInterfacePort, anchor: TopologyInterfacePopoverAnchor) => void;
+  onClearHover: () => void;
+}) {
+  if (ports.length === 0) {
+    return (
+      <div className="rounded-md border border-slate-800 bg-slate-900/70 px-3 py-3 text-xs text-slate-400">
+        Sin puertos {title.toLowerCase()} detectados.
+      </div>
+    );
+  }
+
+  const rows = topologyFrontPanelRows(ports);
+  return (
+    <section className="space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{title}</p>
+        <span className="text-[11px] text-muted-foreground">{ports.length} puertos frontales</span>
+      </div>
+      <div className="rounded-md border border-border/70 bg-background/35 p-2">
+        <div className="min-w-max space-y-2">
+          {rows.map((row, rowIndex) => (
+            <div key={`front-row-${rowIndex}`} className="flex items-end gap-1">
+              {row.map((port) => (
+                <TopologyPortButton
+                  key={port.key}
+                  port={port}
+                  selected={selectedInterfaceKey === port.key}
+                  compact
+                  showNumberAbove
+                  labelMode="number"
+                  onSelect={onSelectInterface}
+                  onHover={onHoverInterface}
+                  onClearHover={onClearHover}
+                />
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function TopologyPortButton({
+  port,
+  selected,
+  compact,
+  showNumberAbove = false,
+  labelMode = "number",
+  onSelect,
+  onHover,
+  onClearHover
+}: {
+  port: TopologyInterfacePort;
+  selected: boolean;
+  compact: boolean;
+  showNumberAbove?: boolean;
+  labelMode?: "number" | "interface";
+  onSelect: (interfaceKey: string, anchor: TopologyInterfacePopoverAnchor) => void;
+  onHover: (port: TopologyInterfacePort, anchor: TopologyInterfacePopoverAnchor) => void;
+  onClearHover: () => void;
+}) {
+  function hoverAnchorForElement(element: HTMLElement): TopologyInterfacePopoverAnchor {
+    const rect = element.getBoundingClientRect();
+    const tooltipWidth = 280;
+    const tooltipHeight = 116;
+    const margin = 12;
+    const x = Math.min(Math.max(margin, rect.left + rect.width / 2 - tooltipWidth / 2), Math.max(margin, window.innerWidth - tooltipWidth - margin));
+    const above = rect.top - tooltipHeight - margin;
+    const below = rect.bottom + margin;
+    const y = above > margin ? above : Math.min(below, Math.max(margin, window.innerHeight - tooltipHeight - margin));
+    return { x, y };
+  }
+
+  function handleClick(event: React.MouseEvent<HTMLButtonElement>) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const popoverWidth = 340;
+    const popoverHeight = 520;
+    const margin = 12;
+    const x = Math.min(Math.max(margin, rect.left + rect.width / 2 - popoverWidth / 2), Math.max(margin, window.innerWidth - popoverWidth - margin));
+    const below = rect.bottom + margin;
+    const y = below + popoverHeight < window.innerHeight
+      ? below
+      : Math.max(margin, rect.top - popoverHeight - margin);
+    onSelect(port.key, { x, y });
+  }
+
+  function handleHover(event: React.MouseEvent<HTMLButtonElement> | React.FocusEvent<HTMLButtonElement> | React.PointerEvent<HTMLButtonElement>) {
+    onHover(port, hoverAnchorForElement(event.currentTarget));
+  }
+
+  return (
+    <span className={cn("relative inline-flex flex-col items-center", showNumberAbove && "mt-4")}>
+      {showNumberAbove && <span className="mb-1 max-w-20 truncate text-[10px] font-semibold leading-none text-muted-foreground">{topologyPortHeaderLabel(port, labelMode)}</span>}
+      <button
+        type="button"
+        className={cn(
+          "relative flex items-center justify-center rounded-md border text-center shadow-sm transition hover:-translate-y-0.5 hover:shadow-md",
+          "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary",
+          topologyPortSizeClass(port, compact),
+          topologyInterfaceStateClass(port.state, port.inferred),
+        selected && "border-primary bg-primary/10 ring-2 ring-primary ring-offset-2 ring-offset-background"
+        )}
+        title={topologyPortTooltipText(port)}
+        aria-label={topologyPortAriaLabel(port)}
+        onClick={handleClick}
+        onPointerEnter={handleHover}
+        onPointerMove={handleHover}
+        onPointerLeave={onClearHover}
+        onMouseEnter={handleHover}
+        onMouseMove={handleHover}
+        onMouseLeave={onClearHover}
+        onFocus={handleHover}
+        onBlur={onClearHover}
+      >
+        {!showNumberAbove && <span className="max-w-full truncate px-1 text-[11px] font-bold leading-tight text-muted-foreground">{topologyPortHeaderLabel(port, labelMode)}</span>}
+        <TopologyPortLed port={port} />
+        {port.neighbors.length > 0 && <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-sky-500 shadow-sm" />}
+      </button>
+    </span>
+  );
+}
+
+function TopologyEmptyPortSlot() {
+  return (
+    <span className="relative mt-4 inline-flex flex-col items-center" aria-hidden="true">
+      <span className="mb-1 h-2.5 text-[10px] font-semibold leading-none text-muted-foreground/40" />
+      <span className={cn(
+        "rounded-md border border-dashed border-border/60 bg-muted/15 shadow-inner",
+        topologyPhysicalPortSizeClass()
+      )} />
+    </span>
+  );
+}
+
+function TopologyConfidenceBadge({ confidence, title }: { confidence: LayoutConfidence; title: string | null }) {
+  const tone = confidence === "exact" ? "success" : confidence === "family" ? "info" : confidence === "inferred" ? "warning" : "neutral";
+  const label = title ? `${LAYOUT_CONFIDENCE_LABEL[confidence]} · ${title}` : LAYOUT_CONFIDENCE_LABEL[confidence];
+  return (
+    <span title={label}>
+      <Badge tone={tone}>{LAYOUT_CONFIDENCE_LABEL[confidence]}</Badge>
+    </span>
+  );
+}
+
+const DEVICE_PROFILE_SEED_IDS = new Set(DEFAULT_DEVICE_PROFILES.map((profile) => profile.id));
+const PORT_MEDIA_OPTIONS: PortMedia[] = ["RJ45", "SFP", "SFP+", "SFP28", "QSFP+", "QSFP28", "RJ45-mgmt"];
+const SECTION_ROLE_OPTIONS: SectionRole[] = ["downlink", "uplink", "mgmt"];
+const DEVICE_CATEGORY_OPTIONS: DeviceCategory[] = ["switch", "router", "firewall", "generic"];
+
+function buildProfilePreviewDevice(profile: DeviceVisualProfile): TopologyInterfaceVisibleDevice {
+  const slots = generateProfileSlots(profile);
+  const ports: TopologyInterfacePort[] = slots.map((slot, position) => {
+    const state: TopologyInterfacePort["state"] = position % 6 === 5 ? "warning" : position % 4 === 3 ? "disabled" : position % 3 === 2 ? "down" : "up";
+    const status = state === "up" ? "connected" : state === "warning" ? "err-disabled" : state === "disabled" ? "admin down" : "notconnect";
+    return {
+      key: `preview:${slot.name}`,
+      deviceId: "preview",
+      hostname: "preview",
+      name: slot.name,
+      label: topologyInterfacePortLabel(slot.name),
+      physicalIndex: slot.index,
+      inferred: false,
+      status,
+      state,
+      vlan: slot.role === "uplink" ? "trunk" : "10",
+      mode: slot.role === "uplink" ? "Trunk" : "Access VLAN 10",
+      duplex: "full",
+      speed: slot.speed,
+      medium: slotMediaLabel(slot.media),
+      type: slot.media,
+      description: "",
+      kind: slotMediaToKind(slot.media, slot.role),
+      role: slot.role,
+      profileSectionId: slot.sectionId,
+      profileRows: slot.rows,
+      profileBlockSize: slot.blockSize,
+      evidence: [],
+      neighbors: []
+    };
+  });
+  return {
+    id: "preview",
+    hostname: profile.title || profile.id || "Equipo",
+    model: profile.id,
+    role: "",
+    site: "",
+    deviceType: profile.category,
+    layout: profile.category === "switch" ? "switch" : "router",
+    confidence: "exact",
+    profileId: profile.id,
+    profileTitle: profile.title,
+    ports,
+    visiblePorts: ports,
+    problemCount: ports.filter((port) => port.state !== "up").length
+  };
+}
+
+function DeviceCatalogEditor({
+  catalog,
+  currentUser,
+  onChange
+}: {
+  catalog: { profiles: DeviceVisualProfile[]; overrideIds: string[] };
+  currentUser: AppUser | null;
+  onChange: (next: { profiles: DeviceVisualProfile[]; overrideIds: string[] }) => void;
+}) {
+  const [draft, setDraft] = useState<DeviceVisualProfile>(() => catalog.profiles[0] ? JSON.parse(JSON.stringify(catalog.profiles[0])) as DeviceVisualProfile : emptyDeviceProfile());
+  const [selectedId, setSelectedId] = useState<string | null>(() => catalog.profiles[0]?.id ?? null);
+  const [query, setQuery] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState<DeviceCategory | "all">("all");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const overrideIds = new Set(catalog.overrideIds);
+
+  const catalogStats = useMemo(() => {
+    const switchCount = catalog.profiles.filter((profile) => profile.category === "switch").length;
+    const exactCount = catalog.profiles.filter((profile) => profile.scope === "exact").length;
+    return {
+      total: catalog.profiles.length,
+      switchCount,
+      exactCount,
+      overrideCount: catalog.overrideIds.length
+    };
+  }, [catalog]);
+
+  const filteredProfiles = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
+    return catalog.profiles.filter((profile) => {
+      const matchesCategory = categoryFilter === "all" || profile.category === categoryFilter;
+      if (!matchesCategory) return false;
+      if (!normalizedQuery) return true;
+      const haystack = [
+        profile.id,
+        profile.title,
+        profile.category,
+        profile.scope,
+        ...(profile.match.pids ?? []),
+        ...(profile.match.familyPatterns ?? [])
+      ].join(" ").toLowerCase();
+      return haystack.includes(normalizedQuery);
+    });
+  }, [catalog.profiles, categoryFilter, query]);
+
+  const draftSummary = useMemo(() => summarizeDeviceProfileDraft(draft), [draft]);
+
+  function patchDraft(patch: Partial<DeviceVisualProfile>) {
+    setDraft((current) => ({ ...current, ...patch }));
+  }
+
+  function patchSection(index: number, patch: Partial<ProfileSection>) {
+    setDraft((current) => ({
+      ...current,
+      sections: current.sections.map((section, position) => (position === index ? { ...section, ...patch } : section))
+    }));
+  }
+
+  function addSection() {
+    setDraft((current) => ({
+      ...current,
+      sections: [...current.sections, { id: `sec-${current.sections.length + 1}`, label: "Uplinks", role: "uplink", media: "SFP+", speed: "10G", count: 4, namePattern: "TenGigabitEthernet1/1/{n}", startIndex: 1, rows: 1 }]
+    }));
+  }
+
+  function removeSection(index: number) {
+    setDraft((current) => ({ ...current, sections: current.sections.filter((_, position) => position !== index) }));
+  }
+
+  function selectProfile(profile: DeviceVisualProfile) {
+    setSelectedId(profile.id);
+    setError(null);
+    setDraft(JSON.parse(JSON.stringify(profile)) as DeviceVisualProfile);
+  }
+
+  function startNew() {
+    setSelectedId(null);
+    setError(null);
+    setDraft(emptyDeviceProfile());
+  }
+
+  const previewProfile = useMemo(() => {
+    try {
+      return { profile: normalizeDeviceProfile(draft), error: null as string | null };
+    } catch (caught) {
+      return { profile: null, error: caught instanceof Error ? caught.message : "Perfil invalido." };
+    }
+  }, [draft]);
+
+  async function save() {
+    if (!currentUser) {
+      setError("Necesitas una sesion de admin para guardar.");
+      return;
+    }
+    let normalized: DeviceVisualProfile;
+    try {
+      normalized = normalizeDeviceProfile(draft);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Perfil invalido.");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/device-catalog", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", "x-user-email": currentUser.email },
+        body: JSON.stringify({ profile: normalized })
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload?.error ?? "No se pudo guardar el perfil.");
+      onChange({ profiles: payload.profiles, overrideIds: payload.overrideIds });
+      setSelectedId(normalized.id);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "No se pudo guardar el perfil.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function removeOverride(id: string) {
+    if (!currentUser) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/device-catalog?id=${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        headers: { "x-user-email": currentUser.email }
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload?.error ?? "No se pudo eliminar el override.");
+      onChange({ profiles: payload.profiles, overrideIds: payload.overrideIds });
+      if (selectedId === id) startNew();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "No se pudo eliminar el override.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <section className="rounded-xl border border-border bg-muted/15 p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div className="max-w-3xl space-y-1">
+            <p className="text-sm font-semibold">Catálogo visual de equipos</p>
+            <p className="text-xs text-muted-foreground">
+              Mantiene la plantilla física por PID/familia para dibujar faceplates consistentes. Los cambios se guardan como override y se reflejan en el subtab Interfaces.
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:w-[28rem]">
+            <DeviceCatalogStat label="Perfiles" value={catalogStats.total} />
+            <DeviceCatalogStat label="Switches" value={catalogStats.switchCount} />
+            <DeviceCatalogStat label="Exactos" value={catalogStats.exactCount} />
+            <DeviceCatalogStat label="Overrides" value={catalogStats.overrideCount} tone={catalogStats.overrideCount > 0 ? "warning" : "neutral"} />
+          </div>
+        </div>
+      </section>
+
+      <div className="grid gap-4 xl:grid-cols-[340px_minmax(0,1fr)]">
+        <aside className="space-y-3">
+          <div className="rounded-xl border border-border bg-background p-3">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <p className="text-sm font-semibold">Perfiles</p>
+                <p className="text-xs text-muted-foreground">{filteredProfiles.length} visibles</p>
+              </div>
+              <Button size="sm" variant="secondary" onClick={startNew}>
+                <Plus size={14} />
+                Nuevo
+              </Button>
+            </div>
+            <div className="mt-3 space-y-2">
+              <label className="relative block">
+                <Search className="pointer-events-none absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+                <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar PID, titulo o familia" className="pl-8" />
+              </label>
+              <select
+                className="h-9 w-full rounded-md border border-border bg-background px-2 text-sm"
+                value={categoryFilter}
+                onChange={(event) => setCategoryFilter(event.target.value as DeviceCategory | "all")}
+              >
+                <option value="all">Todas las categorías</option>
+                {DEVICE_CATEGORY_OPTIONS.map((option) => <option key={option} value={option}>{deviceCatalogCategoryLabel(option)}</option>)}
+              </select>
+            </div>
+          </div>
+
+          <div className="max-h-[620px] space-y-1 overflow-auto rounded-xl border border-border bg-background p-1">
+            {filteredProfiles.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-border bg-muted/20 px-3 py-6 text-center text-xs text-muted-foreground">
+                No hay perfiles que coincidan con el filtro.
+              </div>
+            ) : filteredProfiles.map((profile) => {
+              const isOverride = overrideIds.has(profile.id);
+              const isSeed = DEVICE_PROFILE_SEED_IDS.has(profile.id);
+              const summary = summarizeDeviceProfileDraft(profile);
+              return (
+                <button
+                  key={profile.id}
+                  type="button"
+                  onClick={() => selectProfile(profile)}
+                  className={cn(
+                    "flex w-full flex-col gap-2 rounded-lg px-3 py-2 text-left text-xs transition",
+                    selectedId === profile.id ? "bg-primary/10 ring-1 ring-primary" : "hover:bg-muted"
+                  )}
+                >
+                  <span className="flex items-center justify-between gap-2">
+                    <span className="truncate font-semibold text-foreground">{profile.id}</span>
+                    <span className="shrink-0">
+                      {isOverride ? <Badge tone="warning">{isSeed ? "editado" : "custom"}</Badge> : <Badge tone="neutral">semilla</Badge>}
+                    </span>
+                  </span>
+                  <span className="line-clamp-2 text-muted-foreground">{profile.title}</span>
+                  <span className="flex flex-wrap gap-1.5">
+                    <Badge tone="neutral">{deviceCatalogCategoryLabel(profile.category)}</Badge>
+                    <Badge tone="info">{profile.scope}</Badge>
+                    <Badge tone="neutral">{summary.downlinks} down</Badge>
+                    <Badge tone="neutral">{summary.uplinks}/{summary.uplinkSlots || 0} up</Badge>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </aside>
+
+        <section className="space-y-4">
+        {error && (
+          <div className="flex items-start gap-2 rounded-md border border-rose-300 bg-rose-50 px-3 py-2 text-xs text-rose-800">
+            <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+            <span>{error}</span>
+          </div>
+        )}
+
+        <div className="rounded-xl border border-border bg-background p-4">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <p className="text-sm font-semibold">{draft.id || "Nuevo perfil"}</p>
+              <p className="text-xs text-muted-foreground">{draft.title || "Define el PID, match y secciones físicas del equipo."}</p>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              <Badge tone="neutral">{deviceCatalogCategoryLabel(draft.category)}</Badge>
+              <Badge tone="info">{draft.scope}</Badge>
+              <Badge tone={draftSummary.uplinkSlots >= draftSummary.uplinks ? "success" : "warning"}>{draftSummary.uplinks}/{draftSummary.uplinkSlots || 0} uplinks</Badge>
+              <Badge tone="neutral">{draftSummary.downlinks} downlinks</Badge>
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-3 lg:grid-cols-2">
+            <label className="space-y-1 text-xs">
+              <span className="font-semibold text-muted-foreground">PID / id</span>
+              <Input value={draft.id} onChange={(event) => patchDraft({ id: event.target.value })} placeholder="C9500-24Y4C" />
+            </label>
+            <label className="space-y-1 text-xs">
+              <span className="font-semibold text-muted-foreground">Título legible</span>
+              <Input value={draft.title} onChange={(event) => patchDraft({ title: event.target.value })} placeholder="Catalyst 9500 24x25G + 4x100G" />
+            </label>
+            <label className="space-y-1 text-xs">
+              <span className="font-semibold text-muted-foreground">Categoría</span>
+              <select className="h-9 w-full rounded-md border border-border bg-background px-2 text-sm" value={draft.category} onChange={(event) => patchDraft({ category: event.target.value as DeviceCategory })}>
+                {DEVICE_CATEGORY_OPTIONS.map((option) => <option key={option} value={option}>{deviceCatalogCategoryLabel(option)}</option>)}
+              </select>
+            </label>
+            <label className="space-y-1 text-xs">
+              <span className="font-semibold text-muted-foreground">Bahía de uplinks reservada</span>
+              <Input type="number" value={draft.uplinkBaySlots ?? ""} onChange={(event) => patchDraft({ uplinkBaySlots: event.target.value === "" ? undefined : Number(event.target.value) })} placeholder="6" />
+            </label>
+            <label className="space-y-1 text-xs">
+              <span className="font-semibold text-muted-foreground">PIDs exactos</span>
+              <Input value={(draft.match.pids ?? []).join(", ")} onChange={(event) => patchDraft({ match: { ...draft.match, pids: event.target.value.split(",").map((value) => value.trim()).filter(Boolean) } })} placeholder="C9500-24Y4C" />
+            </label>
+            <label className="space-y-1 text-xs">
+              <span className="font-semibold text-muted-foreground">Patrones de familia</span>
+              <Input value={(draft.match.familyPatterns ?? []).join(", ")} onChange={(event) => patchDraft({ match: { ...draft.match, familyPatterns: event.target.value.split(",").map((value) => value.trim()).filter(Boolean) } })} placeholder="^c9300-48, 93180" />
+            </label>
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          <div className="space-y-3">
+            <div className="rounded-xl border border-border bg-background p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold">Secciones de puertos</p>
+                  <p className="text-xs text-muted-foreground">Define downlinks, uplinks y patrones de nombre. Cada sección genera sockets del preview.</p>
+                </div>
+                <Button size="sm" variant="secondary" onClick={addSection}>
+                  <Plus size={14} />
+                  Agregar
+                </Button>
+              </div>
+              <div className="mt-3 space-y-3">
+          {draft.sections.map((section, index) => (
+            <div key={index} className="rounded-lg border border-border/70 bg-muted/15 p-3">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <Badge tone={section.role === "uplink" ? "info" : section.role === "downlink" ? "success" : "neutral"}>{section.role}</Badge>
+                  <Badge tone="neutral">{section.count} puertos</Badge>
+                  <Badge tone="neutral">{section.media}</Badge>
+                </div>
+                <Button size="sm" variant="ghost" onClick={() => removeSection(index)}>
+                  <Trash2 size={14} />
+                  Quitar
+                </Button>
+              </div>
+              <div className="grid gap-2 md:grid-cols-3 xl:grid-cols-6">
+              <label className="space-y-1 text-[11px]">
+                <span className="text-muted-foreground">Etiqueta</span>
+                <Input value={section.label} onChange={(event) => patchSection(index, { label: event.target.value })} />
+              </label>
+              <label className="space-y-1 text-[11px]">
+                <span className="text-muted-foreground">Rol</span>
+                <select className="h-9 w-full rounded-md border border-border bg-background px-2 text-sm" value={section.role} onChange={(event) => patchSection(index, { role: event.target.value as SectionRole })}>
+                  {SECTION_ROLE_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}
+                </select>
+              </label>
+              <label className="space-y-1 text-[11px]">
+                <span className="text-muted-foreground">Medio</span>
+                <select className="h-9 w-full rounded-md border border-border bg-background px-2 text-sm" value={section.media} onChange={(event) => patchSection(index, { media: event.target.value as PortMedia })}>
+                  {PORT_MEDIA_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}
+                </select>
+              </label>
+              <label className="space-y-1 text-[11px]">
+                <span className="text-muted-foreground">Velocidad</span>
+                <Input value={section.speed} onChange={(event) => patchSection(index, { speed: event.target.value })} placeholder="25G" />
+              </label>
+              <label className="space-y-1 text-[11px]">
+                <span className="text-muted-foreground">Cantidad</span>
+                <Input type="number" value={section.count} onChange={(event) => patchSection(index, { count: Number(event.target.value) })} />
+              </label>
+              <label className="space-y-1 text-[11px]">
+                <span className="text-muted-foreground">Inicio (n)</span>
+                <Input type="number" value={section.startIndex} onChange={(event) => patchSection(index, { startIndex: Number(event.target.value) })} />
+              </label>
+              <label className="space-y-1 text-[11px] md:col-span-2 xl:col-span-3">
+                <span className="text-muted-foreground">Patron de nombre (incluye {"{n}"})</span>
+                <Input value={section.namePattern} onChange={(event) => patchSection(index, { namePattern: event.target.value })} placeholder="TwentyFiveGigE1/0/{n}" />
+              </label>
+              <label className="space-y-1 text-[11px]">
+                <span className="text-muted-foreground">Filas</span>
+                <select className="h-9 w-full rounded-md border border-border bg-background px-2 text-sm" value={section.rows} onChange={(event) => patchSection(index, { rows: event.target.value === "2" ? 2 : 1 })}>
+                  <option value="1">1</option>
+                  <option value="2">2</option>
+                </select>
+              </label>
+              <label className="space-y-1 text-[11px]">
+                <span className="text-muted-foreground">Bloque</span>
+                <Input type="number" value={section.blockSize ?? ""} onChange={(event) => patchSection(index, { blockSize: event.target.value === "" ? undefined : Number(event.target.value) })} placeholder="6" />
+              </label>
+              </div>
+            </div>
+          ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+      </div>
+
+      <section className="rounded-xl border border-border bg-background p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold">Preview del faceplate</p>
+            <p className="text-xs text-muted-foreground">Se renderiza con el mismo componente y el mismo ancho disponible que el subtab Interfaces.</p>
+          </div>
+          {previewProfile.profile ? <Badge tone="success">válido</Badge> : <Badge tone="warning">revisar</Badge>}
+        </div>
+        <div className="mt-3">
+          {previewProfile.profile ? (
+            <TopologyDeviceInterfaceCard
+              device={buildProfilePreviewDevice(previewProfile.profile)}
+              selectedInterfaceKey={null}
+              collapsed={false}
+              onToggleCollapsed={() => undefined}
+              onSelectInterface={() => undefined}
+              onHoverInterface={() => undefined}
+              onClearHover={() => undefined}
+            />
+          ) : (
+            <div className="rounded-md border border-dashed border-border bg-muted/20 px-3 py-4 text-xs text-muted-foreground">{previewProfile.error}</div>
+          )}
+        </div>
+      </section>
+
+      <div className="sticky bottom-3 z-10 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-background/95 p-3 shadow-lg backdrop-blur">
+        <div className="text-xs text-muted-foreground">
+          {currentUser ? "Los cambios se guardan en PostgreSQL como override del catálogo." : "Necesitas sesión de admin para guardar cambios."}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button onClick={save} disabled={saving || !currentUser}>
+            <Save size={14} />
+            {saving ? "Guardando..." : "Guardar perfil"}
+          </Button>
+          {selectedId && overrideIds.has(selectedId) && (
+            <Button variant="secondary" onClick={() => removeOverride(selectedId)} disabled={saving}>
+              <RotateCcw size={14} />
+              {DEVICE_PROFILE_SEED_IDS.has(selectedId) ? "Revertir a semilla" : "Eliminar"}
+            </Button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DeviceCatalogStat({
+  label,
+  value,
+  tone = "neutral"
+}: {
+  label: string;
+  value: number;
+  tone?: "neutral" | "warning";
+}) {
+  return (
+    <div className={cn(
+      "rounded-lg border px-3 py-2",
+      tone === "warning" ? "border-amber-500/40 bg-amber-500/10" : "border-border bg-background/70"
+    )}>
+      <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</p>
+      <p className="mt-1 text-lg font-semibold text-foreground">{value}</p>
+    </div>
+  );
+}
+
+function summarizeDeviceProfileDraft(profile: DeviceVisualProfile) {
+  const downlinks = profile.sections.filter((section) => section.role === "downlink").reduce((sum, section) => sum + section.count, 0);
+  const uplinks = profile.sections.filter((section) => section.role === "uplink").reduce((sum, section) => sum + section.count, 0);
+  const mgmt = profile.sections.filter((section) => section.role === "mgmt").reduce((sum, section) => sum + section.count, 0);
+  return {
+    downlinks,
+    uplinks,
+    mgmt,
+    uplinkSlots: profile.uplinkBaySlots ?? uplinks
+  };
+}
+
+function deviceCatalogCategoryLabel(category: DeviceCategory) {
+  const labels: Record<DeviceCategory, string> = {
+    switch: "Switch",
+    router: "Router",
+    firewall: "Firewall",
+    generic: "Genérico"
+  };
+  return labels[category] ?? category;
+}
+
+function TopologyPortLegend() {
+  return (
+    <div className="flex flex-wrap items-center gap-3 border-t border-border pt-3 text-[11px] text-muted-foreground">
+      <span className="inline-flex items-center gap-1.5">
+        <span className="h-2.5 w-2.5 rounded-full border border-emerald-600 bg-emerald-500" />
+        Up
+      </span>
+      <span className="inline-flex items-center gap-1.5">
+        <span className="flex h-3 w-3 items-center justify-center rounded-full border border-amber-600 bg-amber-400 text-[8px] font-bold text-amber-950">!</span>
+        Alerta
+      </span>
+      <span className="inline-flex items-center gap-1.5">
+        <span className="h-2.5 w-2.5 rounded-full border border-muted-foreground bg-background" />
+        Down
+      </span>
+      <span className="inline-flex items-center gap-1.5">
+        <span className="text-[11px] font-bold text-muted-foreground">x</span>
+        Admin
+      </span>
+      <span className="inline-flex items-center gap-1.5">
+        <span className="h-3 w-5 rounded border border-dashed border-border bg-muted/30" />
+        Inferida / sin datos
+      </span>
+      <span className="inline-flex items-center gap-1.5">
+        <span className="h-1.5 w-1.5 rounded-full bg-sky-500" />
+        Con vecino
+      </span>
+    </div>
+  );
+}
+
+function TopologySummaryFilterBadge({
+  children,
+  tone,
+  active,
+  onClick
+}: {
+  children: React.ReactNode;
+  tone: "success" | "warning" | "neutral" | "info";
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={cn("rounded-md transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary", active && "ring-2 ring-primary ring-offset-1 ring-offset-background")}
+      onClick={onClick}
+    >
+      <Badge tone={tone}>{children}</Badge>
+    </button>
+  );
+}
+
+function TopologyFilterToggle({
+  children,
+  active,
+  onClick
+}: {
+  children: React.ReactNode;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <Button
+      size="sm"
+      variant={active ? "primary" : "secondary"}
+      className={cn(active ? "" : "border-border bg-background text-foreground hover:bg-muted/70")}
+      onClick={onClick}
+    >
+      {children}
+    </Button>
+  );
+}
+
+function TopologyPortLed({ port }: { port: TopologyInterfacePort }) {
+  if (port.inferred) return null;
+  if (port.state === "warning") {
+    return (
+      <span className="absolute left-1 top-1 flex h-3.5 w-3.5 items-center justify-center rounded-full border border-amber-600 bg-amber-400 text-[9px] font-bold leading-none text-amber-950">
+        !
+      </span>
+    );
+  }
+  if (port.state === "disabled") {
+    return <span className="absolute left-1 top-0.5 text-[12px] font-bold leading-none text-muted-foreground">x</span>;
+  }
+  if (port.state === "up") {
+    return <span className="absolute left-1 top-1 h-2.5 w-2.5 rounded-full border border-emerald-700 bg-emerald-500 shadow-[0_0_0_2px_rgba(16,185,129,0.14)]" />;
+  }
+  return <span className="absolute left-1 top-1 h-2.5 w-2.5 rounded-full border border-muted-foreground bg-background" />;
+}
+
+function TopologyInterfaceHoverTooltip({
+  port,
+  anchor
+}: {
+  port: TopologyInterfacePort;
+  anchor: TopologyInterfacePopoverAnchor;
+}) {
+  return (
+    <div
+      className="pointer-events-none fixed z-[60] w-[280px] rounded-md border border-border bg-[hsl(var(--surface-raised))] px-3 py-2 text-left text-xs text-foreground shadow-xl ring-1 ring-black/10 dark:ring-white/10"
+      style={{ left: anchor.x, top: anchor.y }}
+      role="tooltip"
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="truncate font-semibold">{port.name}</p>
+          <p className="mt-0.5 truncate text-muted-foreground">{port.hostname}</p>
+        </div>
+        <span className={cn("mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full border", port.state === "up" ? "border-emerald-600 bg-emerald-500" : port.state === "warning" ? "border-amber-600 bg-amber-400" : "border-muted-foreground bg-background")} />
+      </div>
+      <p className="mt-2 text-muted-foreground">{port.status || "Estado desconocido"} · {port.mode || "Modo no reportado"}</p>
+      <p className="mt-1 line-clamp-2 text-muted-foreground">{port.description || "Sin descripcion"}</p>
+      <p className="mt-1 truncate text-muted-foreground">Vecino: {port.neighbors[0]?.remoteHostname || "No reportado"}</p>
+    </div>
+  );
+}
+
+function topologyInterfaceMatchesFilters(port: TopologyInterfacePort, query: string, filters: TopologyInterfaceFilterKey[]) {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (normalizedQuery) {
+    const haystack = [
+      port.name,
+      port.description,
+      port.hostname,
+      port.neighbors.map((neighbor) => `${neighbor.remoteHostname} ${neighbor.remoteInterface}`).join(" ")
+    ].join(" ").toLowerCase();
+    if (!haystack.includes(normalizedQuery)) return false;
+  }
+
+  if (filters.length === 0) return true;
+  return filters.some((filter) => {
+    if (filter === "neighbor") return port.neighbors.length > 0;
+    return port.state === filter;
+  });
+}
+
+function topologyPortTooltipText(port: TopologyInterfacePort) {
+  return [
+    port.name,
+    port.status || "Estado desconocido",
+    port.description || "Sin descripcion",
+    `Vecino: ${port.neighbors[0]?.remoteHostname || "No reportado"}`
+  ].join(" · ");
+}
+
+function topologyPortAriaLabel(port: TopologyInterfacePort) {
+  const state = topologyInterfaceStateLabel(port.state);
+  const neighbor = port.neighbors[0]?.remoteHostname ? `, vecino ${port.neighbors[0].remoteHostname}` : ", sin vecino reportado";
+  const inferred = port.inferred ? ", inferido sin datos directos" : "";
+  return `${port.hostname} ${port.name}, estado ${state}${neighbor}${inferred}`;
+}
+
+function TopologyInterfaceFloatingPanel({
+  port,
+  anchor,
+  siblingPorts,
+  onSelectInterface,
+  onClose
+}: {
+  port: TopologyInterfacePort;
+  anchor: TopologyInterfacePopoverAnchor;
+  siblingPorts: TopologyInterfacePort[];
+  onSelectInterface: (interfaceKey: string, anchor: TopologyInterfacePopoverAnchor) => void;
+  onClose: () => void;
+}) {
+  const panelRef = useRef<HTMLElement | null>(null);
+  const currentIndex = siblingPorts.findIndex((item) => item.key === port.key);
+  const previousPort = currentIndex > 0 ? siblingPorts[currentIndex - 1] : null;
+  const nextPort = currentIndex >= 0 && currentIndex < siblingPorts.length - 1 ? siblingPorts[currentIndex + 1] : null;
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+    }
+
+    function handlePointerDown(event: MouseEvent) {
+      const target = event.target;
+      if (target instanceof Node && panelRef.current?.contains(target)) return;
+      onClose();
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("mousedown", handlePointerDown);
+    };
+  }, [onClose]);
+
+  function navigateTo(target: TopologyInterfacePort | null) {
+    if (!target) return;
+    onSelectInterface(target.key, anchor);
+  }
+
+  return (
+    <aside
+      ref={panelRef}
+      className="fixed z-50 max-h-[calc(100vh-24px)] w-[340px] max-w-[calc(100vw-24px)] overflow-visible rounded-md border border-border bg-[hsl(var(--surface-raised))] text-foreground shadow-xl"
+      style={{ left: anchor.x, top: anchor.y }}
+    >
+      <span className="absolute -top-2 left-1/2 h-4 w-4 -translate-x-1/2 rotate-45 border-l border-t border-border bg-[hsl(var(--surface-raised))]" />
+      <div className="max-h-[calc(100vh-24px)] overflow-auto rounded-md">
+      <div className="flex items-start justify-between gap-3 border-b border-border p-4">
+        <div className="min-w-0">
+          <p className="text-xs font-semibold uppercase text-muted-foreground">{port.hostname}</p>
+          <h3 className="truncate text-sm font-semibold">{port.name}</h3>
+        </div>
+        <Button size="icon" variant="ghost" title="Cerrar detalle" onClick={onClose}>
+          <X size={15} />
+        </Button>
+      </div>
+      <div className="space-y-4 p-4">
+        <div className="flex items-center justify-between gap-2">
+          <Button size="sm" variant="secondary" disabled={!previousPort} onClick={() => navigateTo(previousPort)}>
+            <ArrowLeft size={14} />
+            Anterior
+          </Button>
+          <span className="text-xs text-muted-foreground">{currentIndex >= 0 ? currentIndex + 1 : "-"} / {siblingPorts.length || "-"}</span>
+          <Button size="sm" variant="secondary" disabled={!nextPort} onClick={() => navigateTo(nextPort)}>
+            Siguiente
+            <ArrowRight size={14} />
+          </Button>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge tone={port.state === "up" ? "success" : port.state === "warning" ? "warning" : port.state === "unknown" ? "info" : "neutral"}>{port.status || "Desconocido"}</Badge>
+          <Badge tone="info">{port.mode}</Badge>
+          <Badge>{port.medium}</Badge>
+        </div>
+        <div className="grid gap-2 text-sm">
+          <TopologyDetail label="Descripcion" value={port.description || "Sin descripcion"} />
+          <TopologyDetail label="VLAN / L3" value={port.vlan || "No reportado"} />
+          <TopologyDetail label="Duplex" value={port.duplex || "No reportado"} />
+          <TopologyDetail label="Velocidad" value={port.speed || "No reportado"} />
+          <TopologyDetail label="Tipo / SFP" value={port.type || port.medium || "No reportado"} />
+        </div>
+        <div>
+          <p className="text-xs font-semibold uppercase text-muted-foreground">Vecinos</p>
+          <div className="mt-2 space-y-2">
+            {port.neighbors.length === 0 ? (
+              <p className="rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">Sin vecino CDP/LLDP asociado a esta interfaz.</p>
+            ) : (
+              port.neighbors.map((neighbor) => (
+                <div key={neighbor.id} className="rounded-md border border-border p-3 text-sm">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="truncate font-semibold">{neighbor.remoteHostname}</p>
+                      <p className="truncate text-xs text-muted-foreground">{neighbor.remoteInterface}</p>
+                    </div>
+                    <Badge tone={neighbor.protocol === "cdp" ? "info" : "success"}>{neighbor.protocol.toUpperCase()}</Badge>
+                  </div>
+                  <div className="mt-2 grid gap-1 text-xs text-muted-foreground">
+                    <span>Confianza: {Math.round(neighbor.confidence * 100)}%</span>
+                    {neighbor.platform && <span>Plataforma: {neighbor.platform}</span>}
+                    {neighbor.managementIp && <span>IP gestion: {neighbor.managementIp}</span>}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+        <div>
+          <p className="text-xs font-semibold uppercase text-muted-foreground">Evidencia</p>
+          <div className="mt-2 space-y-1">
+            {port.evidence.slice(0, 3).map((line, index) => (
+              <pre key={`${port.key}-evidence-${index}`} className="overflow-auto rounded-md border border-border bg-muted/40 px-2 py-1 text-[11px] text-muted-foreground">{line}</pre>
+            ))}
+            {port.evidence.length === 0 && <p className="text-sm text-muted-foreground">Sin evidencia textual asociada.</p>}
+          </div>
+        </div>
+      </div>
+      </div>
+    </aside>
+  );
+}
+
 function TopologyRelationsView({ record }: { record: AssessmentRecord }) {
   const effectiveParsed = effectiveParsedNetworkData(record);
   const groups = topologyRelationGroups(effectiveParsed.relations);
@@ -5655,6 +7588,512 @@ function topologyRelationGroups(relations: NeighborRelation[]) {
       ))
     }))
     .sort((left, right) => left.hostname.localeCompare(right.hostname));
+}
+
+function buildTopologyInterfaceDevices(record: AssessmentRecord, profiles: DeviceVisualProfile[] = DEFAULT_DEVICE_PROFILES): TopologyInterfaceDevice[] {
+  const effectiveParsed = effectiveParsedNetworkData(record);
+  const deviceMap = new Map<string, {
+    id: string;
+    hostname: string;
+    model: string;
+    role: string;
+    site: string;
+    deviceType: string;
+  }>();
+  const portsByDevice = new Map<string, Map<string, TopologyInterfacePort>>();
+
+  function upsertDevice(hostname: string, patch: Partial<Omit<TopologyInterfaceDevice, "ports" | "layout">>) {
+    const id = topologyNodeId(hostname);
+    if (!id) return;
+    const existing = deviceMap.get(id);
+    deviceMap.set(id, {
+      id,
+      hostname: existing?.hostname || hostname,
+      model: preferTopologyValue(existing?.model ?? "", patch.model ?? ""),
+      role: preferTopologyValue(existing?.role ?? "", patch.role ?? ""),
+      site: preferTopologyValue(existing?.site ?? "", patch.site ?? ""),
+      deviceType: preferTopologyValue(existing?.deviceType ?? "", patch.deviceType ?? "")
+    });
+  }
+
+  function upsertPort(hostname: string, name: string, patch: Partial<TopologyInterfacePort>) {
+    const deviceId = topologyNodeId(hostname);
+    const portId = topologyInterfaceId(name);
+    if (!deviceId || !portId) return null;
+    upsertDevice(hostname, {});
+    const devicePorts = portsByDevice.get(deviceId) ?? new Map<string, TopologyInterfacePort>();
+    const existing = devicePorts.get(portId);
+    const status = String(patch.status ?? existing?.status ?? "neighbor").trim();
+    const vlan = String(patch.vlan ?? existing?.vlan ?? "").trim();
+    const speed = String(patch.speed ?? existing?.speed ?? "").trim();
+    const type = String(patch.type ?? existing?.type ?? "").trim();
+    const description = String(patch.description ?? existing?.description ?? "").trim();
+    const kind = patch.kind ?? existing?.kind ?? inferTopologyInterfaceKind(name, speed, type);
+    const next: TopologyInterfacePort = {
+      key: `${deviceId}:${portId}`,
+      deviceId,
+      hostname,
+      name: existing?.name || name,
+      label: topologyInterfacePortLabel(existing?.name || name),
+      physicalIndex: patch.physicalIndex ?? existing?.physicalIndex ?? topologyInterfacePhysicalIndex(existing?.name || name),
+      inferred: patch.inferred ?? existing?.inferred ?? false,
+      status,
+      state: patch.state ?? existing?.state ?? topologyInterfaceState(status),
+      vlan,
+      mode: patch.mode ?? existing?.mode ?? inferTopologyInterfaceMode(existing?.name || name, vlan),
+      duplex: String(patch.duplex ?? existing?.duplex ?? "").trim(),
+      speed,
+      medium: patch.medium ?? existing?.medium ?? inferTopologyInterfaceMedium(kind, speed, type),
+      type,
+      description,
+      kind,
+      role: patch.role ?? existing?.role ?? "downlink",
+      profileSectionId: patch.profileSectionId ?? existing?.profileSectionId,
+      profileRows: patch.profileRows ?? existing?.profileRows,
+      profileBlockSize: patch.profileBlockSize ?? existing?.profileBlockSize,
+      evidence: Array.from(new Set([...(existing?.evidence ?? []), ...(patch.evidence ?? [])])),
+      neighbors: dedupeTopologyInterfaceNeighbors([...(existing?.neighbors ?? []), ...(patch.neighbors ?? [])])
+    };
+    devicePorts.set(portId, next);
+    portsByDevice.set(deviceId, devicePorts);
+    return next;
+  }
+
+  for (const asset of record.targetInventory) {
+    if (!asset.included) continue;
+    upsertDevice(asset.hostname, {
+      model: asset.model,
+      role: asset.role,
+      site: asset.site,
+      deviceType: deviceTypeLabel(asset.deviceType)
+    });
+  }
+
+  for (const device of effectiveParsed.devices) {
+    upsertDevice(device.hostname, {
+      model: device.model,
+      role: device.suggestedRole,
+      deviceType: device.suggestedRole
+    });
+  }
+
+  for (const intf of effectiveParsed.interfaces) {
+    upsertDevice(intf.hostname, {});
+    const kind = inferTopologyInterfaceKind(intf.name, intf.speed ?? "", intf.type ?? "");
+    upsertPort(intf.hostname, intf.name, {
+      status: intf.status,
+      state: topologyInterfaceState(intf.status),
+      vlan: intf.vlan ?? "",
+      mode: inferTopologyInterfaceMode(intf.name, intf.vlan ?? ""),
+      duplex: intf.duplex ?? "",
+      speed: intf.speed ?? "",
+      type: intf.type ?? "",
+      description: intf.description ?? "",
+      kind,
+      medium: inferTopologyInterfaceMedium(kind, intf.speed ?? "", intf.type ?? ""),
+      evidence: intf.evidence
+    });
+  }
+
+  for (const relation of effectiveParsed.relations) {
+    upsertDevice(relation.localHostname, {});
+    upsertDevice(relation.remoteHostname, {
+      model: relation.platform ?? "",
+      deviceType: relation.platform ?? ""
+    });
+    upsertPort(relation.localHostname, relation.localInterface, {
+      neighbors: [relation],
+      evidence: relation.evidence
+    });
+    upsertPort(relation.remoteHostname, relation.remoteInterface, {
+      neighbors: [reverseTopologyRelation(relation)],
+      evidence: relation.evidence
+    });
+  }
+
+  const deviceProfileInfo = new Map<string, { confidence: LayoutConfidence; profileId: string | null; profileTitle: string | null; category: "switch" | "router" }>();
+
+  for (const device of deviceMap.values()) {
+    const ports = portsByDevice.get(device.id) ?? new Map<string, TopologyInterfacePort>();
+    const observed = Array.from(ports.values());
+    const observedPhysical = observed.filter((port) => port.kind !== "virtual");
+    const resolved = resolveDeviceProfile({ model: device.model, platform: device.deviceType, deviceType: device.deviceType, role: device.role }, profiles);
+    const confidence = confidenceForMatch(resolved.match, observedPhysical.length > 0);
+    const category: "switch" | "router" = resolved.profile
+      ? (resolved.profile.category === "switch" ? "switch" : "router")
+      : topologyInterfaceDeviceLayout(device, observed);
+    deviceProfileInfo.set(device.id, {
+      confidence,
+      profileId: resolved.profile?.id ?? null,
+      profileTitle: resolved.profile?.title ?? null,
+      category
+    });
+
+    // Sin perfil (inferido/generico): se conservan los puertos observados tal cual; no se inventan.
+    if (!resolved.profile) continue;
+
+    // Con perfil: se reconstruyen los puertos fisicos desde los slots del modelo y se enlazan
+    // con la evidencia observada por nombre canonico. Las interfaces logicas se conservan.
+    const observedByKey = new Map(observedPhysical.map((port) => [canonicalInterfaceKey(port.name), port] as const));
+    const usedKeys = new Set<string>();
+    for (const [portId, port] of Array.from(ports.entries())) {
+      if (port.kind !== "virtual") ports.delete(portId);
+    }
+
+    for (const slot of generateProfileSlots(resolved.profile)) {
+      const slotKey = canonicalInterfaceKey(slot.name);
+      const match = observedByKey.get(slotKey);
+      const kind = slotMediaToKind(slot.media, slot.role);
+      if (match) {
+        usedKeys.add(slotKey);
+        upsertPort(device.hostname, match.name, {
+          ...match,
+          physicalIndex: slot.index,
+          role: slot.role,
+          kind,
+          medium: slotMediaLabel(slot.media),
+          profileSectionId: slot.sectionId,
+          profileRows: slot.rows,
+          profileBlockSize: slot.blockSize,
+          inferred: false
+        });
+      } else {
+        upsertPort(device.hostname, slot.name, {
+          physicalIndex: slot.index,
+          role: slot.role,
+          inferred: true,
+          status: "notconnect",
+          state: "down",
+          vlan: "",
+          mode: slot.role === "uplink" ? "Uplink libre" : "Libre / sin enlace",
+          duplex: "",
+          speed: slot.speed,
+          type: slot.media,
+          description: "Puerto del modelo no observado en la evidencia.",
+          kind,
+          medium: slotMediaLabel(slot.media),
+          profileSectionId: slot.sectionId,
+          profileRows: slot.rows,
+          profileBlockSize: slot.blockSize
+        });
+      }
+    }
+
+    // Extras: fisicas observadas que no coinciden con ningun slot (subinterfaces, modulos no
+    // modelados). Se muestran para no ocultar datos reales, nunca se inventan.
+    for (const port of observedPhysical) {
+      if (usedKeys.has(canonicalInterfaceKey(port.name))) continue;
+      upsertPort(device.hostname, port.name, { ...port, role: port.role ?? "downlink" });
+    }
+  }
+
+  return Array.from(deviceMap.values())
+    .map((device) => {
+      const ports = Array.from(portsByDevice.get(device.id)?.values() ?? []).sort(compareTopologyPorts);
+      const info = deviceProfileInfo.get(device.id);
+      return {
+        ...device,
+        deviceType: device.deviceType || "Equipo",
+        layout: info?.category ?? topologyInterfaceDeviceLayout(device, ports),
+        confidence: info?.confidence ?? "generic",
+        profileId: info?.profileId ?? null,
+        profileTitle: info?.profileTitle ?? null,
+        ports
+      };
+    })
+    .filter((device) => device.ports.length > 0)
+    .sort((left, right) => left.hostname.localeCompare(right.hostname, undefined, { numeric: true, sensitivity: "base" }));
+}
+
+function slotMediaToKind(media: PortMedia, role: SectionRole): TopologyInterfacePort["kind"] {
+  if (mediaIsFiber(media)) return "sfp";
+  if (role === "uplink") return "copper-uplink";
+  return "copper";
+}
+
+function slotMediaLabel(media: PortMedia): string {
+  if (media === "RJ45" || media === "RJ45-mgmt") return "Copper";
+  if (media === "SFP") return "SFP / fibra";
+  if (media === "SFP+") return "SFP+ / fibra";
+  if (media === "SFP28") return "SFP28 / fibra";
+  return "QSFP / fibra";
+}
+
+function findTopologyInterfacePort(devices: TopologyInterfaceDevice[], interfaceKey: string) {
+  for (const device of devices) {
+    const port = device.ports.find((item) => item.key === interfaceKey);
+    if (port) return port;
+  }
+  return null;
+}
+
+function reverseTopologyRelation(relation: NeighborRelation): NeighborRelation {
+  return {
+    ...relation,
+    id: `${relation.id}:reverse`,
+    localDeviceId: topologyNodeId(relation.remoteHostname),
+    localHostname: relation.remoteHostname,
+    localInterface: relation.remoteInterface,
+    remoteHostname: relation.localHostname,
+    remoteInterface: relation.localInterface
+  };
+}
+
+function dedupeTopologyInterfaceNeighbors(relations: NeighborRelation[]) {
+  const seen = new Set<string>();
+  return relations.filter((relation) => {
+    const key = `${relation.protocol}:${relation.remoteHostname}:${relation.remoteInterface}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function topologyInterfaceDeviceLayout(
+  device: Pick<TopologyInterfaceDevice, "model" | "role" | "deviceType">,
+  ports: TopologyInterfacePort[]
+): TopologyInterfaceDevice["layout"] {
+  const value = `${device.model} ${device.role} ${device.deviceType}`.toLowerCase();
+  if (isTopologySwitchLikeDevice(device)) return "switch";
+  if (/router|wan|isr|asr|firewall|asa|ftd|fpr|edge/.test(value)) return "router";
+  if (ports.length <= 8 && !isTopologySwitchLikeValue(value)) return "router";
+  return "switch";
+}
+
+function isTopologySwitchLikeDevice(device: Pick<TopologyInterfaceDevice, "model" | "role" | "deviceType">) {
+  return isTopologySwitchLikeValue(`${device.model} ${device.role} ${device.deviceType}`.toLowerCase());
+}
+
+function isTopologySwitchLikeValue(value: string) {
+  return /switch|catalyst|nexus|nx-?os|n[579]k|c93\d{3}|leaf|spine|access|core|distribution|distribucion|dist|datacenter fabric/.test(value);
+}
+
+function topologyInterfaceId(name: string) {
+  return normalizeInterfaceName(name).replace(/[^a-z0-9/.-]+/g, "");
+}
+
+function normalizeInterfaceName(name: string) {
+  return name
+    .toLowerCase()
+    .trim()
+    .replace(/^gigabitethernet/, "gi")
+    .replace(/^tengigabitethernet/, "te")
+    .replace(/^twentyfivegigabitethernet/, "twe")
+    .replace(/^fortygigabitethernet/, "fo")
+    .replace(/^hundredgigabitethernet/, "hu")
+    .replace(/^fastethernet/, "fa")
+    .replace(/^ethernet/, "eth")
+    .replace(/^port-channel/, "po")
+    .replace(/^vlan/, "vl")
+    .replace(/^loopback/, "lo")
+    .replace(/\s+/g, "");
+}
+
+function topologyInterfacePortLabel(name: string) {
+  const normalized = normalizeInterfaceName(name);
+  const match = normalized.match(/(\d+(?:\/\d+)*)$/);
+  if (!match) return normalized.slice(0, 6).toUpperCase();
+  const parts = match[1].split("/");
+  if (parts.length >= 2) return parts[parts.length - 1];
+  return match[1];
+}
+
+function topologyInterfacePhysicalIndex(name: string) {
+  const match = normalizeInterfaceName(name).match(/(\d+)$/);
+  return match ? Number(match[1]) : null;
+}
+
+function compareTopologyPorts(left: TopologyInterfacePort, right: TopologyInterfacePort) {
+  const kindOrder: Record<TopologyInterfacePort["kind"], number> = { copper: 0, "copper-uplink": 1, sfp: 2, virtual: 3 };
+  const kindDiff = kindOrder[left.kind] - kindOrder[right.kind];
+  if (kindDiff !== 0) return kindDiff;
+  if (left.physicalIndex !== null && right.physicalIndex !== null && left.physicalIndex !== right.physicalIndex) {
+    return left.physicalIndex - right.physicalIndex;
+  }
+  return normalizeInterfaceName(left.name).localeCompare(normalizeInterfaceName(right.name), undefined, { numeric: true, sensitivity: "base" });
+}
+
+function topologyFrontPanelRows(ports: TopologyInterfacePort[]) {
+  const sorted = [...ports].sort(compareTopologyPorts);
+  if (sorted.length > 12) {
+    const numbered = sorted.every((port) => port.physicalIndex !== null);
+    if (numbered) {
+      const top = sorted.filter((port) => (port.physicalIndex ?? 0) % 2 === 1);
+      const bottom = sorted.filter((port) => (port.physicalIndex ?? 0) % 2 === 0);
+      return [top, bottom];
+    }
+    const midpoint = Math.ceil(sorted.length / 2);
+    return [sorted.slice(0, midpoint), sorted.slice(midpoint)];
+  }
+  return [sorted];
+}
+
+function topologySwitchPanelRows(ports: TopologyInterfacePort[]) {
+  const sorted = [...ports].sort(compareTopologyPorts);
+  if (sorted.length === 0) return [];
+
+  const profileRows = topologyProfileRowsForPorts(sorted);
+  if (profileRows === 1) return [sorted];
+
+  const numbered = sorted.every((port) => port.physicalIndex !== null);
+  if ((profileRows === 2 || numbered) && numbered && sorted.length > 1) {
+    const top = sorted.filter((port) => (port.physicalIndex ?? 0) % 2 === 1);
+    const bottom = sorted.filter((port) => (port.physicalIndex ?? 0) % 2 === 0);
+    return [top, bottom].filter((row) => row.length > 0);
+  }
+
+  if (sorted.length > 12) {
+    const midpoint = Math.ceil(sorted.length / 2);
+    return [sorted.slice(0, midpoint), sorted.slice(midpoint)].filter((row) => row.length > 0);
+  }
+
+  return [sorted];
+}
+
+function topologyProfileRowsForPorts(ports: TopologyInterfacePort[]) {
+  const profileRows = ports.map((port) => port.profileRows).filter((value): value is 1 | 2 => value === 1 || value === 2);
+  if (profileRows.length === 0) return null;
+  return profileRows.includes(2) ? 2 : 1;
+}
+
+function topologySwitchColumnsPerBlock(ports: TopologyInterfacePort[], rowCount: number) {
+  const blockSize = ports.find((port) => typeof port.profileBlockSize === "number" && port.profileBlockSize > 0)?.profileBlockSize;
+  if (!blockSize) return 3;
+  return Math.max(1, Math.ceil(blockSize / Math.max(1, rowCount)));
+}
+
+function topologySwitchPortBlocks(rows: TopologyInterfacePort[][], columnsPerBlock: number) {
+  const maxColumns = Math.max(0, ...rows.map((row) => row.length));
+  const blocks: TopologyInterfacePort[][][] = [];
+  for (let start = 0; start < maxColumns; start += columnsPerBlock) {
+    const block = rows.map((row) => row.slice(start, start + columnsPerBlock));
+    if (block.some((row) => row.length > 0)) blocks.push(block);
+  }
+  return blocks;
+}
+
+function topologyCompactPanelRows(ports: TopologyInterfacePort[]) {
+  const sorted = [...ports].sort(compareTopologyPorts);
+  if (sorted.length < 4) return [sorted];
+
+  const numbered = sorted.every((port) => port.physicalIndex !== null);
+  if (numbered) {
+    const top = sorted.filter((port) => (port.physicalIndex ?? 0) % 2 === 1);
+    const bottom = sorted.filter((port) => (port.physicalIndex ?? 0) % 2 === 0);
+    return [top, bottom].filter((row) => row.length > 0);
+  }
+
+  const midpoint = Math.ceil(sorted.length / 2);
+  return [sorted.slice(0, midpoint), sorted.slice(midpoint)].filter((row) => row.length > 0);
+}
+
+function topologyUplinkSlotRows(ports: TopologyInterfacePort[]) {
+  const sorted = [...ports].sort(compareTopologyPorts);
+  const numbered = sorted.every((port) => port.physicalIndex !== null);
+  const rows = numbered
+    ? [
+        sorted.filter((port) => (port.physicalIndex ?? 0) % 2 === 1),
+        sorted.filter((port) => (port.physicalIndex ?? 0) % 2 === 0)
+      ]
+    : [sorted.slice(0, 3), sorted.slice(3, 6)];
+
+  return rows.map((row, rowIndex) => {
+    const slots: TopologyUplinkSlot[] = row.slice(0, 3).map((port) => ({ key: port.key, port }));
+    while (slots.length < 3) {
+      slots.push({ key: `uplink-empty-${rowIndex}-${slots.length}`, port: null });
+    }
+    return slots;
+  });
+}
+
+function topologyPhysicalPortSizeClass() {
+  return "h-10 w-10 min-w-10";
+}
+
+function topologyPortSizeClass(port: TopologyInterfacePort, compact: boolean) {
+  if (port.kind === "virtual") return compact ? "h-10 w-16 min-w-16" : "h-11 w-20 min-w-20";
+  return topologyPhysicalPortSizeClass();
+}
+
+function topologyPortHeaderLabel(port: TopologyInterfacePort, mode: "number" | "interface") {
+  return mode === "interface" ? abbreviateInterfaceName(port.name) : port.label;
+}
+
+function abbreviateInterfaceName(name: string) {
+  return name
+    .replace(/^GigabitEthernet/i, "Gi")
+    .replace(/^TenGigabitEthernet/i, "Te")
+    .replace(/^TwentyFiveGigabitEthernet/i, "Twe")
+    .replace(/^FortyGigabitEthernet/i, "Fo")
+    .replace(/^HundredGigabitEthernet/i, "Hu")
+    .replace(/^FastEthernet/i, "Fa")
+    .replace(/^Ethernet/i, "Eth")
+    .replace(/^Port-channel/i, "Po")
+    .replace(/^Vlan/i, "Vl")
+    .replace(/^Loopback/i, "Lo");
+}
+
+function inferTopologyInterfaceKind(name: string, speed: string, type: string): TopologyInterfacePort["kind"] {
+  const value = `${name} ${speed} ${type}`.toLowerCase();
+  if (/^(po|port-channel|vl|vlan|lo|loopback|tu|tunnel|mgmt)/i.test(name)) return "virtual";
+  if (/\b(sfp|qsfp|xfp|sr|lr|lx|sx|fiber|fibre|twinax)\b/.test(value)) return "sfp";
+  if (/^(te|twe|fo|hu)/i.test(name) && /\b(base-?t|copper|rj-?45)\b/i.test(value)) return "copper-uplink";
+  if (/^(te|twe|fo|hu)/i.test(name) || /\b(10g|25g|40g|100g)\b/i.test(speed)) return "sfp";
+  return "copper";
+}
+
+function inferTopologyInterfaceMedium(kind: TopologyInterfacePort["kind"], speed: string, type: string) {
+  const value = `${speed} ${type}`.toLowerCase();
+  if (kind === "virtual") return "Virtual";
+  if (kind === "copper-uplink") return "Uplink cobre";
+  if (/\b(sfp|qsfp|xfp|sr|lr|lx|sx|fiber|fibre|twinax)\b/.test(value)) return "SFP / fibra";
+  if (/\b(10g|25g|40g|100g)\b/.test(value)) return "SFP / alta velocidad";
+  if (/base-?t|copper|rj-?45|10\/100\/1000/i.test(value)) return "Copper";
+  return kind === "sfp" ? "SFP" : "Copper";
+}
+
+function inferTopologyInterfaceMode(name: string, vlan: string) {
+  const normalizedName = normalizeInterfaceName(name);
+  const normalizedVlan = vlan.toLowerCase().trim();
+  if (/^(vl|lo|po|tu)/.test(normalizedName)) return "Logica";
+  if (normalizedVlan === "trunk") return "Trunk";
+  if (normalizedVlan === "routed") return "L3 routed";
+  if (normalizedVlan && normalizedVlan !== "unassigned") return `Access VLAN ${vlan}`;
+  return "No reportado";
+}
+
+function topologyInterfaceState(status: string): TopologyInterfacePort["state"] {
+  const value = status.toLowerCase().trim();
+  if (/^(connected|up|active)$/.test(value)) return "up";
+  if (/err|fault|suspend|inactive/.test(value)) return "warning";
+  if (/disabled|admin|shutdown/.test(value)) return "disabled";
+  if (/notconnect|down|inactive|monitoring|notpresent/.test(value)) return "down";
+  return "unknown";
+}
+
+function topologyInterfaceStateClass(state: TopologyInterfacePort["state"], inferred = false) {
+  if (inferred) return "border-dashed border-border bg-muted/25 text-muted-foreground";
+  if (state === "warning") return "border-amber-300 bg-muted/30 text-foreground dark:border-amber-500/50";
+  if (state === "disabled") return "border-border bg-muted/30 text-muted-foreground opacity-75";
+  if (state === "down") return "border-border bg-muted/30 text-muted-foreground";
+  if (state === "up") return "border-border bg-background text-foreground";
+  return "border-sky-200 bg-sky-50 text-sky-900 dark:border-sky-500/50 dark:bg-sky-950/30 dark:text-sky-100";
+}
+
+function topologyInterfaceStateLabel(state: TopologyInterfacePort["state"]) {
+  if (state === "up") return "arriba";
+  if (state === "warning") return "alerta";
+  if (state === "disabled") return "administrativamente apagado";
+  if (state === "down") return "abajo";
+  return "desconocido";
+}
+
+function topologyInterfaceLegendClass(state: TopologyInterfacePort["state"]) {
+  if (state === "up") return "border-emerald-300 bg-emerald-500";
+  if (state === "warning") return "border-amber-300 bg-amber-500";
+  if (state === "disabled") return "border-slate-600 bg-slate-800";
+  if (state === "down") return "border-slate-600 bg-slate-700";
+  return "border-sky-300 bg-sky-500";
 }
 
 function TopologyLayerLegend({
@@ -6189,8 +8628,8 @@ function InventoryTab({
   onAddAsset,
   onImportAssets,
   onRemoveAsset,
+  onUpdateAsset,
   onToggleAssetIncluded,
-  onUpdateAssetTopologyLayer,
   onClearAssets,
   onRemoveDuplicateAssets
 }: {
@@ -6198,8 +8637,8 @@ function InventoryTab({
   onAddAsset: (asset: Omit<InventoryAsset, "id">) => void;
   onImportAssets: (assets: Array<Omit<InventoryAsset, "id">>) => void;
   onRemoveAsset: (assetId: string) => void;
+  onUpdateAsset: (assetId: string, patch: InventoryAssetPatch) => void;
   onToggleAssetIncluded: (assetId: string) => void;
-  onUpdateAssetTopologyLayer: (assetId: string, topologyLayer: TopologyLayerId | null) => void;
   onClearAssets: () => void;
   onRemoveDuplicateAssets: () => void;
 }) {
@@ -6212,7 +8651,7 @@ function InventoryTab({
     managementIp: "",
     serial: "",
     model: "",
-    deviceType: "switch",
+    deviceType: "switch-l2",
     platform: "ios-xe",
     role: "access",
     site: "",
@@ -6231,7 +8670,7 @@ function InventoryTab({
       model: asset.model.trim(),
       site: asset.site.trim()
     });
-    setAsset({ hostname: "", managementIp: "", serial: "", model: "", deviceType: "switch", platform: "ios-xe", role: "access", site: "", topologyLayer: undefined, priority: "medium", included: true });
+    setAsset({ hostname: "", managementIp: "", serial: "", model: "", deviceType: "switch-l2", platform: "ios-xe", role: "access", site: "", topologyLayer: undefined, priority: "medium", included: true });
   }
 
   async function handleInventoryWorkbookUpload(event: React.ChangeEvent<HTMLInputElement>) {
@@ -6254,7 +8693,7 @@ function InventoryTab({
           serial: row.serial || "Pendiente",
           model: row.model || "Pendiente",
           deviceType: normalizeDeviceType(row.deviceType),
-          platform: row.platform || "ios-xe",
+          platform: normalizePlatform(row.platform),
           role: row.role || "pending",
           site: row.site || "Pendiente",
           topologyLayer: normalizeTopologyLayer(row.topologyLayer),
@@ -6327,7 +8766,8 @@ function InventoryTab({
           </Field>
           <Field label="Tipo equipo">
             <select className="h-10 w-full rounded-md border border-border bg-white px-3 text-sm" value={asset.deviceType} onChange={(event) => setAsset({ ...asset, deviceType: event.target.value as DeviceType })}>
-              <option value="switch">Switch</option>
+              <option value="switch-l2">Switch L2</option>
+              <option value="switch-l3">Switch L3</option>
               <option value="router">Router</option>
               <option value="nexus-switch">Switch Nexus</option>
               <option value="aci">ACI</option>
@@ -6337,12 +8777,11 @@ function InventoryTab({
             </select>
           </Field>
           <Field label="Plataforma">
-            <select className="h-10 w-full rounded-md border border-border bg-white px-3 text-sm" value={asset.platform} onChange={(event) => setAsset({ ...asset, platform: event.target.value })}>
-              <option value="ios-xe">IOS XE</option>
-              <option value="nx-os">NX-OS</option>
-              <option value="ios">IOS</option>
-              <option value="aci">ACI</option>
-            </select>
+            <PlatformSelect
+              size="md"
+              value={asset.platform}
+              onChange={(platform) => setAsset({ ...asset, platform })}
+            />
           </Field>
           <Field label="Rol">
             <Input value={asset.role} onChange={(event) => setAsset({ ...asset, role: event.target.value })} />
@@ -6383,8 +8822,8 @@ function InventoryTab({
         assets={record.targetInventory}
         duplicateSerials={duplicateSerials}
         onRemoveAsset={onRemoveAsset}
+        onUpdateAsset={onUpdateAsset}
         onToggleAssetIncluded={onToggleAssetIncluded}
-        onUpdateAssetTopologyLayer={onUpdateAssetTopologyLayer}
         onClearAssets={onClearAssets}
         onRemoveDuplicateAssets={onRemoveDuplicateAssets}
       />
@@ -6396,16 +8835,16 @@ function InventoryTable({
   assets,
   duplicateSerials,
   onRemoveAsset,
+  onUpdateAsset,
   onToggleAssetIncluded,
-  onUpdateAssetTopologyLayer,
   onClearAssets,
   onRemoveDuplicateAssets
 }: {
   assets: InventoryAsset[];
   duplicateSerials: Set<string>;
   onRemoveAsset: (assetId: string) => void;
+  onUpdateAsset: (assetId: string, patch: InventoryAssetPatch) => void;
   onToggleAssetIncluded: (assetId: string) => void;
-  onUpdateAssetTopologyLayer: (assetId: string, topologyLayer: TopologyLayerId | null) => void;
   onClearAssets: () => void;
   onRemoveDuplicateAssets: () => void;
 }) {
@@ -6459,6 +8898,7 @@ function InventoryTable({
                 <SortableInventoryHeader label="Serial" sortKey="serial" activeSort={sort} onSort={toggleSort} />
                 <SortableInventoryHeader label="Modelo" sortKey="model" activeSort={sort} onSort={toggleSort} />
                 <SortableInventoryHeader label="Tipo" sortKey="deviceType" activeSort={sort} onSort={toggleSort} />
+                <th className="border-b border-border px-3 py-2 font-semibold">Plataforma</th>
                 <SortableInventoryHeader label="Rol / Sitio" sortKey="role" activeSort={sort} onSort={toggleSort} />
                 <SortableInventoryHeader label="Segmento topologico" sortKey="topologyLayer" activeSort={sort} onSort={toggleSort} />
                 <SortableInventoryHeader label="Prioridad" sortKey="priority" activeSort={sort} onSort={toggleSort} />
@@ -6479,23 +8919,38 @@ function InventoryTable({
                         onChange={() => onToggleAssetIncluded(asset.id)}
                       />
                     </td>
-                    <td className="px-3 py-2 align-top font-medium">{asset.hostname}</td>
-                    <td className="px-3 py-2 align-top">{asset.managementIp}</td>
-                    <td className={cn("px-3 py-2 align-top", isDuplicate && "font-semibold text-rose-700")}>
-                      {asset.serial || "Pendiente"}
-                      {isDuplicate && <span className="ml-2 text-xs">duplicado</span>}
+                    <td className="px-2 py-2 align-top">
+                      <InventoryInlineInput value={asset.hostname} onChange={(value) => onUpdateAsset(asset.id, { hostname: value.trim() })} />
                     </td>
-                    <td className="px-3 py-2 align-top">{asset.model}</td>
-                    <td className="px-3 py-2 align-top">{deviceTypeLabel(asset.deviceType)}</td>
-                    <td className="px-3 py-2 align-top">
-                      <span className="block">{asset.role}</span>
-                      <span className="text-xs text-muted-foreground">{asset.site}</span>
+                    <td className="px-2 py-2 align-top">
+                      <InventoryInlineInput value={asset.managementIp} onChange={(value) => onUpdateAsset(asset.id, { managementIp: value.trim() })} />
                     </td>
-                    <td className="px-3 py-2 align-top">
+                    <td className={cn("px-2 py-2 align-top", isDuplicate && "font-semibold text-rose-700")}>
+                      <InventoryInlineInput value={asset.serial} placeholder="Pendiente" onChange={(value) => onUpdateAsset(asset.id, { serial: value.trim() })} />
+                      {isDuplicate && <span className="mt-1 block text-xs">duplicado</span>}
+                    </td>
+                    <td className="px-2 py-2 align-top">
+                      <InventoryInlineInput value={asset.model} onChange={(value) => onUpdateAsset(asset.id, { model: value.trim() })} />
+                    </td>
+                    <td className="px-2 py-2 align-top">
+                      <DeviceTypeSelect value={normalizeDeviceType(asset.deviceType)} onChange={(deviceType) => onUpdateAsset(asset.id, { deviceType })} />
+                    </td>
+                    <td className="px-2 py-2 align-top">
+                      <PlatformSelect value={normalizePlatform(asset.platform)} onChange={(platform) => onUpdateAsset(asset.id, { platform })} />
+                    </td>
+                    <td className="px-2 py-2 align-top">
+                      <div className="grid gap-1">
+                        <InventoryInlineInput value={asset.role} placeholder="Rol" onChange={(value) => onUpdateAsset(asset.id, { role: value.trim() })} />
+                        <InventoryInlineInput value={asset.site} placeholder="Sitio" onChange={(value) => onUpdateAsset(asset.id, { site: value.trim() })} />
+                      </div>
+                    </td>
+                    <td className="px-2 py-2 align-top">
                       <select
                         className="h-9 min-w-40 rounded-md border border-border bg-white px-2 text-xs"
                         value={asset.topologyLayer ?? "auto"}
-                        onChange={(event) => onUpdateAssetTopologyLayer(asset.id, event.target.value === "auto" ? null : event.target.value as TopologyLayerId)}
+                        onChange={(event) => {
+                          onUpdateAsset(asset.id, { topologyLayer: event.target.value === "auto" ? null : event.target.value as TopologyLayerId });
+                        }}
                         title="Ajustar segmento topologico"
                       >
                         <option value="auto">Auto</option>
@@ -6504,7 +8959,18 @@ function InventoryTable({
                         ))}
                       </select>
                     </td>
-                    <td className="px-3 py-2 align-top">{asset.priority}</td>
+                    <td className="px-2 py-2 align-top">
+                      <select
+                        className="h-9 min-w-28 rounded-md border border-border bg-white px-2 text-xs"
+                        value={asset.priority}
+                        onChange={(event) => onUpdateAsset(asset.id, { priority: event.target.value as InventoryAsset["priority"] })}
+                      >
+                        <option value="critical">Critica</option>
+                        <option value="high">Alta</option>
+                        <option value="medium">Media</option>
+                        <option value="low">Baja</option>
+                      </select>
+                    </td>
                     <td className="px-3 py-2 align-top">
                       <Button size="icon" variant="secondary" title="Eliminar" onClick={() => onRemoveAsset(asset.id)}>
                         <Trash2 size={15} />
@@ -6518,6 +8984,66 @@ function InventoryTable({
         </div>
       </PanelBody>
     </Panel>
+  );
+}
+
+function InventoryInlineInput({
+  value,
+  placeholder,
+  onChange
+}: {
+  value: string;
+  placeholder?: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <Input
+      className="h-9 min-w-32 px-2 text-xs"
+      value={value}
+      placeholder={placeholder}
+      onChange={(event) => onChange(event.target.value)}
+    />
+  );
+}
+
+function DeviceTypeSelect({ value, onChange }: { value: DeviceType; onChange: (value: DeviceType) => void }) {
+  return (
+    <select
+      className="h-9 min-w-36 rounded-md border border-border bg-white px-2 text-xs"
+      value={value}
+      onChange={(event) => onChange(event.target.value as DeviceType)}
+      title="Clasificacion usada para comandos de levantamiento"
+    >
+      {deviceTypeOrder.map((deviceType) => (
+        <option key={deviceType} value={deviceType}>{deviceTypeLabel(deviceType)}</option>
+      ))}
+    </select>
+  );
+}
+
+function PlatformSelect({
+  value,
+  onChange,
+  size = "sm"
+}: {
+  value: PlatformId;
+  onChange: (value: PlatformId) => void;
+  size?: "sm" | "md";
+}) {
+  return (
+    <select
+      className={cn(
+        "rounded-md border border-border bg-white px-2 text-xs",
+        size === "md" ? "h-10 w-full px-3 text-sm" : "h-9 min-w-32"
+      )}
+      value={value}
+      onChange={(event) => onChange(event.target.value as PlatformId)}
+      title="Plataforma soportada para comandos y analisis"
+    >
+      {platformOptions.map((platform) => (
+        <option key={platform.id} value={platform.id}>{platform.label}</option>
+      ))}
+    </select>
   );
 }
 
@@ -6603,7 +9129,15 @@ function SowTab({ record, documentTemplates }: { record: AssessmentRecord; docum
   );
 }
 
-function ScriptsTab({ record }: { record: AssessmentRecord }) {
+function ScriptsTab({
+  record,
+  canEdit,
+  onUpdateCollectionProfile
+}: {
+  record: AssessmentRecord;
+  canEdit: boolean;
+  onUpdateCollectionProfile: (updater: (profile: CollectionCommandProfile) => CollectionCommandProfile) => void;
+}) {
   const [view, setView] = useState<"status" | "performance">("status");
   const script = buildCollectionScript(record);
   const performanceScript = buildPerformanceCollectionScript(record);
@@ -6637,6 +9171,13 @@ function ScriptsTab({ record }: { record: AssessmentRecord }) {
         </div>
       </PanelHeader>
       <PanelBody className="space-y-3">
+        {effectiveView === "status" ? (
+          <CollectionCommandProfileEditor
+            profile={collectionCommandProfileForRecord(record)}
+            canEdit={canEdit}
+            onChange={onUpdateCollectionProfile}
+          />
+        ) : null}
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {(effectiveView === "performance" ? performanceGroups : scriptGroups).map((group) => (
             <div key={group.deviceType} className="rounded-md border border-border p-3">
@@ -6658,6 +9199,172 @@ function ScriptsTab({ record }: { record: AssessmentRecord }) {
         <pre className="max-h-[520px] overflow-auto rounded-md border border-border bg-slate-950 p-4 text-xs leading-relaxed text-slate-100">{downloadContent}</pre>
       </PanelBody>
     </Panel>
+  );
+}
+
+function CollectionCommandProfileEditor({
+  profile,
+  canEdit,
+  onChange
+}: {
+  profile: CollectionCommandProfile;
+  canEdit: boolean;
+  onChange: (updater: (profile: CollectionCommandProfile) => CollectionCommandProfile) => void;
+}) {
+  const [selectedDeviceType, setSelectedDeviceType] = useState<DeviceType>("switch-l2");
+  const selectedProfile = profile.profiles[selectedDeviceType] ?? createEmptyDeviceCommandProfile();
+
+  function updateProfile(updater: (profile: CollectionCommandProfile) => CollectionCommandProfile) {
+    if (!canEdit) return;
+    onChange((current) => normalizeCollectionCommandProfile(updater(current)));
+  }
+
+  function updateGroup(groupId: EvidenceRequirementId, patch: Partial<CollectionCommandGroup>) {
+    updateProfile((current) => ({
+      ...current,
+      groups: current.groups.map((group) => group.id === groupId ? { ...group, ...patch } : group)
+    }));
+  }
+
+  function updateCommands(groupId: EvidenceRequirementId, value: string) {
+    const commands = commandTextareaToList(value);
+    updateProfile((current) => ({
+      ...current,
+      profiles: {
+        ...current.profiles,
+        [selectedDeviceType]: {
+          ...(current.profiles[selectedDeviceType] ?? createEmptyDeviceCommandProfile()),
+          commandGroups: {
+            ...(current.profiles[selectedDeviceType]?.commandGroups ?? {}),
+            [groupId]: commands
+          }
+        }
+      }
+    }));
+  }
+
+  function updateDescription(value: string) {
+    updateProfile((current) => ({
+      ...current,
+      profiles: {
+        ...current.profiles,
+        [selectedDeviceType]: {
+          ...(current.profiles[selectedDeviceType] ?? createEmptyDeviceCommandProfile()),
+          description: value
+        }
+      }
+    }));
+  }
+
+  function addGroup() {
+    const nextId = uniqueCommandGroupId(profile.groups, "nuevo-grupo");
+    updateProfile((current) => ({
+      ...current,
+      groups: [
+        ...current.groups,
+        { id: nextId, label: "Nuevo grupo", shortLabel: "Nuevo", description: "" }
+      ],
+      profiles: Object.fromEntries(deviceTypeOrder.map((deviceType) => [
+        deviceType,
+        {
+          ...(current.profiles[deviceType] ?? createEmptyDeviceCommandProfile()),
+          commandGroups: {
+            ...(current.profiles[deviceType]?.commandGroups ?? {}),
+            [nextId]: []
+          }
+        }
+      ])) as Record<DeviceType, DeviceCommandProfile>
+    }));
+  }
+
+  function removeGroup(groupId: EvidenceRequirementId) {
+    if (!confirmAction("Esto quitara el grupo del perfil de levantamiento y de la matriz de evidencias. Deseas continuar?")) return;
+    updateProfile((current) => ({
+      ...current,
+      groups: current.groups.filter((group) => group.id !== groupId),
+      profiles: Object.fromEntries(deviceTypeOrder.map((deviceType) => {
+        const commandGroups = { ...(current.profiles[deviceType]?.commandGroups ?? {}) };
+        delete commandGroups[groupId];
+        return [
+          deviceType,
+          {
+            ...(current.profiles[deviceType] ?? createEmptyDeviceCommandProfile()),
+            commandGroups
+          }
+        ];
+      })) as Record<DeviceType, DeviceCommandProfile>
+    }));
+  }
+
+  return (
+    <section className="rounded-md border border-border bg-muted/20 p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold">Definicion de comandos por tipo de equipo</h3>
+          <p className="text-xs text-muted-foreground">Estos grupos alimentan el script de levantamiento y la matriz de cumplimiento en Evidencias.</p>
+        </div>
+        <Button size="sm" variant="secondary" onClick={addGroup} disabled={!canEdit}>
+          <Plus size={14} />
+          Grupo
+        </Button>
+      </div>
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        {deviceTypeOrder.map((deviceType) => (
+          <button
+            key={deviceType}
+            type="button"
+            className={cn(
+              "rounded-md border px-3 py-2 text-xs font-medium transition",
+              selectedDeviceType === deviceType ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background text-muted-foreground hover:bg-muted"
+            )}
+            onClick={() => setSelectedDeviceType(deviceType)}
+          >
+            {deviceTypeLabel(deviceType)}
+          </button>
+        ))}
+      </div>
+
+      <label className="mt-3 block space-y-1">
+        <span className="text-xs font-medium text-muted-foreground">Descripcion del perfil</span>
+        <Input value={selectedProfile.description} disabled={!canEdit} onChange={(event) => updateDescription(event.target.value)} />
+      </label>
+
+      <div className="mt-3 grid gap-3 lg:grid-cols-2">
+        {profile.groups.map((group) => {
+          const commands = selectedProfile.commandGroups[group.id] ?? [];
+          return (
+            <div key={group.id} className="rounded-md border border-border bg-background p-3">
+              <div className="flex items-start justify-between gap-2">
+                <div className="grid flex-1 gap-2 sm:grid-cols-[1fr_8rem]">
+                  <label className="space-y-1">
+                    <span className="text-xs font-medium text-muted-foreground">Grupo</span>
+                    <Input value={group.label} disabled={!canEdit} onChange={(event) => updateGroup(group.id, { label: event.target.value })} />
+                  </label>
+                  <label className="space-y-1">
+                    <span className="text-xs font-medium text-muted-foreground">Etiqueta</span>
+                    <Input value={group.shortLabel} disabled={!canEdit} onChange={(event) => updateGroup(group.id, { shortLabel: event.target.value })} />
+                  </label>
+                </div>
+                <Button size="icon" variant="ghost" title="Eliminar grupo" onClick={() => removeGroup(group.id)} disabled={!canEdit || profile.groups.length <= 1}>
+                  <Trash2 size={14} />
+                </Button>
+              </div>
+              <label className="mt-2 block space-y-1">
+                <span className="text-xs font-medium text-muted-foreground">Comandos para {deviceTypeLabel(selectedDeviceType)}</span>
+                <Textarea
+                  value={commands.join("\n")}
+                  disabled={!canEdit}
+                  onChange={(event) => updateCommands(group.id, event.target.value)}
+                  rows={Math.max(3, Math.min(8, commands.length + 1))}
+                  className="font-mono text-xs"
+                />
+              </label>
+            </div>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
@@ -6685,6 +9392,7 @@ function EvidenceTab({
   const [view, setView] = useState<"status" | "performance">("status");
   const [evidenceSubtab, setEvidenceSubtab] = useState<"compliance" | "files">("compliance");
   const coverageRows = buildEvidenceCoverageRows(record);
+  const commandGroups = collectionCommandProfileForRecord(record).groups;
   const completedRows = coverageRows.filter((row) => row.missingCount === 0 && row.skippedCount === 0).length;
   const readyWithSkipsRows = coverageRows.filter((row) => row.missingCount === 0 && row.skippedCount > 0).length;
   const missingRows = coverageRows.filter((row) => row.missingCount > 0).length;
@@ -6748,6 +9456,7 @@ function EvidenceTab({
           compliancePercent={compliancePercent}
           fileCount={record.evidenceFiles.length}
           coverageRows={coverageRows}
+          commandGroups={commandGroups}
           evidenceFiles={record.evidenceFiles}
           onSubtabChange={setEvidenceSubtab}
           onRemoveEvidenceFile={onRemoveEvidenceFile}
@@ -6764,6 +9473,7 @@ function EvidenceStatusSubtabs({
   compliancePercent,
   fileCount,
   coverageRows,
+  commandGroups,
   evidenceFiles,
   onSubtabChange,
   onRemoveEvidenceFile,
@@ -6774,6 +9484,7 @@ function EvidenceStatusSubtabs({
   compliancePercent: number;
   fileCount: number;
   coverageRows: EvidenceCoverageRow[];
+  commandGroups: CollectionCommandGroup[];
   evidenceFiles: EvidenceFile[];
   onSubtabChange: (subtab: "compliance" | "files") => void;
   onRemoveEvidenceFile: (fileId: string) => void;
@@ -6808,7 +9519,7 @@ function EvidenceStatusSubtabs({
       </PanelHeader>
       <PanelBody>
         {activeSubtab === "compliance" ? (
-          <EvidenceCompliancePanel coverageRows={coverageRows} onToggleEvidenceRowSkip={onToggleEvidenceRowSkip} />
+          <EvidenceCompliancePanel coverageRows={coverageRows} commandGroups={commandGroups} onToggleEvidenceRowSkip={onToggleEvidenceRowSkip} />
         ) : (
           <EvidenceFilesPanel
             evidenceFiles={evidenceFiles}
@@ -6823,9 +9534,11 @@ function EvidenceStatusSubtabs({
 
 function EvidenceCompliancePanel({
   coverageRows,
+  commandGroups,
   onToggleEvidenceRowSkip
 }: {
   coverageRows: EvidenceCoverageRow[];
+  commandGroups: CollectionCommandGroup[];
   onToggleEvidenceRowSkip: (assetId: string) => void;
 }) {
   return (
@@ -6845,7 +9558,7 @@ function EvidenceCompliancePanel({
                 <th className="w-28 px-3 py-2 font-semibold">IP</th>
                 <th className="w-36 px-3 py-2 font-semibold">Estado</th>
                 <th className="w-32 px-3 py-2 font-semibold">Accion</th>
-                {evidenceRequirements.map((requirement) => (
+                {commandGroups.map((requirement) => (
                   <th key={requirement.id} className="px-2 py-2 text-center font-semibold" title={requirement.label}>{requirement.shortLabel}</th>
                 ))}
               </tr>
@@ -6869,14 +9582,14 @@ function EvidenceCompliancePanel({
                   </td>
                   <td className="px-3 py-3 align-middle text-sm font-medium text-muted-foreground/95">{row.managementIp || "Pendiente"}</td>
                   <td className="px-3 py-3 align-middle">
-                    <EvidenceRowStatus row={row} />
+                    <EvidenceRowStatus row={row} totalGroups={commandGroups.length} />
                   </td>
                   <td className="px-3 py-3 align-middle">
                     <EvidenceRowAction row={row} onToggleEvidenceRowSkip={onToggleEvidenceRowSkip} />
                   </td>
                   {row.cells.map((cell) => (
                     <td key={cell.requirementId} className="px-2 py-3 align-middle">
-                      <EvidenceRequirementCell cell={cell} />
+                      <EvidenceRequirementCell cell={cell} commandGroups={commandGroups} />
                     </td>
                   ))}
                 </tr>
@@ -7135,14 +9848,14 @@ function EvidenceMetric({ label, value, tone }: { label: string; value: React.Re
   );
 }
 
-function EvidenceRowStatus({ row }: { row: EvidenceCoverageRow }) {
+function EvidenceRowStatus({ row, totalGroups }: { row: EvidenceCoverageRow; totalGroups: number }) {
   if (row.missingCount === 0 && row.skippedCount === 0) {
     return (
       <div className="space-y-1">
         <span className="inline-flex h-6 items-center rounded-md border border-emerald-400/30 bg-emerald-500/15 px-2 text-xs font-semibold text-emerald-200">
           Completed
         </span>
-        <p className="text-xs text-muted-foreground/90">{row.collectedCount}/{evidenceRequirements.length} grupos</p>
+        <p className="text-xs text-muted-foreground/90">{row.collectedCount}/{totalGroups} grupos</p>
       </div>
     );
   }
@@ -7161,7 +9874,7 @@ function EvidenceRowStatus({ row }: { row: EvidenceCoverageRow }) {
       <span className="inline-flex h-6 items-center rounded-md border border-rose-400/35 bg-rose-500/15 px-2 text-xs font-semibold text-rose-200">
         {row.missingCount} faltantes
       </span>
-      <p className="text-xs text-muted-foreground/90">{row.collectedCount}/{evidenceRequirements.length} grupos</p>
+      <p className="text-xs text-muted-foreground/90">{row.collectedCount}/{totalGroups} grupos</p>
     </div>
   );
 }
@@ -7178,8 +9891,8 @@ function EvidenceRowAction({ row, onToggleEvidenceRowSkip }: { row: EvidenceCove
   );
 }
 
-function EvidenceRequirementCell({ cell }: { cell: EvidenceCoverageCell }) {
-  const requirement = evidenceRequirements.find((item) => item.id === cell.requirementId);
+function EvidenceRequirementCell({ cell, commandGroups }: { cell: EvidenceCoverageCell; commandGroups: CollectionCommandGroup[] }) {
+  const requirement = commandGroups.find((item) => item.id === cell.requirementId);
 
   if (cell.status === "collected") {
     return (
@@ -7213,6 +9926,7 @@ function EvidenceRequirementCell({ cell }: { cell: EvidenceCoverageCell }) {
 }
 
 function buildEvidenceCoverageRows(record: AssessmentRecord): EvidenceCoverageRow[] {
+  const collectionProfile = collectionCommandProfileForRecord(record);
   const inventoryAssets = record.targetInventory.filter((asset) => asset.included);
   const effectiveParsed = effectiveParsedNetworkData(record);
   const assets =
@@ -7223,7 +9937,8 @@ function buildEvidenceCoverageRows(record: AssessmentRecord): EvidenceCoverageRo
           managementIp: asset.managementIp,
           serial: asset.serial,
           model: asset.model,
-          role: asset.role
+          role: asset.role,
+          deviceType: normalizeDeviceType(asset.deviceType ?? inferDeviceType(asset))
         }))
       : effectiveParsed.devices.map((device) => ({
           assetId: `parsed:${device.id}`,
@@ -7231,13 +9946,16 @@ function buildEvidenceCoverageRows(record: AssessmentRecord): EvidenceCoverageRo
           managementIp: "No identificado",
           serial: device.serial,
           model: device.model,
-          role: device.suggestedRole
+          role: device.suggestedRole,
+          deviceType: "other" as DeviceType
         }));
 
   return assets.map((asset) => {
     const relevantFiles = findEvidenceFilesForAsset(record, asset);
-    const cells = evidenceRequirements.map((requirement) => {
-      const collectedFiles = relevantFiles.filter((file) => evidenceFileHasRequirement(file, requirement.id));
+    const deviceProfile = collectionProfile.profiles[asset.deviceType] ?? collectionProfile.profiles.other;
+    const cells = collectionProfile.groups.map((requirement) => {
+      const commands = deviceProfile.commandGroups[requirement.id] ?? [];
+      const collectedFiles = relevantFiles.filter((file) => evidenceFileHasRequirement(file, requirement, commands));
       const skipped = record.evidenceSkips.some((skip) => skip.assetId === asset.assetId && skip.requirementId === requirement.id);
 
       return {
@@ -7288,10 +10006,11 @@ function extractEvidenceLocalHostnames(content: string) {
   return Array.from(values);
 }
 
-function evidenceFileHasRequirement(file: EvidenceFile, requirementId: EvidenceRequirementId) {
+function evidenceFileHasRequirement(file: EvidenceFile, requirement: CollectionCommandGroup, commands: string[]) {
   const content = file.content;
+  if (commands.some((command) => evidenceFileContainsCommand(content, command))) return true;
 
-  switch (requirementId) {
+  switch (requirement.id) {
     case "identity":
       return (
         /#\s*show\s+(?:version|ver|inventory|license|module)\b/i.test(content) ||
@@ -7326,6 +10045,17 @@ function evidenceFileHasRequirement(file: EvidenceFile, requirementId: EvidenceR
       return /#\s*show\s+(?:logging|ntp\s+associations|clock|redundancy|environment|feature|failover|access-list|nat|vpn-sessiondb|crypto\s+ikev2\s+sa|conn\s+count|asp\s+drop)\b/i
         .test(content);
   }
+}
+
+function evidenceFileContainsCommand(content: string, command: string) {
+  const normalizedCommand = command.trim();
+  if (!normalizedCommand) return false;
+  const escaped = escapeRegex(normalizedCommand).replace(/\s+/g, "\\s+");
+  return new RegExp(`(?:^|[#>\\n\\r])\\s*${escaped}\\b`, "i").test(content);
+}
+
+function escapeRegex(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function normalizeEvidenceToken(value: string) {
@@ -7851,6 +10581,7 @@ function AiEvaluationTab({
   const pipelineStages = buildPipelineView(aiAnalysisStatus, latestJob);
   const engineJob = activeJob ?? latestJob;
   const lifecyclePrestepRunning = Boolean(lifecyclePrestepState?.running);
+  const liveNow = useLiveNow(Boolean(activeJob || lifecyclePrestepRunning));
   const aiFindingsToReviewCount = record.parsed.findings.filter((finding) => finding.aiMetadata && finding.status === "ai_suggested").length;
   const aiSubtabs = [
     { id: "evaluation" as const, label: "Evaluacion", count: null, active: Boolean(activeJob) },
@@ -7968,6 +10699,7 @@ function AiEvaluationTab({
               {engineJob && (
                 <EvaluationEngineStrip
                   job={engineJob}
+                  now={liveNow}
                   onCancelAnalysisJob={onCancelAnalysisJob}
                   onRetryAnalysisJob={onRetryAnalysisJob}
                 />
@@ -7993,18 +10725,35 @@ function AiEvaluationTab({
                 </div>
                 <div className="grid gap-3 lg:grid-cols-2">
                   {evaluationAreas.map((area, index) => {
+                    if (area.id === "performance") {
+                      return performanceEnabled ? (
+                        <PerformanceAnalysisRunCard
+                          key={area.id}
+                          record={record}
+                          order={index + 1}
+                          label={area.label}
+                          description={area.description}
+                          onProcessPerformance={onProcessPerformance}
+                          onRunPerformanceAi={onRunPerformanceAi}
+                          onResetPerformance={onResetPerformance}
+                          onViewFindings={() => toggleScopeFindingFilterFromEvaluation(area.id)}
+                          findingsFilterActive={scopeFindingFilter === area.id}
+                        />
+                      ) : null;
+                    }
                     const scopeId = evaluationAreaToAIScope(area.id);
+                    const memberScopeIds = ambitoScopeIds(area.id, aiAnalysisStatus);
                     const scopeStatus = aiAnalysisStatus?.scopes.find((scope) => scope.id === scopeId);
-                    const latestScopeJob = latestJob?.mode === "scope" && latestJob.scopeId === scopeId ? latestJob : undefined;
-                    const isScopeRunning = isScopeJobActive(scopeId, aiAnalysisStatus, latestJob);
-                    const isCurrentScopeExecuting = isScopeCurrentlyExecuting(scopeId, latestJob);
-                    const areaFindings = record.parsed.findings.filter((finding) => finding.category === areaToCategory(area.id));
-                    const canResetArea = hasScopeDisplayActivity(scopeId, aiAnalysisStatus, latestJob, areaFindings);
-                    const displayedStatus = statusForScopeDisplay(scopeId, aiAnalysisStatus, latestJob);
-                    const scopeProgress = scopeProgressFromStatus(scopeId, aiAnalysisStatus, latestJob);
-                    const scopeMessage = scopeStatusMessage(scopeId, displayedStatus, scopeStatus, latestScopeJob ?? latestJob);
+                    const isScopeRunning = memberScopeIds.some((memberScopeId) => isScopeJobActive(memberScopeId, aiAnalysisStatus, latestJob));
+                    const isCurrentScopeExecuting = memberScopeIds.some((memberScopeId) => isScopeCurrentlyExecuting(memberScopeId, latestJob));
+                    const areaFindings = filterFindingsByArea(record.parsed.findings, area.id);
+                    const canResetArea = hasAmbitoActivity(area.id, aiAnalysisStatus, latestJob, areaFindings);
+                    const displayedStatus = statusForAmbitoDisplay(area.id, aiAnalysisStatus, latestJob);
+                    const scopeProgress = progressForAmbitoDisplay(area.id, aiAnalysisStatus, latestJob);
+                    const scopeMessage = ambitoStatusMessage(area.id, displayedStatus, scopeStatus, aiAnalysisStatus, latestJob);
+                    const monitorScopeId = activeAmbitoMonitorScopeId(area.id, aiAnalysisStatus, latestJob);
+                    const scopeMonitorJob = monitorScopeId ? findScopeMonitorJob(monitorScopeId, aiAnalysisStatus, latestJob) : undefined;
                     const findingSummary = summarizeAreaFindings(areaFindings);
-                    const scopeDisplay = aiScopeDisplayOrder.find((scope) => scope.id === scopeId);
                     const detailOpen = Boolean(expandedAreaDetails[area.id]);
                     const findingsFilterActive = scopeFindingFilter === area.id;
                     const operationsInterviewBlocked = area.id === "operations" && !isOperationalAssessmentComplete(record.operationalAssessment);
@@ -8037,21 +10786,28 @@ function AiEvaluationTab({
                         message={scopeMessage}
                         supplementalMessage={area.id === "lifecycle" ? lifecycleNodeMessage : undefined}
                         supplementalTone={lifecyclePrestepError ? "danger" : lifecyclePrestepRunning ? "info" : undefined}
+                        monitor={scopeMonitorJob ? (
+                          <ScopeJobProgressPanel
+                            job={scopeMonitorJob}
+                            scopeId={monitorScopeId ?? scopeId}
+                            now={liveNow}
+                            progress={scopeProgressFromStatus(monitorScopeId ?? scopeId, aiAnalysisStatus, latestJob)}
+                          />
+                        ) : undefined}
                         findingSummary={findingSummary}
                         blockedMessage={operationsInterviewBlocked ? evaluationDisabledReason : undefined}
                         detailOpen={detailOpen}
                         onToggleDetail={() => setExpandedAreaDetails((current) => ({ ...current, [area.id]: !current[area.id] }))}
                         onViewFindings={() => toggleScopeFindingFilterFromEvaluation(area.id)}
                         findingsFilterActive={findingsFilterActive}
-                        detail={scopeDisplay ? (
-                          <ScopeDetailPanel
-                            scope={scopeDisplay}
+                        detail={(
+                          <AmbitoScopeDetailPanel
+                            area={area}
                             summary={findingSummary}
-                            status={displayedStatus}
-                            steps={aiAnalysisStatus?.jobs.flatMap((job) => job.steps).filter((step) => step.scopeId === scopeId) ?? []}
-                            currentPhase={latestJob?.currentPhase ?? null}
+                            aiAnalysisStatus={aiAnalysisStatus}
+                            latestJob={latestJob}
                           />
-                        ) : null}
+                        )}
                         actions={(
                           <>
                             <span title={evaluationDisabledReason}>
@@ -8080,15 +10836,6 @@ function AiEvaluationTab({
                       />
                     );
                   })}
-                  {performanceEnabled && (
-                    <PerformanceAnalysisRunCard
-                      record={record}
-                      order={evaluationAreas.length + 1}
-                      onProcessPerformance={onProcessPerformance}
-                      onRunPerformanceAi={onRunPerformanceAi}
-                      onResetPerformance={onResetPerformance}
-                    />
-                  )}
                 </div>
               </section>
               <section
@@ -8237,7 +10984,7 @@ function CardOverflowMenu({
   }, [open]);
 
   return (
-    <div ref={menuRef} className="relative">
+    <div ref={menuRef} className={cn("relative", open && "z-50")}>
       <Button
         variant="secondary"
         size="icon"
@@ -8249,7 +10996,7 @@ function CardOverflowMenu({
         <MoreHorizontal size={16} />
       </Button>
       {open && (
-        <div className="absolute right-0 z-20 mt-1 min-w-44 rounded-md border border-border bg-white p-1 shadow-lg" role="menu">
+        <div className="absolute right-0 top-full z-50 mt-1 min-w-44 rounded-md border border-border bg-[hsl(var(--surface-raised))] p-1 text-foreground shadow-xl ring-1 ring-black/10 dark:ring-white/10" role="menu">
           {actions.map((action) => (
             <button
               key={action.label}
@@ -8397,10 +11144,12 @@ function EvaluationStageRail({ stages, activeJob }: { stages: PipelineViewStage[
 
 function EvaluationEngineStrip({
   job,
+  now,
   onCancelAnalysisJob,
   onRetryAnalysisJob
 }: {
   job: AIAnalysisJobSnapshot;
+  now: number;
   onCancelAnalysisJob: (jobId: string) => void;
   onRetryAnalysisJob: (jobId: string) => void;
 }) {
@@ -8410,6 +11159,9 @@ function EvaluationEngineStrip({
   const jobStatusLabel = humanizeScopeStatus(job.status);
   const isActive = isActiveAIJobStatus(job.status);
   const canRetry = job.status === "failed" || job.status === "cancelled" || job.status === "partially_completed";
+  const phaseLabel = describeAIJobPhase(job.currentPhase);
+  const elapsedLabel = formatElapsedFrom(job.startedAt ?? job.createdAt, job.completedAt ?? (isActive ? now : job.updatedAt));
+  const lastActivityLabel = relativeActivityLabel(job.updatedAt, now);
 
   return (
     <section
@@ -8453,12 +11205,14 @@ function EvaluationEngineStrip({
         <span aria-hidden="true">·</span>
         <span className={cn(failed > 0 && "text-rose-300")}>{failed} fallidas</span>
         <span aria-hidden="true">·</span>
-        <span>act. {formatDate(job.updatedAt)}</span>
+        <span>duración {elapsedLabel}</span>
         <span aria-hidden="true">·</span>
-        <span>{job.currentPhase ?? "Preparando siguiente fase"}</span>
+        <span>última actividad {lastActivityLabel}</span>
+        <span aria-hidden="true">·</span>
+        <span>{phaseLabel}</span>
       </div>
 
-      {job.errorMessage ? <span className="text-xs text-rose-300">{job.errorMessage}</span> : null}
+      <JobFailureDetails job={job} />
 
       {(isActive || canRetry) ? (
         <div className="ml-auto flex flex-wrap gap-2">
@@ -8480,6 +11234,120 @@ function EvaluationEngineStrip({
   );
 }
 
+function ScopeJobProgressPanel({
+  job,
+  scopeId,
+  now,
+  progress
+}: {
+  job: AIAnalysisJobSnapshot;
+  scopeId: AIScopeOrStageDisplayId;
+  now: number;
+  progress: number;
+}) {
+  const isActive = isActiveAIJobStatus(job.status);
+  const failed = isFailedPipelineStatus(job.status);
+  const scopeSteps = job.steps.filter((step) => step.scopeId === scopeId);
+  const shouldShow = isActive || failed || scopeSteps.some((step) => step.status === "failed");
+  if (!shouldShow) return null;
+
+  const currentPhase = currentPhaseForScope(job, scopeId);
+  const completed = scopeSteps.filter((step) => step.status === "completed" || step.status === "skipped").length;
+  const total = scopeSteps.length || aiScopePhaseDisplay.length;
+  const startedAt = earliestStepDate(scopeSteps, "startedAt") ?? job.startedAt ?? job.createdAt;
+  const lastActivityAt = latestStepDate(scopeSteps) ?? job.updatedAt;
+  const phaseLabel = currentPhase
+    ? humanizeAIPhase(currentPhase)
+    : job.status === "queued"
+      ? "Esperando turno"
+      : completed >= total && total > 0
+        ? "Fases del ámbito completadas"
+        : "En cola dentro de la evaluación";
+  const elapsedLabel = formatElapsedFrom(startedAt, isActive ? now : lastActivityAt);
+  const lastActivityLabel = relativeActivityLabel(lastActivityAt, now);
+
+  return (
+    <div
+      className={cn(
+        "rounded-lg border px-3 py-2 text-xs",
+        failed ? "border-rose-300/40 bg-rose-400/10" : "border-primary/30 bg-primary/10"
+      )}
+      aria-label={`Monitoreo del job de ${scopeLabel(scopeId)}`}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <Activity className={cn("h-4 w-4 shrink-0", failed ? "text-rose-300" : "text-primary", isActive && "animate-pulse")} />
+          <span className="font-medium text-foreground">
+            {isActive ? "Proceso en curso" : failed ? "Revisar fallo" : "Proceso reciente"}
+          </span>
+          <span className="text-muted-foreground">{phaseLabel}</span>
+        </div>
+        <span className="font-medium text-foreground">{progress}%</span>
+      </div>
+
+      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-background/80">
+        <div
+          className={cn("relative h-full rounded-full", failed ? "bg-rose-400" : "bg-primary")}
+          style={{ width: `${progress}%` }}
+        >
+          {isActive ? <span className="mk-shimmer absolute inset-0" aria-hidden="true" /> : null}
+        </div>
+      </div>
+
+      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-muted-foreground">
+        <span>{completed}/{total} fases</span>
+        <span>tiempo {elapsedLabel}</span>
+        <span>última actividad {lastActivityLabel}</span>
+      </div>
+
+      <div className="mt-2 grid gap-1 sm:grid-cols-3">
+        {aiScopePhaseDisplay.map((phase) => {
+          const step = scopeSteps.find((item) => item.phaseName === phase.id);
+          const phaseStatus = currentPhase === phase.id ? "running" : step?.status ?? "pending";
+          const phaseStatusLabel = humanizeScopeStatus(phaseStatus).label;
+          return (
+            <div
+              key={phase.id}
+              className={cn(
+                "flex min-w-0 items-center justify-between gap-2 rounded border px-2 py-1",
+                phaseStatus === "running" ? "border-primary/40 bg-primary/15 text-primary" : "border-border bg-background/60"
+              )}
+            >
+              <span className="truncate text-muted-foreground">{phase.label}</span>
+              <span className={cn("shrink-0 font-medium", phaseStatus === "failed" && "text-rose-300")}>{phaseStatusLabel}</span>
+            </div>
+          );
+        })}
+      </div>
+
+      <JobFailureDetails job={job} scopeId={scopeId} />
+    </div>
+  );
+}
+
+function JobFailureDetails({
+  job,
+  scopeId
+}: {
+  job: AIAnalysisJobSnapshot;
+  scopeId?: AIScopeOrStageDisplayId;
+}) {
+  const details = jobFailureDetails(job, scopeId);
+  if (details.length === 0) return null;
+
+  return (
+    <div className="mt-2 flex min-w-0 gap-2 rounded border border-rose-300/30 bg-rose-400/10 px-2.5 py-2 text-xs text-rose-100">
+      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-300" />
+      <div className="min-w-0 space-y-1">
+        <p className="font-medium text-rose-200">Detalle del fallo</p>
+        {details.map((detail) => (
+          <p key={detail} className="break-words text-rose-100/90">{detail}</p>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function evaluationAreaIcon(area: EvaluationArea): React.ComponentType<{ className?: string; size?: number }> {
   const icons: Record<EvaluationArea, React.ComponentType<{ className?: string; size?: number }>> = {
     topology: Network,
@@ -8487,9 +11355,14 @@ function evaluationAreaIcon(area: EvaluationArea): React.ComponentType<{ classNa
     security: ShieldCheck,
     lifecycle: CalendarClock,
     operations: Wrench,
-    logs: ScrollText
+    logs: ScrollText,
+    performance: Activity
   };
   return icons[area];
+}
+
+function findingsAreaIcon(area: FindingsAreaSelection): React.ComponentType<{ className?: string; size?: number }> {
+  return area === "all" ? Layers : evaluationAreaIcon(area);
 }
 
 function progressFillClass(status: string, active: boolean) {
@@ -8510,6 +11383,7 @@ function EvaluationAmbitoNode({
   message,
   supplementalMessage,
   supplementalTone,
+  monitor,
   findingSummary,
   blockedMessage,
   detailOpen,
@@ -8529,6 +11403,7 @@ function EvaluationAmbitoNode({
   message: string;
   supplementalMessage?: string;
   supplementalTone?: "info" | "danger";
+  monitor?: React.ReactNode;
   findingSummary: AreaFindingSummary;
   blockedMessage?: string;
   detailOpen?: boolean;
@@ -8547,7 +11422,7 @@ function EvaluationAmbitoNode({
   return (
     <article
       className={cn(
-        "relative overflow-hidden rounded-xl border p-4 transition",
+        "relative overflow-visible rounded-xl border p-4 transition",
         active && "mk-glow border-primary bg-primary/10",
         completed && !active && "border-emerald-300/40 bg-emerald-400/[0.05]",
         queued && !active && "border-amber-300/40 bg-amber-400/10",
@@ -8615,6 +11490,7 @@ function EvaluationAmbitoNode({
                 {supplementalMessage}
               </div>
             ) : null}
+            {monitor ? <div className="pt-1">{monitor}</div> : null}
           </div>
         )}
       </div>
@@ -8784,7 +11660,152 @@ function ScopeDetailPanel({
   );
 }
 
+function AmbitoScopeDetailPanel({
+  area,
+  summary,
+  aiAnalysisStatus,
+  latestJob
+}: {
+  area: { id: EvaluationArea; label: string; description: string };
+  summary: AreaFindingSummary;
+  aiAnalysisStatus?: AIAssessmentAnalysisStatus;
+  latestJob?: AIAnalysisJobSnapshot;
+}) {
+  const scopes = ambitoDisplayScopes(area.id, aiAnalysisStatus);
+  const coverageLedger = ambitoCoverageLedger(area.id, aiAnalysisStatus?.scopes ?? []);
+
+  if (scopes.length === 1 && scopes[0]) {
+    const scope = scopes[0];
+    return (
+      <>
+        <ScopeDetailPanel
+          scope={scope}
+          summary={summary}
+          status={statusForScopeDisplay(scope.id, aiAnalysisStatus, latestJob)}
+          steps={stepsForScope(aiAnalysisStatus, scope.id)}
+          currentPhase={latestJob?.currentPhase ?? null}
+        />
+        <CoverageLedgerPanel ledger={coverageLedger} />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <div className="mt-2 rounded-md border border-border bg-muted/20 p-2 text-xs">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <p className="font-medium text-foreground">{area.label}</p>
+            <p className="text-muted-foreground">Scopes miembro del ámbito</p>
+          </div>
+          <Badge tone="neutral">{scopes.length} scopes</Badge>
+        </div>
+        <CompactFindingSummary summary={summary} compact />
+        <div className="mt-2 space-y-2">
+          {scopes.map((scope) => {
+            const status = statusForScopeDisplay(scope.id, aiAnalysisStatus, latestJob);
+            const statusLabel = humanizeScopeStatus(status);
+            const progress = scopeProgressFromStatus(scope.id, aiAnalysisStatus, latestJob);
+            const currentPhase = currentPhaseForScope(latestJob, scope.id);
+            const phaseLabel = currentPhase ? humanizeAIPhase(currentPhase) : "Sin fase activa";
+
+            return (
+              <div key={scope.id} className="rounded border border-border bg-background/60 p-2">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="font-medium text-foreground">{scope.label}</p>
+                    <p className="text-muted-foreground">{scope.id} · {phaseLabel}</p>
+                  </div>
+                  <span title={statusLabel.tooltip}>
+                    <AnimatedStatusBadge
+                      active={isScopeCurrentlyExecuting(scope.id, latestJob)}
+                      label={statusLabel.label}
+                      tone={scopeStatusTone(status)}
+                    />
+                  </span>
+                </div>
+                <div className="mt-2 flex items-center gap-2">
+                  <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
+                    <div
+                      className={cn("h-full rounded-full transition-all", progressFillClass(status, isScopeCurrentlyExecuting(scope.id, latestJob)))}
+                      style={{ width: `${progress}%` }}
+                    />
+                  </div>
+                  <span className="w-10 text-right text-muted-foreground">{progress}%</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      <CoverageLedgerPanel ledger={coverageLedger} />
+    </>
+  );
+}
+
+function CoverageLedgerPanel({ ledger }: { ledger: CoverageLedgerEntry[] }) {
+  if (ledger.length === 0) return null;
+
+  const totalNotEvaluated = ledger.reduce((total, entry) => total + entry.notEvaluated, 0);
+  const complete = isCoverageComplete(ledger);
+  const sortedLedger = [...ledger].sort((left, right) =>
+    right.notEvaluated - left.notEvaluated || left.deviceHostname.localeCompare(right.deviceHostname)
+  );
+  const visibleLedger = sortedLedger.slice(0, 20);
+
+  return (
+    <div className="mt-3 rounded-md border border-border bg-muted/20 p-3 text-xs">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <p className="font-medium text-foreground">Cobertura del playbook</p>
+          <p className="text-muted-foreground">Criterios evaluados por equipo en el último resultado del ámbito.</p>
+        </div>
+        <Badge tone={complete ? "success" : "warning"}>
+          {complete ? "Cobertura completa" : `${totalNotEvaluated} criterios no evaluados`}
+        </Badge>
+      </div>
+
+      <div className="mt-3 max-h-72 overflow-auto rounded border border-border bg-background/60">
+        <table className="min-w-full text-left">
+          <thead className="sticky top-0 bg-background text-[11px] uppercase text-muted-foreground">
+            <tr>
+              <th className="px-3 py-2 font-medium">Equipo</th>
+              <th className="px-3 py-2 text-right font-medium">Aplicables</th>
+              <th className="px-3 py-2 text-right font-medium">Con hallazgo</th>
+              <th className="px-3 py-2 text-right font-medium">Sin problema</th>
+              <th className="px-3 py-2 text-right font-medium">Gap</th>
+              <th className="px-3 py-2 text-right font-medium">No evaluados</th>
+            </tr>
+          </thead>
+          <tbody>
+            {visibleLedger.map((entry) => (
+              <tr key={entry.deviceHostname} className="border-t border-border">
+                <td className="whitespace-nowrap px-3 py-2 font-medium text-foreground">{entry.deviceHostname}</td>
+                <td className="px-3 py-2 text-right text-muted-foreground">{entry.applicable}</td>
+                <td className="px-3 py-2 text-right text-muted-foreground">{entry.withFinding}</td>
+                <td className="px-3 py-2 text-right text-muted-foreground">{entry.clean}</td>
+                <td className="px-3 py-2 text-right text-muted-foreground">{entry.gap}</td>
+                <td className={cn(
+                  "px-3 py-2 text-right font-semibold",
+                  entry.notEvaluated > 0 ? "text-amber-300" : "text-emerald-300"
+                )}>
+                  {entry.notEvaluated}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {sortedLedger.length > visibleLedger.length ? (
+        <p className="mt-2 text-muted-foreground">Mostrando 20 de {sortedLedger.length} equipos; desplaza la tabla para revisar el detalle visible.</p>
+      ) : null}
+    </div>
+  );
+}
 function humanizeAIPhase(phaseName: string) {
+  if (phaseName === "reduce") return "Correlación transversal";
+  if (phaseName === "synthesis") return "Síntesis ejecutiva";
+  if (phaseName === "reuse_existing_result") return "Reutilización de resultado";
   return aiScopePhaseDisplay.find((phase) => phase.id === phaseName)?.label ?? phaseName.replaceAll("_", " ");
 }
 
@@ -9042,7 +12063,9 @@ const playbookScopeTabs: Array<{ id: PlaybookScopeId; label: string; description
   { id: "configuration", label: "Configuraciones", description: "Criterios y exclusiones para configuracion de equipos." },
   { id: "security", label: "Seguridad", description: "Hardening, exposiciones administrativas y controles de seguridad." },
   { id: "evidence", label: "Logs y Eventos", description: "Eventos, logs, recurrencia y brechas de evidencia operacional." },
-  { id: "performance", label: "Performance Análisis", description: "Metricas, capacidad, errores, drops y gaps de performance." }
+  { id: "performance", label: "Performance Análisis", description: "Metricas, capacidad, errores, drops y gaps de performance." },
+  { id: "topology", label: "Topología", description: "Criterios de STP, routing, HA/SPOF y segmentos topologicos." },
+  { id: "operations", label: "Operaciones", description: "Criterios de madurez operativa, procesos, continuidad y mejora." }
 ];
 
 function ScopePlaybooksAdminPanel({ currentUser }: { currentUser: AppUser }) {
@@ -10040,18 +13063,26 @@ function AIReviewPanel({
 function PerformanceAnalysisRunCard({
   record,
   order,
+  label,
+  description,
   onProcessPerformance,
   onRunPerformanceAi,
-  onResetPerformance
+  onResetPerformance,
+  onViewFindings,
+  findingsFilterActive
 }: {
   record: AssessmentRecord;
   order: number;
+  label: string;
+  description: string;
   onProcessPerformance: () => void;
   onRunPerformanceAi: () => void;
   onResetPerformance: () => void;
+  onViewFindings?: () => void;
+  findingsFilterActive?: boolean;
 }) {
   const progress = Math.max(record.performance.assessment.dataCoverageScore, record.performance.metrics.length > 0 ? 70 : 0);
-  const performanceFindings = record.parsed.findings.filter((finding) => finding.serviceOffer === "Performance Analysis");
+  const performanceFindings = filterFindingsByArea(record.parsed.findings, "performance");
   const findingSummary = summarizeAreaFindings(performanceFindings);
   const processIsPrimary = record.performance.metrics.length === 0;
   const performancePrimaryAction = processIsPrimary
@@ -10070,14 +13101,16 @@ function PerformanceAnalysisRunCard({
   return (
     <EvaluationAmbitoNode
       order={order}
-      label="Performance Analysis"
-      description="Procesa evidencia de rendimiento, genera metricas, hallazgos con evidencia y contexto para AI."
+      label={label}
+      description={description}
       icon={Activity}
       status={record.performance.assessment.status}
       active={isAnimatedStatus(record.performance.assessment.status)}
       progress={progress}
       message={`${record.performance.metrics.length} metricas · ${record.performance.findings.length} hallazgos · confianza ${record.performance.assessment.confidenceScore}%`}
       findingSummary={findingSummary}
+      onViewFindings={onViewFindings}
+      findingsFilterActive={findingsFilterActive}
       actions={(
         <>
           <Button size="sm" onClick={performancePrimaryAction.onClick} disabled={performancePrimaryAction.disabled}>
@@ -10109,28 +13142,51 @@ function FindingsTab({
   documentTemplates: DocumentTemplateVersion[];
   onUpdateFinding: (id: string, patch: Partial<Finding>) => void;
 }) {
-  const [collapsedGroups, setCollapsedGroups] = useState<Record<EvaluationArea, boolean>>(() => (
-    Object.fromEntries(evaluationAreas.map((area) => [area.id, false])) as Record<EvaluationArea, boolean>
-  ));
+  const [activeFindingsArea, setActiveFindingsArea] = useState<FindingsAreaSelection>("all");
+  const [filters, setFilters] = useState<FindingsFilterState>(() => emptyFindingsFilterState());
   const matrix = buildRiskAssessmentMatrix(record.parsed.findings);
-  const grouped = evaluationAreas.map((area) => ({
-    ...area,
-    findings: record.parsed.findings.filter((finding) => finding.category === areaToCategory(area.id))
-  }));
-  const allCollapsed = grouped.every((group) => collapsedGroups[group.id]);
-  const allExpanded = grouped.every((group) => !collapsedGroups[group.id]);
+  const deviceIndex = useMemo(() => buildFindingDeviceIndex(record), [record]);
+  const filterOptions = useMemo(() => buildFindingFilterOptions(record, deviceIndex), [record, deviceIndex]);
+  const filteredAllFindings = useMemo(
+    () => filterFindingsForTab(record.parsed.findings, filters, deviceIndex),
+    [record.parsed.findings, filters, deviceIndex]
+  );
+  const grouped = [
+    {
+      id: "all" as const,
+      label: "Todos",
+      description: "Todos los hallazgos del assessment, sin limitar por ámbito.",
+      findings: filteredAllFindings
+    },
+    ...evaluationAreas.map((area) => ({
+      ...area,
+      findings: filterFindingsByArea(filteredAllFindings, area.id)
+    }))
+  ];
+  const selectedGroup = grouped.find((group) => group.id === activeFindingsArea) ?? grouped[0];
   const activeTemplate = documentTemplates.find((template) => template.documentType === "findings_report" && template.status === "active");
+  const activeFilterCount = countActiveFindingFilters(filters);
 
   async function generateFindingsDocument() {
     await downloadFinalReportDocument(record, activeTemplate, `${safeFileName(record.assessment.name)}-hallazgos-resumen-ejecutivo.docx`);
   }
 
-  function setAllGroupsCollapsed(collapsed: boolean) {
-    setCollapsedGroups(Object.fromEntries(evaluationAreas.map((area) => [area.id, collapsed])) as Record<EvaluationArea, boolean>);
+  function handleFindingAreaKeyDown(event: React.KeyboardEvent<HTMLButtonElement>, currentIndex: number) {
+    if (!["ArrowRight", "ArrowLeft", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const lastIndex = grouped.length - 1;
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? lastIndex
+        : event.key === "ArrowRight"
+          ? currentIndex === lastIndex ? 0 : currentIndex + 1
+          : currentIndex === 0 ? lastIndex : currentIndex - 1;
+    setActiveFindingsArea(grouped[nextIndex].id);
   }
 
-  function toggleGroupCollapsed(groupId: EvaluationArea) {
-    setCollapsedGroups((current) => ({ ...current, [groupId]: !current[groupId] }));
+  function updateFilters(patch: Partial<FindingsFilterState>) {
+    setFilters((current) => ({ ...current, ...patch }));
   }
 
   return (
@@ -10145,14 +13201,6 @@ function FindingsTab({
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button variant="secondary" onClick={() => setAllGroupsCollapsed(true)} disabled={allCollapsed || record.parsed.findings.length === 0}>
-              <ChevronRight size={16} />
-              Colapsar todo
-            </Button>
-            <Button variant="secondary" onClick={() => setAllGroupsCollapsed(false)} disabled={allExpanded || record.parsed.findings.length === 0}>
-              <ChevronDown size={16} />
-              Expandir todo
-            </Button>
             <Button variant="secondary" onClick={generateFindingsDocument} disabled={record.parsed.findings.length === 0}>
               <FileDown size={16} />
               Word
@@ -10176,41 +13224,223 @@ function FindingsTab({
           </PanelBody>
         </Panel>
       ) : (
-        grouped.map((group) => (
-          <Panel key={group.id}>
-            <PanelHeader className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <AlertTriangle size={16} className="text-amber-600" />
-                <div>
-                  <h2 className="text-sm font-semibold">{group.label}</h2>
-                  <FindingSeveritySummary findings={group.findings} compact />
+        <Panel>
+          <PanelHeader className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              {React.createElement(findingsAreaIcon(selectedGroup.id), { size: 16, className: "text-primary" })}
+              <div>
+                <h2 className="text-sm font-semibold">Hallazgos por ámbito</h2>
+                <p className="text-xs text-muted-foreground">Vista filtrada por dominio, equipo, nivel y atributos del inventario.</p>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {activeFilterCount > 0 ? <Badge tone="info">{activeFilterCount} filtros activos</Badge> : null}
+              <Badge tone={selectedGroup.findings.length > 0 ? "warning" : "neutral"}>
+                {selectedGroup.findings.length}/{record.parsed.findings.length} hallazgos
+              </Badge>
+            </div>
+          </PanelHeader>
+          <PanelBody className="space-y-4">
+            <FindingsFilterBar
+              filters={filters}
+              options={filterOptions}
+              onChange={updateFilters}
+              onClear={() => setFilters(emptyFindingsFilterState())}
+              activeCount={activeFilterCount}
+              totalCount={record.parsed.findings.length}
+              filteredCount={filteredAllFindings.length}
+            />
+
+            <div className="overflow-x-auto rounded-md border border-border bg-muted/30 p-1" role="tablist" aria-label="Ámbitos de hallazgos">
+              <div className="flex min-w-max gap-1">
+                {grouped.map((group, index) => {
+                  const selected = group.id === selectedGroup.id;
+                  return (
+                    <button
+                      key={group.id}
+                      id={`findings-area-tab-${group.id}`}
+                      type="button"
+                      role="tab"
+                      aria-selected={selected}
+                      aria-controls={`findings-area-panel-${group.id}`}
+                      tabIndex={selected ? 0 : -1}
+                      className={cn(
+                        "inline-flex h-10 shrink-0 items-center gap-2 rounded px-3 text-sm font-medium outline-none transition focus:ring-2 focus:ring-primary/70",
+                        selected ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:bg-background hover:text-foreground"
+                      )}
+                      onClick={() => setActiveFindingsArea(group.id)}
+                      onKeyDown={(event) => handleFindingAreaKeyDown(event, index)}
+                    >
+                      {React.createElement(findingsAreaIcon(group.id), { size: 14 })}
+                      <span>{group.label}</span>
+                      <span className={cn(
+                        "rounded-full px-2 py-0.5 text-[11px] font-semibold",
+                        selected ? "bg-primary-foreground/20 text-primary-foreground" : "bg-background text-muted-foreground"
+                      )}>
+                        {group.findings.length}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <section
+              id={`findings-area-panel-${selectedGroup.id}`}
+              role="tabpanel"
+              aria-labelledby={`findings-area-tab-${selectedGroup.id}`}
+              className="space-y-3"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-3 rounded-md border border-border bg-muted/20 px-3 py-3">
+                <div className="flex min-w-0 items-start gap-2">
+                  {React.createElement(findingsAreaIcon(selectedGroup.id), { size: 16, className: "mt-0.5 shrink-0 text-primary" })}
+                  <div className="min-w-0">
+                    <h3 className="text-sm font-semibold">{selectedGroup.label}</h3>
+                    <p className="mt-1 text-xs text-muted-foreground">{selectedGroup.description}</p>
+                    <FindingSeveritySummary findings={selectedGroup.findings} compact />
+                  </div>
                 </div>
               </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge tone={group.findings.length > 0 ? "warning" : "neutral"}>{group.findings.length} hallazgos</Badge>
-                <Button variant="secondary" size="sm" onClick={() => toggleGroupCollapsed(group.id)}>
-                  {collapsedGroups[group.id] ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-                  {collapsedGroups[group.id] ? "Expandir" : "Colapsar"}
-                </Button>
-              </div>
-            </PanelHeader>
-            {!collapsedGroups[group.id] && (
-              <PanelBody>
-                {group.findings.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">Sin hallazgos en este ambito.</p>
-                ) : (
-                  <div className="space-y-3">
-                    {group.findings.map((finding, index) => (
-                      <FindingRow key={findingRenderKey(finding, index)} finding={finding} onChange={(patch) => onUpdateFinding(finding.id, patch)} />
-                    ))}
-                  </div>
-                )}
-              </PanelBody>
-            )}
-          </Panel>
-        ))
+
+              {selectedGroup.findings.length === 0 ? (
+                <EmptyState icon={<ShieldCheck size={24} />} title="Sin hallazgos en este ámbito" />
+              ) : (
+                <div className="space-y-3">
+                  {selectedGroup.findings.map((finding, index) => (
+                    <FindingRow key={findingRenderKey(finding, index)} finding={finding} onChange={(patch) => onUpdateFinding(finding.id, patch)} />
+                  ))}
+                </div>
+              )}
+            </section>
+          </PanelBody>
+        </Panel>
       )}
     </div>
+  );
+}
+
+function FindingsFilterBar({
+  filters,
+  options,
+  onChange,
+  onClear,
+  activeCount,
+  totalCount,
+  filteredCount
+}: {
+  filters: FindingsFilterState;
+  options: ReturnType<typeof buildFindingFilterOptions>;
+  onChange: (patch: Partial<FindingsFilterState>) => void;
+  onClear: () => void;
+  activeCount: number;
+  totalCount: number;
+  filteredCount: number;
+}) {
+  return (
+    <div className="rounded-md border border-border bg-muted/20 p-3">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-semibold text-foreground">Filtros combinados</h3>
+          <p className="text-xs text-muted-foreground">
+            {filteredCount} de {totalCount} hallazgos visibles antes de aplicar el tab de ámbito.
+          </p>
+        </div>
+        <Button variant="secondary" size="sm" onClick={onClear} disabled={activeCount === 0}>
+          <X size={14} />
+          Limpiar filtros
+        </Button>
+      </div>
+
+      <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+        <label className="space-y-1">
+          <span className="text-xs font-medium text-muted-foreground">Buscar</span>
+          <Input
+            value={filters.query}
+            onChange={(event) => onChange({ query: event.target.value })}
+            placeholder="Título, evidencia, recomendación..."
+          />
+        </label>
+        <FindingFilterSelect
+          label="Equipo"
+          value={filters.device}
+          onChange={(value) => onChange({ device: value })}
+          options={options.devices.map((device) => ({ value: device, label: device }))}
+        />
+        <FindingFilterSelect
+          label="Nivel"
+          value={filters.risk}
+          onChange={(value) => onChange({ risk: value as FindingsFilterState["risk"] })}
+          options={riskSummaryOrder.map((risk) => ({ value: risk, label: riskSummaryLabel[risk] }))}
+        />
+        <FindingFilterSelect
+          label="Ámbito topológico"
+          value={filters.topologyLayer}
+          onChange={(value) => onChange({ topologyLayer: value as FindingsFilterState["topologyLayer"] })}
+          options={topologyLayerOrder.map((layer) => ({ value: layer, label: topologyLayerConfig[layer].shortLabel }))}
+        />
+        <FindingFilterSelect
+          label="Sitio"
+          value={filters.site}
+          onChange={(value) => onChange({ site: value })}
+          options={options.sites.map((site) => ({ value: site, label: site }))}
+        />
+        <FindingFilterSelect
+          label="Rol"
+          value={filters.role}
+          onChange={(value) => onChange({ role: value })}
+          options={options.roles.map((role) => ({ value: role, label: role }))}
+        />
+        <FindingFilterSelect
+          label="Estado"
+          value={filters.status}
+          onChange={(value) => onChange({ status: value as FindingsFilterState["status"] })}
+          options={options.statuses.map((status) => ({ value: status, label: findingStatusFilterLabel(status) }))}
+        />
+        <FindingFilterSelect
+          label="Tipo AI"
+          value={filters.findingType}
+          onChange={(value) => onChange({ findingType: value })}
+          options={options.findingTypes.map((type) => ({ value: type, label: findingTypeSummaryLabel[type] ?? type.replaceAll("_", " ") }))}
+        />
+        <FindingFilterSelect
+          label="Categoría de remediación"
+          value={filters.remediationCategory}
+          onChange={(value) => onChange({ remediationCategory: value as FindingsFilterState["remediationCategory"] })}
+          options={options.remediationCategories.map((category) => ({ value: category, label: remediationCategoryLabel[category] }))}
+          className="md:col-span-2 xl:col-span-2"
+        />
+      </div>
+    </div>
+  );
+}
+
+function FindingFilterSelect({
+  label,
+  value,
+  options,
+  onChange,
+  className
+}: {
+  label: string;
+  value: string;
+  options: Array<{ value: string; label: string }>;
+  onChange: (value: string) => void;
+  className?: string;
+}) {
+  return (
+    <label className={cn("space-y-1", className)}>
+      <span className="text-xs font-medium text-muted-foreground">{label}</span>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/30"
+      >
+        <option value="">Todos</option>
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>{option.label}</option>
+        ))}
+      </select>
+    </label>
   );
 }
 
@@ -13030,7 +16260,7 @@ function emptyOpenAiCredentialMetadata(): ApiCredentialMetadata {
 function emptyCiscoCredentialMetadata(): ApiCredentialMetadata {
   return {
     provider: "cisco_eox",
-    label: "Cisco EoX OAuth access token",
+    label: "Cisco API OAuth client credentials",
     configured: false,
     source: "none",
     maskedValue: "",
@@ -13050,11 +16280,6 @@ function readInitialUiMode(): UiMode {
 function readInitialOpenAiApiKey() {
   if (typeof window === "undefined") return "";
   return window.localStorage.getItem("assessment-tool.openai-api-key.v1") ?? "";
-}
-
-function readInitialCiscoApiToken() {
-  if (typeof window === "undefined") return "";
-  return window.localStorage.getItem("assessment-tool.cisco-api-token.v1") ?? "";
 }
 
 function readInitialDocumentTemplates() {
@@ -13113,7 +16338,7 @@ function normalizeRecord(record: AssessmentRecord) {
     scope: normalizedScope,
     targetInventory: (record.targetInventory ?? []).map((asset) => ({
       ...asset,
-      deviceType: asset.deviceType ?? inferDeviceType(asset),
+      deviceType: normalizeDeviceType(asset.deviceType ?? inferDeviceType(asset)),
       topologyLayer: normalizeTopologyLayer(asset.topologyLayer),
       included: asset.included ?? true
     })),
@@ -13146,6 +16371,7 @@ function normalizeRecord(record: AssessmentRecord) {
       charts: performance.charts ?? []
     },
     evidenceSkips: record.evidenceSkips ?? [],
+    collectionProfile: normalizeCollectionCommandProfile(record.collectionProfile),
     aiAnalysis: normalizeAIAnalysisState(record.aiAnalysis)
   };
 }
@@ -13229,9 +16455,154 @@ function evaluationAreaToAIScope(area: EvaluationArea): AIAnalysisScopeId {
     security: "security",
     lifecycle: "lifecycle",
     operations: "operations",
-    logs: "evidence"
+    logs: "evidence",
+    performance: "performance"
   };
   return map[area];
+}
+
+function emptyFindingsFilterState(): FindingsFilterState {
+  return {
+    query: "",
+    device: "",
+    risk: "",
+    topologyLayer: "",
+    site: "",
+    role: "",
+    status: "",
+    findingType: "",
+    remediationCategory: ""
+  };
+}
+
+function countActiveFindingFilters(filters: FindingsFilterState) {
+  return Object.values(filters).filter((value) => String(value).trim()).length;
+}
+
+function buildFindingDeviceIndex(record: AssessmentRecord) {
+  const index = new Map<string, InventoryAsset>();
+  for (const asset of record.targetInventory) {
+    const hostname = asset.hostname.trim();
+    if (!hostname) continue;
+    index.set(normalizeFindingFilterValue(hostname), asset);
+  }
+  return index;
+}
+
+function buildFindingFilterOptions(record: AssessmentRecord, deviceIndex: Map<string, InventoryAsset>) {
+  const devices = new Set<string>();
+  const sites = new Set<string>();
+  const roles = new Set<string>();
+  const statuses = new Set<Finding["status"]>();
+  const findingTypes = new Set<string>();
+  const remediationCategories = new Set<RemediationCategory>();
+
+  for (const asset of deviceIndex.values()) {
+    if (asset.hostname.trim()) devices.add(asset.hostname.trim());
+    if (asset.site.trim()) sites.add(asset.site.trim());
+    if (asset.role.trim()) roles.add(asset.role.trim());
+  }
+
+  for (const finding of record.parsed.findings) {
+    statuses.add(finding.status);
+    remediationCategories.add(finding.remediationCategory);
+    findingTypes.add(finding.aiMetadata?.findingType ?? "sin_tipo");
+  }
+
+  return {
+    devices: Array.from(devices).sort(compareFindingFilterLabels),
+    sites: Array.from(sites).sort(compareFindingFilterLabels),
+    roles: Array.from(roles).sort(compareFindingFilterLabels),
+    statuses: Array.from(statuses).sort(compareFindingFilterLabels),
+    findingTypes: Array.from(findingTypes).sort(compareFindingTypeOptions),
+    remediationCategories: Array.from(remediationCategories).sort(compareFindingFilterLabels)
+  };
+}
+
+function filterFindingsForTab(findings: Finding[], filters: FindingsFilterState, deviceIndex: Map<string, InventoryAsset>) {
+  const query = normalizeFindingFilterValue(filters.query);
+  return findings.filter((finding) => {
+    const relatedDevices = findingDeviceNames(finding, deviceIndex);
+    const relatedAssets = relatedDevices
+      .map((device) => deviceIndex.get(normalizeFindingFilterValue(device)))
+      .filter((asset): asset is InventoryAsset => Boolean(asset));
+
+    if (query && !findingSearchText(finding, relatedAssets).includes(query)) return false;
+    if (filters.device && !relatedDevices.some((device) => normalizeFindingFilterValue(device) === normalizeFindingFilterValue(filters.device))) return false;
+    if (filters.risk && finding.risk !== filters.risk) return false;
+    if (filters.topologyLayer && !relatedAssets.some((asset) => asset.topologyLayer === filters.topologyLayer)) return false;
+    if (filters.site && !relatedAssets.some((asset) => normalizeFindingFilterValue(asset.site) === normalizeFindingFilterValue(filters.site))) return false;
+    if (filters.role && !relatedAssets.some((asset) => normalizeFindingFilterValue(asset.role) === normalizeFindingFilterValue(filters.role))) return false;
+    if (filters.status && finding.status !== filters.status) return false;
+    if (filters.findingType && (finding.aiMetadata?.findingType ?? "sin_tipo") !== filters.findingType) return false;
+    if (filters.remediationCategory && finding.remediationCategory !== filters.remediationCategory) return false;
+    return true;
+  });
+}
+
+function findingDeviceNames(finding: Finding, deviceIndex: Map<string, InventoryAsset>) {
+  const devices = new Map<string, string>();
+  for (const value of [
+    ...finding.affectedAssets,
+    ...(finding.aiMetadata?.evidenceTraceRefs ?? []).map((ref) => ref.deviceId ?? "").filter(Boolean)
+  ]) {
+    const key = normalizeFindingFilterValue(value);
+    const asset = deviceIndex.get(key);
+    if (asset) devices.set(key, asset.hostname);
+  }
+  return Array.from(devices.values()).sort(compareFindingFilterLabels);
+}
+
+function findingSearchText(finding: Finding, relatedAssets: InventoryAsset[]) {
+  return normalizeFindingFilterValue([
+    finding.title,
+    finding.category,
+    finding.risk,
+    finding.status,
+    finding.serviceOffer,
+    finding.recommendation,
+    finding.remediationCategory,
+    finding.aiMetadata?.findingType,
+    finding.aiMetadata?.businessImpact,
+    finding.aiMetadata?.technicalImpact,
+    finding.aiMetadata?.probableCause,
+    ...finding.affectedAssets,
+    ...finding.evidence,
+    ...relatedAssets.flatMap((asset) => [
+      asset.hostname,
+      asset.site,
+      asset.role,
+      asset.model,
+      asset.deviceType,
+      asset.topologyLayer ? topologyLayerConfig[asset.topologyLayer].shortLabel : ""
+    ])
+  ].filter(Boolean).join(" "));
+}
+
+function findingStatusFilterLabel(status: Finding["status"]) {
+  const labels: Record<Finding["status"], string> = {
+    "ai-draft": "Borrador AI",
+    ai_suggested: "Sugerido AI",
+    accepted: "Aceptado",
+    edited: "Editado",
+    validated: "Validado",
+    discarded: "Descartado"
+  };
+  return labels[status] ?? status;
+}
+
+function compareFindingFilterLabels(left: string, right: string) {
+  return left.localeCompare(right, "es", { sensitivity: "base", numeric: true });
+}
+
+function compareFindingTypeOptions(left: string, right: string) {
+  const leftRank = findingTypeSummaryOrder.indexOf(left);
+  const rightRank = findingTypeSummaryOrder.indexOf(right);
+  return (leftRank === -1 ? 999 : leftRank) - (rightRank === -1 ? 999 : rightRank) || compareFindingFilterLabels(left, right);
+}
+
+function normalizeFindingFilterValue(value: string) {
+  return value.trim().toLowerCase();
 }
 
 function scopeLabel(scopeId: string) {
@@ -13254,6 +16625,95 @@ function scopeLabel(scopeId: string) {
     executive_summary: "Resumen ejecutivo"
   };
   return labels[scopeId] ?? scopeId;
+}
+
+function ambitoScopeIds(area: EvaluationArea, aiAnalysisStatus?: AIAssessmentAnalysisStatus): AIAnalysisScopeId[] {
+  return activeAmbitoMemberScopes(area, { topologyPlaybookEnabled: aiAnalysisStatus?.topologyPlaybookEnabled })
+    .filter((scopeId) => scopeToAmbito(scopeId) === area) as AIAnalysisScopeId[];
+}
+
+function ambitoDisplayScopes(area: EvaluationArea, aiAnalysisStatus?: AIAssessmentAnalysisStatus) {
+  const scopeIds = new Set(ambitoScopeIds(area, aiAnalysisStatus));
+  return aiScopeDisplayOrder.filter((scope) => scopeIds.has(scope.id as AIAnalysisScopeId));
+}
+
+function stepsForScope(aiAnalysisStatus: AIAssessmentAnalysisStatus | undefined, scopeId: AIScopeOrStageDisplayId) {
+  return aiAnalysisStatus?.jobs.flatMap((job) => job.steps).filter((step) => step.scopeId === scopeId) ?? [];
+}
+
+function hasAmbitoActivity(
+  area: EvaluationArea,
+  aiAnalysisStatus: AIAssessmentAnalysisStatus | undefined,
+  latestJob: AIAnalysisJobSnapshot | undefined,
+  findings: Finding[]
+) {
+  if (findings.length > 0) return true;
+  return ambitoScopeIds(area, aiAnalysisStatus).some((scopeId) => hasScopeDisplayActivity(scopeId, aiAnalysisStatus, latestJob, []));
+}
+
+function statusForAmbitoDisplay(
+  area: EvaluationArea,
+  aiAnalysisStatus: AIAssessmentAnalysisStatus | undefined,
+  latestJob: AIAnalysisJobSnapshot | undefined
+) {
+  const scopeIds = ambitoScopeIds(area, aiAnalysisStatus);
+  const statuses = scopeIds.map((scopeId) => statusForScopeDisplay(scopeId, aiAnalysisStatus, latestJob));
+  if (statuses.some((status) => status === "running") || scopeIds.some((scopeId) => isScopeCurrentlyExecuting(scopeId, latestJob))) return "running";
+  if (statuses.some((status) => status === "queued")) return "queued";
+  if (statuses.length > 0 && statuses.every((status) => isCompletedPipelineStatus(status))) return "completed";
+  if (statuses.some((status) => isFailedPipelineStatus(status))) return "failed";
+  if (statuses.some((status) => status !== "pending")) return "partially_completed";
+  return "pending";
+}
+
+function progressForAmbitoDisplay(
+  area: EvaluationArea,
+  aiAnalysisStatus: AIAssessmentAnalysisStatus | undefined,
+  latestJob: AIAnalysisJobSnapshot | undefined
+) {
+  const progressValues = ambitoScopeIds(area, aiAnalysisStatus).map((scopeId) => scopeProgressFromStatus(scopeId, aiAnalysisStatus, latestJob));
+  if (progressValues.length === 0) return 0;
+  return Math.round(progressValues.reduce((total, progress) => total + progress, 0) / progressValues.length);
+}
+
+function activeAmbitoMonitorScopeId(
+  area: EvaluationArea,
+  aiAnalysisStatus: AIAssessmentAnalysisStatus | undefined,
+  latestJob: AIAnalysisJobSnapshot | undefined
+) {
+  const scopeIds = ambitoScopeIds(area, aiAnalysisStatus);
+  return scopeIds.find((scopeId) => isScopeCurrentlyExecuting(scopeId, latestJob))
+    ?? scopeIds.find((scopeId) => isScopeJobActive(scopeId, aiAnalysisStatus, latestJob))
+    ?? scopeIds.find((scopeId) => Boolean(findScopeMonitorJob(scopeId, aiAnalysisStatus, latestJob)))
+    ?? null;
+}
+
+function ambitoStatusMessage(
+  area: EvaluationArea,
+  status: string,
+  primaryScopeStatus: AIAssessmentAnalysisStatus["scopes"][number] | undefined,
+  aiAnalysisStatus: AIAssessmentAnalysisStatus | undefined,
+  latestJob: AIAnalysisJobSnapshot | undefined
+) {
+  const scopeIds = ambitoScopeIds(area, aiAnalysisStatus);
+  if (scopeIds.length === 1) {
+    return scopeStatusMessage(scopeIds[0], status, primaryScopeStatus, latestJob);
+  }
+
+  const statuses = scopeIds.map((scopeId) => statusForScopeDisplay(scopeId, aiAnalysisStatus, latestJob));
+  const completed = statuses.filter((item) => isCompletedPipelineStatus(item)).length;
+  const failed = statuses.filter((item) => isFailedPipelineStatus(item)).length;
+  const runningScopeId = scopeIds.find((scopeId) => isScopeCurrentlyExecuting(scopeId, latestJob));
+  const runningPhase = runningScopeId ? currentPhaseForScope(latestJob, runningScopeId) : null;
+  const runningLabel = runningScopeId && runningPhase ? ` · ${scopeLabel(runningScopeId)} · ${humanizeAIPhase(runningPhase)}` : "";
+  const failedLabel = failed > 0 ? ` · ${failed} con error` : "";
+  return `${humanizeScopeStatus(status).label} · ${completed}/${scopeIds.length} scopes completados${runningLabel}${failedLabel}`;
+}
+
+function findingBelongsToAnyEvaluationArea(finding: Finding, areas: EvaluationArea[]) {
+  const directArea = scopeToAmbito(finding.scope);
+  if (directArea && areas.includes(directArea)) return true;
+  return areas.some((area) => filterFindingsByArea([finding], area).length > 0);
 }
 
 function findingsForScopeDisplay(findings: Finding[], scope: AIScopeDisplayMetadata) {
@@ -13343,6 +16803,33 @@ function isScopeCurrentlyExecuting(
   return Boolean(latestJob?.currentPhase?.startsWith(`${scopeId}:`) && isActiveAIJobStatus(latestJob.status));
 }
 
+function findScopeMonitorJob(
+  scopeId: AIScopeOrStageDisplayId,
+  aiAnalysisStatus: AIAssessmentAnalysisStatus | undefined,
+  latestJob: AIAnalysisJobSnapshot | undefined
+) {
+  const seen = new Set<string>();
+  const candidates = [latestJob, ...(aiAnalysisStatus?.jobs ?? [])].filter((job): job is AIAnalysisJobSnapshot => {
+    if (!job || seen.has(job.id) || !jobTouchesScope(job, scopeId)) return false;
+    seen.add(job.id);
+    return true;
+  });
+  return candidates.find((job) => isActiveAIJobStatus(job.status))
+    ?? candidates.find((job) => isFailedPipelineStatus(job.status) || job.steps.some((step) => step.scopeId === scopeId && step.status === "failed"))
+    ?? candidates[0];
+}
+
+function jobTouchesScope(job: AIAnalysisJobSnapshot, scopeId: AIScopeOrStageDisplayId) {
+  return job.scopeId === scopeId
+    || Boolean(job.currentPhase?.startsWith(`${scopeId}:`))
+    || job.steps.some((step) => step.scopeId === scopeId);
+}
+
+function currentPhaseForScope(job: AIAnalysisJobSnapshot | undefined, scopeId: AIScopeOrStageDisplayId) {
+  if (!job?.currentPhase?.startsWith(`${scopeId}:`)) return null;
+  return job.currentPhase.split(":").slice(1).join(":");
+}
+
 function isAnimatedStatus(status: string | undefined) {
   return status === "running" || status === "queued";
 }
@@ -13372,8 +16859,9 @@ function scopeStatusMessage(
   const currentPhase = latestJob?.currentPhase?.startsWith(`${scopeId}:`)
     ? latestJob.currentPhase.split(":").slice(1).join(":")
     : null;
+  const phaseLabel = currentPhase ? humanizeAIPhase(currentPhase) : null;
   const updatedAt = scopeStatus?.updatedAt ? ` · Ultima evaluacion ${formatDate(scopeStatus.updatedAt)}` : "";
-  return currentPhase ? `${statusLabel} · ${currentPhase}${updatedAt}` : `${statusLabel}${updatedAt}`;
+  return phaseLabel ? `${statusLabel} · ${phaseLabel}${updatedAt}` : `${statusLabel}${updatedAt}`;
 }
 
 function isUIStageFlagEnabled(flag: AIStageFlag) {
@@ -13396,6 +16884,99 @@ function scopeStatusTone(status: string | undefined): React.ComponentProps<typeo
   if (status === "error" || status === "timeout" || status === "failed" || status === "blocked" || status === "cancelled") return "danger";
   if (status === "skipped" || status === "partially_completed") return "info";
   return "neutral";
+}
+
+function useLiveNow(active: boolean) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!active) return;
+    const interval = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [active]);
+
+  return now;
+}
+
+function describeAIJobPhase(currentPhase: string | null) {
+  if (!currentPhase) return "Preparando siguiente fase";
+  const [scopeId, ...phaseParts] = currentPhase.split(":");
+  const phaseName = phaseParts.join(":");
+  return `${scopeLabel(scopeId)} · ${humanizeAIPhase(phaseName)}`;
+}
+
+function formatElapsedFrom(start: string | number | null | undefined, end: string | number | null | undefined) {
+  const startMs = timestampMs(start);
+  const endMs = timestampMs(end);
+  if (!startMs || !endMs || endMs < startMs) return "0s";
+  return formatDuration(endMs - startMs);
+}
+
+function formatDuration(durationMs: number) {
+  const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+function relativeActivityLabel(value: string | number | null | undefined, now: number) {
+  const dateMs = timestampMs(value);
+  if (!dateMs) return "sin registro";
+  const seconds = Math.max(0, Math.floor((now - dateMs) / 1000));
+  if (seconds < 5) return "ahora";
+  if (seconds < 60) return `hace ${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `hace ${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `hace ${hours}h`;
+  return formatDate(new Date(dateMs));
+}
+
+function earliestStepDate(steps: AIAnalysisJobSnapshot["steps"], key: "startedAt" | "completedAt") {
+  const dates = steps.map((step) => timestampMs(step[key])).filter((value): value is number => Boolean(value));
+  if (dates.length === 0) return null;
+  return Math.min(...dates);
+}
+
+function latestStepDate(steps: AIAnalysisJobSnapshot["steps"]) {
+  const dates = steps
+    .flatMap((step) => [step.completedAt, step.startedAt])
+    .map((value) => timestampMs(value))
+    .filter((value): value is number => Boolean(value));
+  if (dates.length === 0) return null;
+  return Math.max(...dates);
+}
+
+function jobFailureDetails(job: AIAnalysisJobSnapshot, scopeId?: AIScopeOrStageDisplayId) {
+  const details: string[] = [];
+  const scopedSteps = scopeId ? job.steps.filter((step) => step.scopeId === scopeId) : job.steps;
+  const failedSteps = scopedSteps.filter((step) =>
+    (step.status === "failed" || step.status === "cancelled") && step.errorMessage
+  );
+  const visibleFailedSteps = failedSteps.some((step) => step.startedAt)
+    ? failedSteps.filter((step) => step.startedAt)
+    : failedSteps;
+
+  for (const step of visibleFailedSteps) {
+    const phase = humanizeAIPhase(step.phaseName);
+    details.push(`${scopeLabel(step.scopeId)} · ${phase}: ${step.errorMessage}`);
+  }
+
+  if (job.errorMessage && (!scopeId || failedSteps.length === 0 || job.status === "failed" || job.status === "partially_completed")) {
+    details.unshift(job.errorMessage);
+  }
+
+  return Array.from(new Set(details.map((detail) => detail.trim()).filter(Boolean))).slice(0, 4);
+}
+
+function timestampMs(value: string | number | null | undefined) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function formatDebugNumber(value: number | null | undefined) {
@@ -13642,13 +17223,21 @@ function persistentAIFindingToFinding(finding: any, scopeId: string, assessmentI
     return `${source || "AI analysis"}: ${String(item?.excerpt ?? "").slice(0, 600)}`;
   }).filter(Boolean);
   const relatedDevices = Array.isArray(finding?.related_devices) ? finding.related_devices.map(String) : [];
+  const probabilityOfFailure = normalizeProbabilityOfFailure(finding?.probability_of_failure);
+  const impactIfFails = normalizeImpactIfFails(finding?.impact_if_fails);
+  const risk = probabilityOfFailure && impactIfFails
+    ? deriveFindingRisk(probabilityOfFailure, impactIfFails)
+    : normalizePersistentAIRisk(finding?.severity);
 
   return {
     id,
+    scope: scopeId,
     title: cleanPersistentAIText(finding?.title) || "Hallazgo AI pendiente de titulo",
     category: scopeToFindingCategory(scopeId),
-    risk: normalizePersistentAIRisk(finding?.severity),
+    risk,
     confidence: normalizePersistentAIConfidence(finding?.confidence),
+    probabilityOfFailure,
+    impactIfFails,
     status: "ai_suggested",
     affectedAssets: relatedDevices.length > 0 ? relatedDevices : ["Assessment"],
     evidence: evidence.length > 0 ? evidence : ["Resultado AI persistente sin evidencia detallada."],
@@ -13660,7 +17249,8 @@ function persistentAIFindingToFinding(finding: any, scopeId: string, assessmentI
       findingType: "validation_required",
       domain: scopeToAIFindingDomain(scopeId),
       businessImpact: cleanPersistentAIText(finding?.business_impact),
-      technicalImpact: cleanPersistentAIText(finding?.technical_rationale),
+      probableCause: cleanPersistentAIText(finding?.probable_cause),
+      technicalImpact: cleanPersistentAIText(finding?.technical_impact) || cleanPersistentAIText(finding?.technical_rationale),
       validationQuestions: ["Validar evidencia, severidad y recomendacion antes de aceptar el hallazgo."],
       limitations: []
     }
@@ -13698,6 +17288,16 @@ function normalizePersistentAIRisk(value: unknown): RiskLevel {
   return "info";
 }
 
+function normalizeProbabilityOfFailure(value: unknown): Finding["probabilityOfFailure"] {
+  if (value === "very_likely" || value === "likely" || value === "possible" || value === "unlikely" || value === "very_unlikely") return value;
+  return undefined;
+}
+
+function normalizeImpactIfFails(value: unknown): Finding["impactIfFails"] {
+  if (value === "severe" || value === "significant" || value === "moderate" || value === "minor" || value === "negligible") return value;
+  return undefined;
+}
+
 function normalizePersistentAIConfidence(value: unknown) {
   if (value === "high") return 0.86;
   if (value === "medium") return 0.68;
@@ -13709,24 +17309,20 @@ function cleanPersistentAIText(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function areaToCategory(area: EvaluationArea): Finding["category"] {
-  return areaToFindingCategory(area);
-}
-
 const riskSeverities = [
-  { id: "negligible", label: "Negligible", weight: 1 },
-  { id: "minor", label: "Minor", weight: 2 },
-  { id: "moderate", label: "Moderate", weight: 3 },
-  { id: "significant", label: "Significant", weight: 4 },
-  { id: "severe", label: "Severe", weight: 5 }
+  { id: "negligible", label: "Irrelevante", weight: 1 },
+  { id: "minor", label: "Menor", weight: 2 },
+  { id: "moderate", label: "Moderado", weight: 3 },
+  { id: "significant", label: "Significativo", weight: 4 },
+  { id: "severe", label: "Severo", weight: 5 }
 ] as const;
 
 const riskProbabilities = [
-  { id: "very-likely", label: "Very Likely", weight: 5 },
-  { id: "likely", label: "Likely", weight: 4 },
-  { id: "possible", label: "Possible", weight: 3 },
-  { id: "unlikely", label: "Unlikely", weight: 2 },
-  { id: "very-unlikely", label: "Very Unlikely", weight: 1 }
+  { id: "very-likely", label: "Muy Probable", weight: 5 },
+  { id: "likely", label: "Probable", weight: 4 },
+  { id: "possible", label: "Posible", weight: 3 },
+  { id: "unlikely", label: "Improbable", weight: 2 },
+  { id: "very-unlikely", label: "Muy Improbable", weight: 1 }
 ] as const;
 
 function buildRiskAssessmentMatrix(findings: Finding[]) {
@@ -13756,6 +17352,16 @@ function buildRiskAssessmentMatrix(findings: Finding[]) {
 }
 
 function severityForFinding(finding: Finding) {
+  if (finding.impactIfFails) {
+    const map: Record<NonNullable<Finding["impactIfFails"]>, (typeof riskSeverities)[number]> = {
+      severe: riskSeverities[4],
+      significant: riskSeverities[3],
+      moderate: riskSeverities[2],
+      minor: riskSeverities[1],
+      negligible: riskSeverities[0]
+    };
+    return map[finding.impactIfFails];
+  }
   const map: Record<RiskLevel, (typeof riskSeverities)[number]> = {
     info: riskSeverities[0],
     low: riskSeverities[1],
@@ -13767,6 +17373,16 @@ function severityForFinding(finding: Finding) {
 }
 
 function probabilityForFinding(finding: Finding) {
+  if (finding.probabilityOfFailure) {
+    const map: Record<NonNullable<Finding["probabilityOfFailure"]>, (typeof riskProbabilities)[number]> = {
+      very_likely: riskProbabilities[0],
+      likely: riskProbabilities[1],
+      possible: riskProbabilities[2],
+      unlikely: riskProbabilities[3],
+      very_unlikely: riskProbabilities[4]
+    };
+    return map[finding.probabilityOfFailure];
+  }
   if (finding.confidence >= 0.85) return riskProbabilities[0];
   if (finding.confidence >= 0.7) return riskProbabilities[1];
   if (finding.confidence >= 0.5) return riskProbabilities[2];
@@ -13776,20 +17392,20 @@ function probabilityForFinding(finding: Finding) {
 
 function riskMatrixCell(probabilityWeight: number, severityWeight: number) {
   const score = probabilityWeight * severityWeight;
-  if (score >= 16) return { level: "high", label: "High" };
-  if (score >= 12) return { level: "medium-high", label: "Med Hi" };
-  if (score >= 8) return { level: "medium", label: "Medium" };
-  if (score >= 4) return { level: "low-medium", label: "Low Med" };
-  return { level: "low", label: "Low" };
+  if (score >= 16) return { level: "high", label: "Alto" };
+  if (score >= 12) return { level: "medium-high", label: "Medio-Alto" };
+  if (score >= 8) return { level: "medium", label: "Medio" };
+  if (score >= 4) return { level: "low-medium", label: "Bajo-Medio" };
+  return { level: "low", label: "Bajo" };
 }
 
 function riskMatrixLabel(level: string) {
   const labels: Record<string, string> = {
-    low: "Low",
-    "low-medium": "Low Med",
-    medium: "Medium",
-    "medium-high": "Med Hi",
-    high: "High"
+    low: "Bajo",
+    "low-medium": "Bajo-Medio",
+    medium: "Medio",
+    "medium-high": "Medio-Alto",
+    high: "Alto"
   };
   return labels[level] ?? level;
 }
@@ -13859,6 +17475,7 @@ function buildSow(record: AssessmentRecord) {
 
 function buildSowExportInput(record: AssessmentRecord, sowItems: Array<{ title: string; body: string }>) {
   const effectiveParsed = effectiveParsedNetworkData(record);
+  const commandGroups = collectionCommandProfileForRecord(record).groups;
 
   return {
     client: {
@@ -13901,7 +17518,7 @@ function buildSowExportInput(record: AssessmentRecord, sowItems: Array<{ title: 
       missingCount: row.missingCount,
       skippedCount: row.skippedCount,
       cells: row.cells.map((cell) => ({
-        label: evidenceRequirements.find((requirement) => requirement.id === cell.requirementId)?.label ?? cell.requirementId,
+        label: commandGroups.find((requirement) => requirement.id === cell.requirementId)?.label ?? cell.requirementId,
         status: cell.status,
         fileNames: cell.fileNames
       }))
@@ -13934,6 +17551,7 @@ function buildSowExportInput(record: AssessmentRecord, sowItems: Array<{ title: 
 }
 
 function buildCollectionScript(record: AssessmentRecord) {
+  const collectionProfile = collectionCommandProfileForRecord(record);
   const intro = [
     `# Assessment: ${record.assessment.name}`,
     `# Cliente: ${record.client.name}`,
@@ -13945,18 +17563,19 @@ function buildCollectionScript(record: AssessmentRecord) {
   const includedAssets = record.targetInventory.filter((asset) => asset.included);
 
   if (includedAssets.length === 0) {
-    return `${intro}${scriptProfiles.switch.commands.join("\n")}`;
+    return `${intro}${flattenCommandGroups(collectionProfile.profiles["switch-l2"].commandGroups, collectionProfile.groups).join("\n")}`;
   }
 
   return `${intro}${includedAssets
     .map((asset) => {
-      const deviceType = asset.deviceType ?? inferDeviceType(asset);
-      const profile = scriptProfiles[deviceType] ?? scriptProfiles.other;
+      const deviceType = normalizeDeviceType(asset.deviceType ?? inferDeviceType(asset));
+      const profile = collectionProfile.profiles[deviceType] ?? collectionProfile.profiles.other;
+      const commands = flattenCommandGroups(profile.commandGroups, collectionProfile.groups);
       return [
         `##### BEGIN_DEVICE hostname=${asset.hostname} management_ip=${asset.managementIp} type=${deviceType} platform=${asset.platform} role=${asset.role} #####`,
         `! Perfil: ${deviceTypeLabel(deviceType)}`,
         `! Sitio: ${asset.site || "Pendiente"} | Prioridad: ${asset.priority}`,
-        ...profile.commands,
+        ...commands,
         `##### END_DEVICE hostname=${asset.hostname} #####`
       ].join("\n");
     })
@@ -13997,140 +17616,223 @@ function buildPerformanceCollectionScript(record: AssessmentRecord) {
     .join("\n\n")}`;
 }
 
-const ciscoBaselineCommands = [
-  "terminal length 0",
-  "show version",
-  "show inventory",
-  "show running-config",
-  "show startup-config",
-  "show interfaces status",
-  "show interfaces description",
-  "show interfaces",
-  "show ip interface brief",
-  "show cdp neighbors detail",
-  "show lldp neighbors detail",
-  "show vlan brief",
-  "show spanning-tree",
-  "show etherchannel summary",
-  "show ip route",
-  "show ip protocols",
-  "show ip ospf neighbor",
-  "show bgp summary",
-  "show logging",
-  "show ntp associations",
-  "show clock",
-  "show redundancy",
-  "show license"
-];
+const ciscoBaselineCommandGroups: Record<EvidenceRequirementId, string[]> = {
+  identity: ["terminal length 0", "show version", "show inventory", "show license"],
+  configuration: ["show running-config", "show startup-config"],
+  interfaces: ["show interfaces status", "show interfaces description", "show interfaces", "show ip interface brief"],
+  "topology-l2": ["show cdp neighbors detail", "show lldp neighbors detail", "show vlan brief", "show spanning-tree", "show etherchannel summary"],
+  "routing-overlay": ["show ip route", "show ip protocols", "show ip ospf neighbor", "show bgp summary"],
+  "operations-security": ["show logging", "show ntp associations", "show clock", "show redundancy"]
+};
 
-const nexusDatacenterCommands = [
-  "show vpc",
-  "show vpc consistency-parameters global",
-  "show port-channel summary",
-  "show interface trunk",
-  "show interface switchport",
-  "show nve peers",
-  "show bgp l2vpn evpn summary",
-  "show vlan",
-  "show vrf",
-  "show feature",
-  "show module",
-  "show environment"
-];
+const ciscoBaselineCommands = flattenCommandGroups(ciscoBaselineCommandGroups);
 
-const securityPerimeterCommands = [
-  "terminal pager 0",
-  "show failover",
-  "show route",
-  "show access-list",
-  "show nat",
-  "show vpn-sessiondb",
-  "show crypto ikev2 sa",
-  "show conn count",
-  "show asp drop",
-  "show version",
-  "show inventory",
-  "show running-config"
-];
+const nexusDatacenterCommandGroups: Record<EvidenceRequirementId, string[]> = {
+  identity: ["show module"],
+  configuration: ["show feature"],
+  interfaces: ["show port-channel summary", "show interface trunk", "show interface switchport"],
+  "topology-l2": ["show vpc", "show vpc consistency-parameters global", "show vlan"],
+  "routing-overlay": ["show nve peers", "show bgp l2vpn evpn summary", "show vrf"],
+  "operations-security": ["show environment"]
+};
 
-const wirelessControllerCommands = [
-  "terminal length 0",
-  "show version",
-  "show inventory",
-  "show running-config",
-  "show startup-config",
-  "show sysinfo",
-  "show ap summary",
-  "show wlan summary",
-  "show client summary",
-  "show interface summary",
-  "show logging",
-  "show ntp associations",
-  "show clock",
-  "show license"
-];
+const securityPerimeterCommandGroups: Record<EvidenceRequirementId, string[]> = {
+  identity: ["terminal pager 0", "show version", "show inventory"],
+  configuration: ["show running-config"],
+  interfaces: [],
+  "topology-l2": [],
+  "routing-overlay": ["show route"],
+  "operations-security": ["show failover", "show access-list", "show nat", "show vpn-sessiondb", "show crypto ikev2 sa", "show conn count", "show asp drop"]
+};
+
+const wirelessControllerCommandGroups: Record<EvidenceRequirementId, string[]> = {
+  identity: ["terminal length 0", "show version", "show inventory", "show sysinfo", "show license"],
+  configuration: ["show running-config", "show startup-config"],
+  interfaces: ["show interface summary"],
+  "topology-l2": ["show ap summary", "show wlan summary", "show client summary"],
+  "routing-overlay": [],
+  "operations-security": ["show logging", "show ntp associations", "show clock"]
+};
+
+const aciCommandGroups: Record<EvidenceRequirementId, string[]> = {
+  identity: ["show version", "show controller"],
+  configuration: ["show running-config"],
+  interfaces: ["show interface brief"],
+  "topology-l2": ["show fabric membership", "show tenants", "show endpoint summary"],
+  "routing-overlay": [],
+  "operations-security": ["show fault summary"]
+};
 
 function mergeCommands(...groups: string[][]) {
   return Array.from(new Set(groups.flat()));
 }
 
-const scriptProfiles: Record<DeviceType, { description: string; commands: string[] }> = {
-  switch: {
-    description: "Switch campus IOS/IOS XE: baseline completo de inventario, configuracion, interfaces, capa 2, routing, logs, NTP, redundancia y licencias.",
-    commands: ciscoBaselineCommands
+function mergeCommandGroups(...groups: Array<Record<EvidenceRequirementId, string[]>>) {
+  const merged: Record<EvidenceRequirementId, string[]> = {};
+  for (const group of defaultCollectionCommandGroups) {
+    merged[group.id] = mergeCommands(...groups.map((item) => item[group.id] ?? []));
+  }
+  return merged;
+}
+
+function flattenCommandGroups(commandGroups: Record<EvidenceRequirementId, string[]>, groups: CollectionCommandGroup[] = defaultCollectionCommandGroups) {
+  return groups.flatMap((group) => commandGroups[group.id] ?? []);
+}
+
+const scriptProfiles: Record<DeviceType, DeviceCommandProfile> = {
+  "switch-l2": {
+    description: "Switch L2 campus IOS/IOS XE: inventario, configuracion, interfaces, vecinos, VLAN, STP, port-channel, logs, NTP, redundancia y licencias.",
+    commandGroups: {
+      ...ciscoBaselineCommandGroups,
+      "routing-overlay": []
+    }
+  },
+  "switch-l3": {
+    description: "Switch L3 IOS/IOS XE: baseline L2 mas routing, protocolos dinamicos y rutas para equipos core/distribucion.",
+    commandGroups: ciscoBaselineCommandGroups
   },
   router: {
     description: "Router IOS/IOS XE: baseline completo de inventario, configuracion, interfaces, routing, protocolos, vecinos, logs, NTP, redundancia y licencias.",
-    commands: ciscoBaselineCommands
+    commandGroups: {
+      ...ciscoBaselineCommandGroups,
+      "topology-l2": ["show cdp neighbors detail", "show lldp neighbors detail"]
+    }
   },
   "nexus-switch": {
     description: "Switch Nexus / Datacenter NX-OS: baseline Cisco mas vPC, port-channel, trunks, switchport, VXLAN/EVPN, VRF, features, modulos y ambiente.",
-    commands: mergeCommands(ciscoBaselineCommands, nexusDatacenterCommands)
+    commandGroups: mergeCommandGroups(ciscoBaselineCommandGroups, nexusDatacenterCommandGroups)
   },
   aci: {
     description: "ACI/APIC: fabric membership, faults, tenants, fabric nodes y salud general.",
-    commands: [
-      "show version",
-      "show controller",
-      "show fabric membership",
-      "show fault summary",
-      "show tenants",
-      "show endpoint summary",
-      "show interface brief",
-      "show running-config"
-    ]
+    commandGroups: aciCommandGroups
   },
   "wireless-controller": {
     description: "Wireless controller: baseline de version, inventario, configuracion, APs, WLANs, clientes, interfaces, logs, NTP y licencias.",
-    commands: wirelessControllerCommands
+    commandGroups: wirelessControllerCommandGroups
   },
   firewall: {
     description: "Seguridad/perimetro Cisco: failover, rutas, ACL, NAT, VPN, IKEv2, conexiones, ASP drop, version, inventario y configuracion.",
-    commands: securityPerimeterCommands
+    commandGroups: securityPerimeterCommandGroups
   },
   other: {
     description: "Perfil generico Cisco IOS/IOS XE/NX-OS cuando el tipo de equipo no esta clasificado.",
-    commands: ciscoBaselineCommands
+    commandGroups: ciscoBaselineCommandGroups
   }
 };
 
+const defaultCollectionCommandProfile: CollectionCommandProfile = {
+  groups: defaultCollectionCommandGroups,
+  profiles: scriptProfiles
+};
+
+const deviceTypeOrder: DeviceType[] = ["switch-l2", "switch-l3", "router", "nexus-switch", "firewall", "aci", "wireless-controller", "other"];
+const platformOptions: Array<{ id: PlatformId; label: string }> = [
+  { id: "ios-xe", label: "Cisco IOS XE" },
+  { id: "ios", label: "Cisco IOS" },
+  { id: "nx-os", label: "Cisco NX-OS" },
+  { id: "asa", label: "Cisco ASA" },
+  { id: "ftd", label: "Cisco FTD / Firepower" },
+  { id: "aci", label: "Cisco ACI" },
+  { id: "unknown", label: "Desconocida / Otro" }
+];
+
+function createDefaultCollectionCommandProfile(): CollectionCommandProfile {
+  return normalizeCollectionCommandProfile(defaultCollectionCommandProfile);
+}
+
+function createEmptyDeviceCommandProfile(): DeviceCommandProfile {
+  return {
+    description: "",
+    commandGroups: Object.fromEntries(defaultCollectionCommandGroups.map((group) => [group.id, []]))
+  };
+}
+
+function collectionCommandProfileForRecord(record: AssessmentRecord) {
+  return normalizeCollectionCommandProfile(record.collectionProfile);
+}
+
+function normalizeCollectionCommandProfile(profile?: Partial<CollectionCommandProfile> | null): CollectionCommandProfile {
+  const sourceGroups = Array.isArray(profile?.groups) && profile.groups.length > 0
+    ? profile.groups
+    : defaultCollectionCommandGroups;
+  const groups = uniqueCommandGroups(sourceGroups);
+  const profiles = Object.fromEntries(deviceTypeOrder.map((deviceType) => {
+    const defaultProfile = defaultCollectionCommandProfile.profiles[deviceType] ?? createEmptyDeviceCommandProfile();
+    const sourceProfile = profile?.profiles?.[deviceType] ?? (deviceType === "switch-l2" ? (profile?.profiles as any)?.switch : undefined);
+    const commandGroups = Object.fromEntries(groups.map((group) => [
+      group.id,
+      normalizeCommandList(sourceProfile?.commandGroups?.[group.id] ?? defaultProfile.commandGroups[group.id] ?? [])
+    ]));
+    return [
+      deviceType,
+      {
+        description: String(sourceProfile?.description ?? defaultProfile.description ?? "").trim(),
+        commandGroups
+      }
+    ];
+  })) as Record<DeviceType, DeviceCommandProfile>;
+
+  return { groups, profiles };
+}
+
+function uniqueCommandGroups(groups: CollectionCommandGroup[]) {
+  const seen = new Set<string>();
+  return groups.map((group, index) => {
+    const baseId = commandGroupId(group.id || group.shortLabel || group.label || `grupo-${index + 1}`);
+    const id = uniqueCommandGroupId(Array.from(seen).map((item) => ({ id: item, label: item, shortLabel: item })), baseId);
+    seen.add(id);
+    return {
+      id,
+      label: String(group.label || group.shortLabel || id).trim(),
+      shortLabel: String(group.shortLabel || group.label || id).trim(),
+      description: String(group.description ?? "").trim()
+    };
+  });
+}
+
+function uniqueCommandGroupId(groups: Array<Pick<CollectionCommandGroup, "id">>, base: string) {
+  const used = new Set(groups.map((group) => group.id));
+  const normalizedBase = commandGroupId(base) || "grupo";
+  let candidate = normalizedBase;
+  let index = 2;
+  while (used.has(candidate)) {
+    candidate = `${normalizedBase}-${index}`;
+    index += 1;
+  }
+  return candidate;
+}
+
+function commandGroupId(value: string) {
+  return value.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+function commandTextareaToList(value: string) {
+  return normalizeCommandList(value.split(/\r?\n/));
+}
+
+function normalizeCommandList(commands: unknown) {
+  if (!Array.isArray(commands)) return [];
+  return Array.from(new Set(commands.map((command) => String(command).trim()).filter(Boolean)));
+}
+
 function buildScriptGroups(record: AssessmentRecord) {
-  const types = Object.keys(scriptProfiles) as DeviceType[];
+  const collectionProfile = collectionCommandProfileForRecord(record);
+  const types = deviceTypeOrder;
   return types.map((deviceType) => ({
     deviceType,
-    description: scriptProfiles[deviceType].description,
-    assets: record.targetInventory.filter((asset) => asset.included && (asset.deviceType ?? inferDeviceType(asset)) === deviceType)
+    description: collectionProfile.profiles[deviceType].description,
+    assets: record.targetInventory.filter((asset) => asset.included && normalizeDeviceType(asset.deviceType ?? inferDeviceType(asset)) === deviceType)
   }));
 }
 
 function buildPerformanceScriptGroups(record: AssessmentRecord) {
-  const types = Object.keys(scriptProfiles) as DeviceType[];
+  const types = deviceTypeOrder;
   return types.map((deviceType) => ({
     deviceType,
     description: record.scope.performanceAnalysis.enabled
       ? `Comandos de performance para ${deviceTypeLabel(deviceType)}: interfaces, errores, drops, recursos, colas, logs y estabilidad.`
       : "Performance Analysis fuera de alcance.",
-    assets: record.targetInventory.filter((asset) => asset.included && (asset.deviceType ?? inferDeviceType(asset)) === deviceType)
+    assets: record.targetInventory.filter((asset) => asset.included && normalizeDeviceType(asset.deviceType ?? inferDeviceType(asset)) === deviceType)
   }));
 }
 
@@ -14149,13 +17851,15 @@ function inferDeviceType(asset: Pick<InventoryAsset, "model" | "platform" | "rol
   if (/aci|apic|leaf|spine/.test(value)) return "aci";
   if (/wlc|wireless|9800/.test(value)) return "wireless-controller";
   if (/asa|firepower|ftd|firewall/.test(value)) return "firewall";
-  if (/switch|c9[236]00|c3850|access|core|distribution|dist/.test(value)) return "switch";
+  if (/core|distribution|dist|l3|routing|multilayer/.test(value)) return "switch-l3";
+  if (/switch|c9[236]00|c3850|access|l2/.test(value)) return "switch-l2";
   return "other";
 }
 
 function deviceTypeLabel(deviceType: DeviceType) {
   const labels: Record<DeviceType, string> = {
-    switch: "Switch",
+    "switch-l2": "Switch L2",
+    "switch-l3": "Switch L3",
     router: "Router",
     "nexus-switch": "Switch Nexus",
     aci: "ACI",
@@ -14230,13 +17934,26 @@ function priorityWeight(priority: InventoryAsset["priority"]) {
 
 function normalizeDeviceType(value: string): DeviceType {
   const normalized = value.toLowerCase().trim();
-  if (normalized === "switch") return "switch";
+  if (normalized === "switch-l2" || normalized === "switch l2" || normalized === "l2 switch" || normalized === "switch") return "switch-l2";
+  if (normalized === "switch-l3" || normalized === "switch l3" || normalized === "l3 switch" || normalized === "multilayer switch") return "switch-l3";
   if (normalized === "router") return "router";
   if (normalized === "nexus-switch" || normalized === "nexus" || normalized === "switch nexus") return "nexus-switch";
   if (normalized === "aci" || normalized === "apic") return "aci";
   if (normalized === "wireless-controller" || normalized === "wlc") return "wireless-controller";
   if (normalized === "firewall" || normalized === "fw") return "firewall";
   return "other";
+}
+
+function normalizePlatform(value: unknown): PlatformId {
+  const normalized = String(value ?? "").toLowerCase().trim().replace(/_/g, "-");
+  if (!normalized || normalized === "pendiente" || normalized === "unknown" || normalized === "otro" || normalized === "other") return "unknown";
+  if (normalized === "ios-xe" || normalized === "iosxe" || normalized === "ios xe" || normalized.includes("cisco ios xe")) return "ios-xe";
+  if (normalized === "ios" || normalized === "cisco ios" || normalized.includes("ios software")) return "ios";
+  if (normalized === "nx-os" || normalized === "nxos" || normalized === "nx os" || normalized.includes("nexus")) return "nx-os";
+  if (normalized === "asa" || normalized.includes("adaptive security appliance")) return "asa";
+  if (normalized === "ftd" || normalized.includes("firepower") || normalized.includes("firepower threat defense")) return "ftd";
+  if (normalized === "aci" || normalized === "apic" || normalized.includes("application centric infrastructure")) return "aci";
+  return "unknown";
 }
 
 function normalizePriority(value: string): InventoryAsset["priority"] {
@@ -14548,9 +18265,8 @@ function executiveRecommendations(irir: number | null, ica: number, actionCounts
   return recommendations.length > 0 ? recommendations : ["Mantener revision arquitectonica y monitorear hallazgos de menor severidad."];
 }
 
-async function fetchLifecycleEoxRecords(productIds: string[], ciscoToken: string) {
+async function fetchLifecycleEoxRecords(productIds: string[]) {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (ciscoToken.trim()) headers["x-cisco-api-token"] = ciscoToken.trim();
 
   const response = await fetch("/api/cisco/eox", {
     method: "POST",
@@ -14579,9 +18295,8 @@ async function fetchLifecycleEoxRecords(productIds: string[], ciscoToken: string
   };
 }
 
-async function fetchSupportCoverageRecords(serials: string[], ciscoToken: string) {
+async function fetchSupportCoverageRecords(serials: string[]) {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (ciscoToken.trim()) headers["x-cisco-api-token"] = ciscoToken.trim();
 
   const response = await fetch("/api/cisco/support", {
     method: "POST",
@@ -14600,8 +18315,7 @@ async function fetchSupportCoverageRecords(serials: string[], ciscoToken: string
 
 function lifecycleProductIds(record: AssessmentRecord) {
   return Array.from(new Set([
-    ...buildLifecycleHardwareRows(record, {}, []).map((row) => row.productId).filter(isKnownProductId),
-    ...buildLifecycleSoftwareRows(record, {}, []).map((row) => row.softwareVersion).filter(isConsultableLifecycleKey)
+    ...buildLifecycleHardwareRows(record, {}, []).map((row) => row.productId).filter(isKnownProductId)
   ]));
 }
 

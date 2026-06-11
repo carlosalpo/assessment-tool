@@ -2,6 +2,8 @@ export type Domain = "enterprise-networking" | "datacenter-networking";
 
 export type FindingStatus = "ai-draft" | "ai_suggested" | "accepted" | "edited" | "validated" | "discarded";
 export type RiskLevel = "critical" | "high" | "medium" | "low" | "info";
+export type ProbabilityOfFailure = "very_likely" | "likely" | "possible" | "unlikely" | "very_unlikely";
+export type ImpactIfFails = "severe" | "significant" | "moderate" | "minor" | "negligible";
 export type RemediationCategory =
   | "professional_services"
   | "new_technology"
@@ -108,10 +110,13 @@ export type NeighborRelation = {
 
 export type Finding = {
   id: string;
+  scope?: string;
   title: string;
   category: "lifecycle" | "security" | "resiliency" | "operations" | "configuration" | "inventory";
   risk: RiskLevel;
   confidence: number;
+  probabilityOfFailure?: ProbabilityOfFailure;
+  impactIfFails?: ImpactIfFails;
   status: FindingStatus;
   affectedAssets: string[];
   evidence: string[];

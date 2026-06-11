@@ -20,13 +20,19 @@ import {
   validateScopeAnalysisResult
 } from "./ai-scope-strategy.ts";
 import {
+  buildOperationsNarrationPayload,
+  buildOperationsNarrationSystemPrompt,
+  computeCoverageLedger,
   deterministicFindingsToScopeAnalysisFindings,
   filterFindingsForValidationPhase,
   fullAssessmentScopeOrder,
+  operationsFindingsToScopeAnalysisFindings,
   reclaimStaleAIJobs,
   scopesForJob,
   synthesisAssessmentScopeOrder
 } from "./ai-analysis-jobs.ts";
+import { defaultOperationsScopePlaybook } from "./scope-playbook.ts";
+import type { OperationsFinding } from "./operations-analysis.ts";
 
 const baseInput = (): AssessmentAIContextInput => ({
   id: "assess_ai",
@@ -129,6 +135,80 @@ test("operations scope is blocked until Tab 11 interviews are complete", () => {
   );
 });
 
+test("operations narration playbook payload and actionable prompt are gated", () => {
+  const finding = operationsFindingFixture();
+
+  withEnv({ AI_OPERATIONS_PLAYBOOK: undefined }, () => {
+    const prompt = buildOperationsNarrationSystemPrompt();
+    const payload = buildOperationsNarrationPayload([finding], defaultOperationsScopePlaybook);
+
+    assert.doesNotMatch(prompt, /ACCIONABLE/);
+    assert.doesNotMatch(prompt, /finding\.area/);
+    assert.equal(payload.playbook, undefined);
+    assert.equal(payload.playbookInstructions, undefined);
+  });
+
+  withEnv({ AI_OPERATIONS_PLAYBOOK: "1" }, () => {
+    const prompt = buildOperationsNarrationSystemPrompt();
+    const payload = buildOperationsNarrationPayload([finding], defaultOperationsScopePlaybook);
+
+    assert.match(prompt, /ACCIONABLE/);
+    assert.match(prompt, /finding\.area/);
+    assert.match(prompt, /NO debe alterar severity, area ni remediationCategory/);
+    assert.equal(payload.playbook.scopeId, "operations");
+    assert.ok(payload.playbook.criteria.some((criterion: any) => /Monitoreo|monitoring/i.test(`${criterion.aspect} ${criterion.guidance}`)));
+    assert.ok(payload.playbook.expected.some((expected: any) => /Backup|continuidad|incidentes|monitoreo/i.test(`${expected.title} ${expected.description}`)));
+    assert.ok(payload.playbookInstructions.some((instruction: string) => /severity, area y remediationCategory/.test(instruction)));
+  });
+});
+
+test("operations findings include enriched fields only when enriched findings are enabled", () => {
+  const finding = operationsFindingFixture({ severity: "high" });
+
+  withEnv({ AI_ENRICHED_FINDINGS: undefined }, () => {
+    const [plain] = operationsFindingsToScopeAnalysisFindings([finding]) as any[];
+    assert.equal(plain.probable_cause, undefined);
+    assert.equal(plain.technical_impact, undefined);
+    assert.equal(plain.probability_of_failure, undefined);
+    assert.equal(plain.impact_if_fails, undefined);
+  });
+
+  withEnv({ AI_ENRICHED_FINDINGS: "1", AI_REMEDIATION_QUALITY: undefined }, () => {
+    const [enriched] = operationsFindingsToScopeAnalysisFindings([finding]) as any[];
+    assert.match(enriched.probable_cause, /Monitoreo/);
+    assert.match(enriched.technical_impact, /monitoring/);
+    assert.equal(enriched.probability_of_failure, "likely");
+    assert.equal(enriched.impact_if_fails, "significant");
+  });
+});
+
+test("full scope enumeration folds redundant topology scopes only when topology playbook is enabled", () => {
+  const foldedScopes = ["routing", "wan", "datacenter", "campus", "perimeter", "high_availability"];
+  const input = {
+    ...baseInput(),
+    operationalAssessment: {
+      completed: true,
+      interviews: [],
+      updatedAt: "2026-06-01"
+    }
+  };
+
+  withEnv({ AI_TOPOLOGY_PLAYBOOK: undefined }, () => {
+    const scopes = scopesForJob("full", null, input);
+    for (const scopeId of foldedScopes) {
+      assert.ok(scopes.includes(scopeId as any), `${scopeId} should run when topology playbook is off`);
+    }
+  });
+
+  withEnv({ AI_TOPOLOGY_PLAYBOOK: "1" }, () => {
+    const scopes = scopesForJob("full", null, input);
+    assert.ok(scopes.includes("topology"));
+    for (const scopeId of foldedScopes) {
+      assert.equal(scopes.includes(scopeId as any), false, `${scopeId} should fold into topology when topology playbook is on`);
+    }
+  });
+});
+
 test("reclaimStaleAIJobs fails stale active jobs and preserves recent active jobs", async () => {
   const now = Date.now();
   const staleAt = new Date(now - 10 * 60 * 1000);
@@ -157,7 +237,8 @@ test("reclaimStaleAIJobs fails stale active jobs and preserves recent active job
   assert.equal(staleJob?.currentPhase, null);
   assert.match(staleJob?.errorMessage ?? "", /Job huerfano reclamado/);
   assert.equal(fakeDb.steps.find((step) => step.id === "step_stale_running")?.status, "failed");
-  assert.equal(fakeDb.steps.find((step) => step.id === "step_stale_pending")?.status, "failed");
+  assert.equal(fakeDb.steps.find((step) => step.id === "step_stale_pending")?.status, "cancelled");
+  assert.match(fakeDb.steps.find((step) => step.id === "step_stale_pending")?.errorMessage ?? "", /fallo una fase anterior/);
   assert.equal(fakeDb.steps.find((step) => step.id === "step_stale_done")?.status, "completed");
   assert.equal(recentJob?.status, "running");
   assert.equal(fakeDb.steps.find((step) => step.id === "step_recent_running")?.status, "running");
@@ -172,6 +253,133 @@ test("buildAssessmentAIContext normalizes core assessment data", () => {
   assert.equal(context.performanceMetrics.length, 5);
   assert.ok(context.evidenceReferences.some((ref) => ref.sourceFile === "core-01.log" && ref.command === "show running-config" && ref.deviceId === "core-01"));
   assert.ok(context.evidenceReferences.some((ref) => ref.metricId === "pm_crc" && ref.command === "show interfaces" && ref.interfaceId === "Te1/0/1"));
+});
+
+test("buildAssessmentAIContext infers devices and configuration facts from parsed interface and neighbor evidence", () => {
+  const input = baseInput();
+  input.targetInventory = [asset("core-01", "10.0.0.1", "C9500-48Y4C", "core", "critical")];
+  input.parsed.devices = [device("dev_core01", "core-01", "C9500-48Y4C", "17.9.4")];
+  input.parsed.interfaces = [
+    { id: "if_access_1", deviceId: "dev_access01", hostname: "access-01", name: "Gi1/0/24", status: "connected", vlan: "20", description: "user", evidence: ["access-01 Gi1/0/24 connected 20"] },
+    { id: "if_dist_1", deviceId: "dev_dist01", hostname: "dist-01", name: "Po10", status: "suspended", vlan: "trunk", description: "to core", evidence: ["dist-01 Po10 suspended trunk"] }
+  ];
+  input.parsed.relations = [
+    { id: "rel_sparse", localDeviceId: "dev_dist01", localHostname: "dist-01", localInterface: "Gi1/0/48", remoteHostname: "access-01", remoteInterface: "Gi1/0/24", protocol: "cdp", confidence: 0.9, evidence: ["Device ID: access-01 Interface: Gi1/0/48"] }
+  ];
+
+  const context = buildAssessmentAIContext(input);
+  const hostnames = context.devices.map((item) => item.hostname).sort((left, right) => left.localeCompare(right));
+
+  assert.deepEqual(hostnames, ["access-01", "core-01", "dist-01"]);
+  assert.ok(context.configurationFacts.some((fact) => fact.deviceId === "access-01" && fact.factType === "interface_configured"));
+  assert.ok(context.configurationFacts.some((fact) => fact.deviceId === "dist-01" && fact.riskRelevance === "medium"));
+  assert.ok(context.evidenceReferences.some((ref) => ref.deviceId === "dist-01" && ref.configFactId));
+});
+
+test("buildAssessmentAIContext attributes multi-device evidence facts to each prompt hostname", () => {
+  const input = baseInput();
+  input.evidenceFiles = [
+    evidence("combined.log", [
+      "core-01#show running-config",
+      "hostname core-01",
+      "snmp-server community public RO",
+      "dist-01#show running-config",
+      "hostname dist-01",
+      "ip http server"
+    ].join("\n"))
+  ];
+  input.parsed.interfaces = [];
+  input.parsed.relations = [];
+
+  const context = buildAssessmentAIContext(input);
+
+  assert.ok(context.configurationFacts.some((fact) => fact.deviceId === "core-01" && fact.factType === "insecure_snmp"));
+  assert.ok(context.configurationFacts.some((fact) => fact.deviceId === "dist-01" && fact.factType === "http_server_enabled"));
+});
+
+test("buildAssessmentAIContext extracts configuration best-practice gaps from running-config blocks", () => {
+  const input = baseInput();
+  input.evidenceFiles = [
+    evidence("combined-config.log", [
+      "access-01# show running-config",
+      "version 17.9",
+      "hostname access-01",
+      "vlan 110",
+      " name USERS",
+      "interface TenGigabitEthernet1/1/1",
+      " description uplink",
+      " switchport mode trunk",
+      "interface GigabitEthernet1/0/10",
+      " description user",
+      " switchport mode access",
+      " switchport access vlan 110",
+      "end",
+      "leaf-01# show running-config",
+      "version 9.3(9)",
+      "hostname leaf-01",
+      "feature lacp",
+      "feature vpc",
+      "interface Ethernet1/47",
+      " description vPC peer-link member 1",
+      " switchport mode trunk",
+      "end"
+    ].join("\n"))
+  ];
+  input.parsed.interfaces = [];
+  input.parsed.relations = [];
+  input.performance.metrics = [];
+
+  const context = buildAssessmentAIContext(input);
+  const factsByType = new Set(context.configurationFacts.map((fact) => fact.factType));
+
+  assert.ok(factsByType.has("aaa_missing"));
+  assert.ok(factsByType.has("syslog_missing"));
+  assert.ok(factsByType.has("ntp_missing"));
+  assert.ok(factsByType.has("trunk_allowed_vlan_missing"));
+  assert.ok(factsByType.has("bpdu_guard_missing_access"));
+  assert.ok(factsByType.has("dhcp_snooping_missing"));
+  assert.ok(factsByType.has("stp_mode_or_root_missing"));
+  assert.ok(factsByType.has("vpc_feature_without_domain"));
+  assert.ok(context.evidenceReferences.some((ref) => ref.configFactId && ref.command === "show running-config" && ref.deviceId === "access-01"));
+});
+
+test("buildAssessmentAIContext does not recycle unaccepted AI findings as prior deterministic signals", () => {
+  const input = baseInput();
+  input.parsed.findings.push(
+    {
+      id: "aijob_assess_configuration_gap_old",
+      title: "Falta evidencia CDP/LLDP antigua",
+      category: "configuration",
+      risk: "low",
+      confidence: 0.7,
+      status: "ai_suggested",
+      affectedAssets: ["core-01"],
+      evidence: ["Resultado AI persistente sin evidencia detallada."],
+      recommendation: "Recolectar CDP/LLDP.",
+      remediationCategory: "operational_change",
+      serviceOffer: "AI Analysis",
+      aiMetadata: { domain: "enterprise_networking" } as any
+    },
+    {
+      id: "aijob_assess_configuration_accepted",
+      title: "Hallazgo AI aceptado",
+      category: "configuration",
+      risk: "medium",
+      confidence: 0.8,
+      status: "accepted",
+      affectedAssets: ["core-01"],
+      evidence: ["core-01 accepted evidence"],
+      recommendation: "Mantener como memoria.",
+      remediationCategory: "operational_change",
+      serviceOffer: "AI Analysis",
+      aiMetadata: { domain: "enterprise_networking" } as any
+    }
+  );
+
+  const context = buildAssessmentAIContext(input);
+
+  assert.equal(context.deterministicFindings.some((finding) => finding.id === "aijob_assess_configuration_gap_old"), false);
+  assert.equal(context.deterministicFindings.some((finding) => finding.id === "aijob_assess_configuration_accepted"), true);
 });
 
 test("critical uplink with errors generates config_performance_mismatch", () => {
@@ -241,6 +449,9 @@ test("AIScope strategies define independent scope behavior", () => {
   assert.ok(topology.expectedFindings.some((item) => /puntos unicos/i.test(item)));
   assert.ok(security.primaryInputs.includes("SNMP"));
   assert.ok(lifecycle.validationRules.some((rule) => /EoX confirmado/.test(rule)));
+  for (const keyword of ["ospf", "eigrp", "standby", "show spanning-tree", "show ip route", "show module", "show power"]) {
+    assert.ok(topology.evidenceKeywords.includes(keyword), `topology evidence keyword ${keyword} should be ranked`);
+  }
   assert.notDeepEqual(topology.correlationTypes, security.correlationTypes);
 });
 
@@ -460,8 +671,10 @@ test("validateScopeAnalysisResult accepts real evidence refs excluded from the t
       evidence: [{ source_type: "cli", source_name: excludedEvidenceId, hostname: "sec-35", command: "show running-config", excerpt: "Evidencia real recortada del prompt." }],
       technical_rationale: "La referencia existe en el assessment aunque no sobrevivio al evidencePack recortado.",
       business_impact: "Puede indicar desviacion de configuracion.",
-      recommendation: "Validar configuracion del equipo citado.",
-      remediation_steps: [],
+      recommendation: "Corregir la desviacion de configuracion en sec-35, documentar el cambio aprobado y cerrar con evidencia del show running-config posterior.",
+      ...enrichedSynthesisFields(),
+      remediation_category: "operational_change",
+      remediation_steps: ["Aplicar el cambio aprobado en sec-35.", "Capturar show running-config posterior y adjuntarlo como evidencia de cierre."],
       validation_questions: [],
       related_devices: ["sec-35"],
       related_sites: [],
@@ -474,37 +687,40 @@ test("validateScopeAnalysisResult accepts real evidence refs excluded from the t
 });
 
 test("validateScopeAnalysisResult normalizes missing or invalid remediation_category", () => {
-  const packet = buildAIScopePacket({ record: baseInput(), scopeId: "configuration" });
-  const evidenceRef = packet.evidencePack[0];
-  const finding = {
-    finding_id: "cfg_remediation_category_default",
-    scope: "configuration",
-    title: "Desviacion con categoria de remediacion pendiente",
-    finding_type: "probable_issue",
-    severity: "medium",
-    confidence: "medium",
-    evidence_refs: [evidenceRef.id],
-    related_fact_ids: [],
-    related_metric_ids: [],
-    related_correlation_ids: [],
-    evidence: [{ source_type: "cli", source_name: evidenceRef.id, hostname: evidenceRef.deviceId ?? null, command: evidenceRef.command ?? null, excerpt: evidenceRef.excerpt }],
-    technical_rationale: "La evidencia existe en el assessment.",
-    business_impact: "Puede requerir priorizacion tecnica.",
-    recommendation: "Validar y categorizar la accion.",
-    remediation_steps: [],
-    validation_questions: [],
-    related_devices: ["core-01"],
-    related_sites: [],
-    dependencies: []
-  };
+  withEnv({ AI_REMEDIATION_QUALITY: undefined }, () => {
+    const packet = buildAIScopePacket({ record: baseInput(), scopeId: "configuration" });
+    const evidenceRef = packet.evidencePack[0];
+    const finding = {
+      finding_id: "cfg_remediation_category_default",
+      scope: "configuration",
+      title: "Desviacion con categoria de remediacion pendiente",
+      finding_type: "probable_issue",
+      severity: "medium",
+      confidence: "medium",
+      evidence_refs: [evidenceRef.id],
+      related_fact_ids: [],
+      related_metric_ids: [],
+      related_correlation_ids: [],
+      evidence: [{ source_type: "cli", source_name: evidenceRef.id, hostname: evidenceRef.deviceId ?? null, command: evidenceRef.command ?? null, excerpt: evidenceRef.excerpt }],
+      technical_rationale: "La evidencia existe en el assessment.",
+      business_impact: "Puede requerir priorizacion tecnica.",
+      recommendation: "Validar y categorizar la accion.",
+      ...enrichedSynthesisFields(),
+      remediation_steps: [],
+      validation_questions: [],
+      related_devices: ["core-01"],
+      related_sites: [],
+      dependencies: []
+    };
 
-  const missing = validateScopeAnalysisResult({ findings: [finding] }, packet);
-  const invalid = validateScopeAnalysisResult({ findings: [{ ...finding, finding_id: "cfg_invalid_category", remediation_category: "legacy_unknown" }] }, packet);
+    const missing = validateScopeAnalysisResult({ findings: [finding] }, packet);
+    const invalid = validateScopeAnalysisResult({ findings: [{ ...finding, finding_id: "cfg_invalid_category", remediation_category: "legacy_unknown" }] }, packet);
 
-  assert.equal(missing.validFindings.length, 1);
-  assert.equal(missing.validFindings[0].remediation_category, "pending_validation");
-  assert.equal(invalid.validFindings.length, 1);
-  assert.equal(invalid.validFindings[0].remediation_category, "pending_validation");
+    assert.equal(missing.validFindings.length, 1);
+    assert.equal(missing.validFindings[0].remediation_category, "pending_validation");
+    assert.equal(invalid.validFindings.length, 1);
+    assert.equal(invalid.validFindings[0].remediation_category, "pending_validation");
+  });
 });
 
 test("validateScopeAnalysisResult accepts real facts metrics and correlations excluded from the trimmed packet", () => {
@@ -537,8 +753,10 @@ test("validateScopeAnalysisResult accepts real facts metrics and correlations ex
       evidence: [{ source_type: "cli", source_name: fact.evidenceRef, hostname: "core-01", command: "show running-config", excerpt: "snmp-server community public RO" }],
       technical_rationale: "Las referencias existen en el assessment completo aunque fueron recortadas de esta particion.",
       business_impact: "Puede indicar riesgo operacional correlacionado.",
-      recommendation: "Validar la configuracion y metricas del equipo citado.",
-      remediation_steps: [],
+      recommendation: "Corregir la desviacion de core-01 y correlacionar el cierre con la metrica pm_crc hasta confirmar que el contador deja de crecer.",
+      ...enrichedSynthesisFields(),
+      remediation_category: "operational_change",
+      remediation_steps: ["Aplicar la correccion sobre core-01.", "Revisar la metrica pm_crc despues del cambio y documentar que el contador se estabilizo."],
       validation_questions: [],
       related_devices: ["core-01"],
       related_sites: [],
@@ -568,8 +786,10 @@ test("validateScopeAnalysisResult accepts evidence-bound security findings", () 
       evidence: [{ source_type: "cli", source_name: fact.evidenceRef, hostname: "core-01", command: "show running-config", excerpt: "snmp-server community public RO" }],
       technical_rationale: "SNMP community public expone administracion insegura.",
       business_impact: "Aumenta riesgo de acceso no autorizado.",
-      recommendation: "Migrar a SNMPv3.",
-      remediation_steps: ["Eliminar comunidades inseguras"],
+      recommendation: "Eliminar la comunidad SNMP public en core-01, configurar SNMPv3 authPriv restringido al NMS y cerrar con prueba de consulta autorizada.",
+      ...enrichedSynthesisFields({ probability_of_failure: "likely", impact_if_fails: "significant" }),
+      remediation_category: "operational_change",
+      remediation_steps: ["Remover comunidades SNMP inseguras.", "Configurar SNMPv3 authPriv con ACL hacia el NMS.", "Probar consulta SNMPv3 autorizada y bloqueo de SNMPv2c."],
       validation_questions: [],
       related_devices: ["core-01"],
       related_sites: ["HQ"],
@@ -582,6 +802,179 @@ test("validateScopeAnalysisResult accepts evidence-bound security findings", () 
   }, packet);
   assert.equal(result.validFindings.length, 1);
   assert.equal(result.rejectedFindings.length, 0);
+});
+
+test("validateScopeAnalysisResult enforces remediation quality only when enabled", () => {
+  const packet = buildAIScopePacket({ record: baseInput(), scopeId: "security" });
+  const evidenceRef = packet.evidencePack[0];
+  const actionableFinding = {
+    finding_id: "sec_remediation_quality",
+    scope: "security",
+    title: "Control administrativo requiere remediacion concreta",
+    finding_type: "probable_issue",
+    severity: "medium",
+    confidence: "medium",
+    evidence_refs: [evidenceRef.id],
+    related_fact_ids: [],
+    related_metric_ids: [],
+    related_correlation_ids: [],
+    evidence: [{ source_type: "cli", source_name: evidenceRef.id, hostname: "core-01", command: "show running-config", excerpt: evidenceRef.excerpt }],
+    technical_rationale: "La evidencia muestra una condicion administrativa que requiere remediacion.",
+    business_impact: "Puede afectar seguridad operacional si no se corrige.",
+    recommendation: "Validar.",
+    remediation_steps: [],
+    validation_questions: [],
+    related_devices: ["core-01"],
+    related_sites: [],
+    dependencies: [],
+    remediation_category: "pending_validation"
+  };
+
+  withEnv({ AI_REMEDIATION_QUALITY: undefined }, () => {
+    const result = validateScopeAnalysisResult({ findings: [actionableFinding] }, packet);
+    assert.equal(result.validFindings.length, 1);
+    assert.equal(result.rejectedFindings.length, 0);
+  });
+
+  withEnv({ AI_REMEDIATION_QUALITY: "1" }, () => {
+    const rejected = validateScopeAnalysisResult({ findings: [actionableFinding] }, packet);
+    assert.equal(rejected.validFindings.length, 0);
+    assert.match(rejected.rejectedFindings[0].reason, /recommendation vacia o generica/);
+    assert.match(rejected.rejectedFindings[0].reason, /remediation_steps requerido/);
+    assert.match(rejected.rejectedFindings[0].reason, /pending_validation/);
+
+    const accepted = validateScopeAnalysisResult({
+      findings: [{
+        ...actionableFinding,
+        finding_id: "sec_remediation_quality_concrete",
+        recommendation: "Deshabilitar Telnet en lineas VTY, habilitar SSHv2 y cerrar con prueba documentada de acceso administrativo por SSH.",
+        remediation_steps: [
+          "Cambiar transport input a ssh en VTY.",
+          "Confirmar acceso SSH desde red de gestion y registrar evidencia de cierre."
+        ],
+        remediation_category: "operational_change"
+      }]
+    }, packet);
+    assert.equal(accepted.validFindings.length, 1);
+    assert.equal(accepted.rejectedFindings.length, 0);
+
+    const visibilityGap = validateScopeAnalysisResult({
+      findings: [{
+        ...actionableFinding,
+        finding_id: "sec_remediation_quality_visibility_gap",
+        title: "Falta evidencia para confirmar control administrativo",
+        finding_type: "visibility_gap",
+        severity: "low",
+        evidence_refs: [],
+        related_fact_ids: [],
+        evidence: [],
+        recommendation: "Validar.",
+        remediation_steps: [],
+        remediation_category: "pending_validation"
+      }]
+    }, packet);
+    assert.equal(visibilityGap.validFindings.length, 1);
+    assert.equal(visibilityGap.rejectedFindings.length, 0);
+  });
+});
+
+test("validateScopeAnalysisResult enforces enriched synthesis fields only for actionable findings when flag is enabled", () => {
+  const packet = buildAIScopePacket({ record: baseInput(), scopeId: "security" });
+  const fact = packet.graphSlice.configFacts.find((item) => item.factType === "insecure_snmp")!;
+  const actionableFinding = {
+    finding_id: "sec_enriched_required",
+    scope: "security",
+    title: "SNMP comunitario inseguro",
+    finding_type: "confirmed_finding",
+    severity: "high",
+    confidence: "high",
+    evidence_refs: [fact.evidenceRef],
+    related_fact_ids: [fact.id],
+    related_metric_ids: [],
+    related_correlation_ids: [],
+    evidence: [{ source_type: "cli", source_name: fact.evidenceRef, hostname: "core-01", command: "show running-config", excerpt: "snmp-server community public RO" }],
+    technical_rationale: "SNMP community public expone administracion insegura.",
+    business_impact: "Aumenta riesgo de acceso no autorizado.",
+    recommendation: "Migrar a SNMPv3.",
+    remediation_steps: ["Eliminar comunidades inseguras"],
+    validation_questions: [],
+    related_devices: ["core-01"],
+    related_sites: ["HQ"],
+    dependencies: []
+  };
+
+  withEnv({ AI_ENRICHED_FINDINGS: "1" }, () => {
+    const missing = validateScopeAnalysisResult({ findings: [actionableFinding] }, packet);
+    assert.equal(missing.validFindings.length, 0);
+    assert.match(missing.rejectedFindings[0].reason, /probable_cause/);
+    assert.match(missing.rejectedFindings[0].reason, /technical_impact/);
+    assert.match(missing.rejectedFindings[0].reason, /probability_of_failure/);
+    assert.match(missing.rejectedFindings[0].reason, /impact_if_fails/);
+
+    const invalidEnum = validateScopeAnalysisResult({
+      findings: [{
+        ...actionableFinding,
+        finding_id: "sec_enriched_invalid_enum",
+        probable_cause: "Comunidad SNMP insegura configurada.",
+        technical_impact: "Exposicion del plano de administracion.",
+        probability_of_failure: "certain",
+        impact_if_fails: "major"
+      }]
+    }, packet);
+    assert.equal(invalidEnum.validFindings.length, 0);
+    assert.match(invalidEnum.rejectedFindings[0].reason, /probability_of_failure/);
+    assert.match(invalidEnum.rejectedFindings[0].reason, /impact_if_fails/);
+
+    const visibilityGap = validateScopeAnalysisResult({
+      findings: [{
+        ...actionableFinding,
+        finding_id: "sec_enriched_visibility_gap",
+        title: "Falta evidencia de hardening administrativo",
+        finding_type: "visibility_gap",
+        severity: "low",
+        evidence_refs: [],
+        related_fact_ids: [],
+        evidence: [],
+        technical_rationale: "La evidencia recolectada no permite confirmar controles de administracion.",
+        business_impact: "Limita la validacion del posture de seguridad."
+      }]
+    }, packet);
+    assert.equal(visibilityGap.validFindings.length, 1);
+    assert.equal(visibilityGap.rejectedFindings.length, 0);
+  });
+});
+
+test("validateScopeAnalysisResult does not enforce enriched fields when flag is disabled", () => {
+  const packet = buildAIScopePacket({ record: baseInput(), scopeId: "configuration" });
+  const evidenceRef = packet.evidencePack[0];
+  withEnv({ AI_ENRICHED_FINDINGS: undefined, AI_REMEDIATION_QUALITY: undefined }, () => {
+    const result = validateScopeAnalysisResult({
+      findings: [{
+        finding_id: "cfg_enriched_disabled",
+        scope: "configuration",
+        title: "Desviacion sin campos enriquecidos",
+        finding_type: "probable_issue",
+        severity: "medium",
+        confidence: "medium",
+        evidence_refs: [evidenceRef.id],
+        related_fact_ids: [],
+        related_metric_ids: [],
+        related_correlation_ids: [],
+        evidence: [{ source_type: "cli", source_name: evidenceRef.id, hostname: evidenceRef.deviceId ?? null, command: evidenceRef.command ?? null, excerpt: evidenceRef.excerpt }],
+        technical_rationale: "La evidencia existe en el assessment.",
+        business_impact: "Puede requerir priorizacion tecnica.",
+        recommendation: "Validar configuracion del equipo citado.",
+        remediation_steps: [],
+        validation_questions: [],
+        related_devices: ["core-01"],
+        related_sites: [],
+        dependencies: []
+      }]
+    }, packet);
+
+    assert.equal(result.validFindings.length, 1);
+    assert.equal(result.rejectedFindings.length, 0);
+  });
 });
 
 test("validateScopeAnalysisResult accepts graph findings with graph extension fields", () => {
@@ -602,8 +995,10 @@ test("validateScopeAnalysisResult accepts graph findings with graph extension fi
       evidence: [{ source_type: "cli", source_name: topologyRef.id, hostname: topologyRef.deviceId ?? null, command: topologyRef.command ?? null, excerpt: topologyRef.excerpt }],
       technical_rationale: "La evidencia CDP/LLDP disponible muestra una relacion limitada que requiere validacion de redundancia.",
       business_impact: "Puede limitar la visibilidad de dependencia fisica.",
-      recommendation: "Validar vecinos y redundancia declarada.",
-      remediation_steps: ["Revisar CDP/LLDP y diagrama fisico"],
+      recommendation: "Actualizar el diagrama y las conexiones de core-01 a dist-01 con vecinos CDP/LLDP confirmados y cerrar con evidencia de redundancia documentada.",
+      ...enrichedSynthesisFields(),
+      remediation_category: "operational_change",
+      remediation_steps: ["Capturar vecinos CDP/LLDP de core-01 y dist-01.", "Actualizar el diagrama fisico con enlaces confirmados.", "Documentar si existe o no redundancia real."],
       validation_questions: [],
       related_devices: ["core-01", "dist-01"],
       related_sites: ["HQ"],
@@ -669,8 +1064,10 @@ test("validateScopeAnalysisResult accepts aggregation findings with aggregation 
       evidence: refs.map((ref) => ({ source_type: "cli", source_name: ref.id, hostname: ref.deviceId ?? null, command: ref.command ?? null, excerpt: ref.excerpt })),
       technical_rationale: "La recurrencia esta soportada por multiples evidencias del paquete.",
       business_impact: "Puede indicar inestabilidad operacional.",
-      recommendation: "Correlacionar eventos por ventana y dispositivo.",
-      remediation_steps: ["Revisar logs y vecinos afectados"],
+      recommendation: "Agrupar los eventos de core-01 por ventana temporal, corregir el origen recurrente y cerrar con evidencia de 24 horas sin nuevas ocurrencias.",
+      ...enrichedSynthesisFields(),
+      remediation_category: "operational_change",
+      remediation_steps: ["Agrupar logs por hora y dispositivo afectado.", "Corregir el origen recurrente identificado.", "Confirmar 24 horas sin nuevos eventos equivalentes."],
       validation_questions: [],
       related_devices: ["core-01"],
       related_sites: ["HQ"],
@@ -794,9 +1191,11 @@ test("deterministicFindingsToScopeAnalysisFindings preserves metric references f
   assert.deepEqual(findings[0].related_fact_ids, []);
   assert.deepEqual(findings[0].related_metric_ids, ["pm_crc"]);
   assert.equal(findings[0].evidence[0].source_type, "performance");
-  const validation = validateScopeAnalysisResult({ findings, recommendations: [] }, packet);
-  assert.equal(validation.validFindings.length, 1);
-  assert.equal(validation.rejectedFindings.length, 0);
+  withEnv({ AI_REMEDIATION_QUALITY: undefined }, () => {
+    const validation = validateScopeAnalysisResult({ findings, recommendations: [] }, packet);
+    assert.equal(validation.validFindings.length, 1);
+    assert.equal(validation.rejectedFindings.length, 0);
+  });
 });
 
 test("buildAIScopePacket scopes deterministic performance findings to performance, not configuration", () => {
@@ -820,6 +1219,21 @@ test("buildAIScopePacket scopes deterministic performance findings to performanc
 
   assert.equal(configurationPacket.memory.acceptedOrDeterministicFindings.some((finding) => finding.id === "PF-det-leak"), false);
   assert.equal(performancePacket.memory.acceptedOrDeterministicFindings.some((finding) => finding.id === "PF-det-leak"), true);
+});
+
+test("buildAIScopePacket excludes global data collection gaps from configuration scope", () => {
+  const input = baseInput();
+  input.parsed.relations = [];
+  input.performance.metrics = [];
+
+  const configurationPacket = buildAIScopePacket({ record: input, scopeId: "configuration", maxInputTokens: 8000 });
+  const topologyPacket = buildAIScopePacket({ record: input, scopeId: "topology", maxInputTokens: 8000 });
+  const performancePacket = buildAIScopePacket({ record: input, scopeId: "performance", maxInputTokens: 8000 });
+
+  assert.deepEqual(configurationPacket.graphSlice.missingEvidence, []);
+  assert.equal(configurationPacket.memory.unresolvedQuestions.length, 0);
+  assert.ok(topologyPacket.graphSlice.missingEvidence.some((item) => /CDP\/LLDP/i.test(item.expectedEvidence)));
+  assert.ok(performancePacket.graphSlice.missingEvidence.some((item) => /Performance|Historico/i.test(item.expectedEvidence)));
 });
 
 test("validation phase keeps gap findings without evidence and rejects non-gap findings without evidence", () => {
@@ -848,6 +1262,87 @@ test("validation phase keeps gap findings without evidence and rejects non-gap f
   assert.deepEqual(result.rejectedFindings.map((finding) => finding.finding_id), ["probable_without_evidence"]);
   assert.match(result.rejectedFindings[0].reason, /Sin evidencia trazable/);
 });
+
+test("computeCoverageLedger reconciles complete coverage with evaluated clean criteria", () => {
+  const [entry] = computeCoverageLedger(coveragePlanFixture(), [
+    { finding_id: "cfg_aaa", related_devices: ["core-01"], criterion_ids: ["crit-aaa"] }
+  ], [
+    { device_hostname: "core-01", criterion_id: "crit-snmp", reason: "No SNMP evidence." }
+  ], [
+    { device_hostname: "core-01", criterion_id: "crit-ntp" },
+    { device_hostname: "core-01", criterion_id: "crit-syslog" }
+  ]);
+
+  assert.deepEqual(entry, {
+    deviceHostname: "core-01",
+    applicable: 4,
+    withFinding: 1,
+    gap: 1,
+    clean: 2,
+    notEvaluated: 0
+  });
+  assertCoverageInvariant(entry);
+});
+
+test("computeCoverageLedger marks missing evaluated_clean entries as not evaluated", () => {
+  const [entry] = computeCoverageLedger(coveragePlanFixture(), [
+    { finding_id: "cfg_aaa", related_devices: ["core-01"], criterion_ids: ["crit-aaa"] }
+  ], [
+    { device_hostname: "core-01", criterion_id: "crit-snmp", reason: "No SNMP evidence." }
+  ], [
+    { device_hostname: "core-01", criterion_id: "crit-ntp" }
+  ]);
+
+  assert.deepEqual(entry, {
+    deviceHostname: "core-01",
+    applicable: 4,
+    withFinding: 1,
+    gap: 1,
+    clean: 1,
+    notEvaluated: 1
+  });
+  assertCoverageInvariant(entry);
+});
+
+test("computeCoverageLedger gives finding priority over gaps and evaluated clean overlaps", () => {
+  const [entry] = computeCoverageLedger(coveragePlanFixture(), [
+    { finding_id: "cfg_aaa", related_devices: ["core-01"], criterion_ids: ["crit-aaa", "crit-snmp"] }
+  ], [
+    { device_hostname: "core-01", criterion_id: "crit-snmp", reason: "Overlaps finding." },
+    { device_hostname: "core-01", criterion_id: "crit-ntp", reason: "No NTP evidence." }
+  ], [
+    { device_hostname: "core-01", criterion_id: "crit-aaa" },
+    { device_hostname: "core-01", criterion_id: "crit-ntp" },
+    { device_hostname: "core-01", criterion_id: "crit-syslog" }
+  ]);
+
+  assert.deepEqual(entry, {
+    deviceHostname: "core-01",
+    applicable: 4,
+    withFinding: 2,
+    gap: 1,
+    clean: 1,
+    notEvaluated: 0
+  });
+  assertCoverageInvariant(entry);
+});
+
+function coveragePlanFixture() {
+  return [{
+    deviceHostname: "core-01",
+    osFamily: "ios-xe" as const,
+    criteria: [
+      { id: "crit-aaa", aspect: "AAA" },
+      { id: "crit-snmp", aspect: "SNMP" },
+      { id: "crit-ntp", aspect: "NTP" },
+      { id: "crit-syslog", aspect: "Syslog" }
+    ]
+  }];
+}
+
+function assertCoverageInvariant(entry: { applicable: number; withFinding: number; gap: number; clean: number; notEvaluated: number }) {
+  assert.equal(entry.withFinding + entry.gap + entry.clean + entry.notEvaluated, entry.applicable);
+}
 
 function asset(hostname: string, ip: string, model: string, role: string, priority: "low" | "medium" | "high" | "critical") {
   return { id: `asset_${hostname}`, hostname, managementIp: ip, serial: `SN-${hostname}`, model, deviceType: "switch", platform: "ios-xe", role, site: "HQ", priority, included: true };
@@ -940,6 +1435,26 @@ function domainRecord(groups: Array<{ site: string; hostnames: string[] }>, conn
   return record;
 }
 
+function operationsFindingFixture(overrides: Partial<OperationsFinding> = {}): OperationsFinding {
+  return {
+    id: "operations_monitoring_gap",
+    area: "monitoring",
+    dimension: "Monitoreo y observabilidad",
+    gap: "Monitoreo insuficiente / sin cobertura",
+    status: "detected",
+    severity: "high",
+    remediationCategory: "operational_change",
+    confidence: 90,
+    evidence: ["dimension=Monitoreo y observabilidad", "gap=Monitoreo insuficiente / sin cobertura"],
+    relatedQuestions: ["MON-01"],
+    relatedAnswers: ["10"],
+    technical_rationale: "La dimension Monitoreo obtuvo madurez baja.",
+    business_impact: "Aumenta el riesgo de incidentes no detectados.",
+    recommendation: "Implementar monitoreo centralizado con responsables, KPIs y evidencia mensual.",
+    ...overrides
+  };
+}
+
 function withEnv(values: Record<string, string | undefined>, run: () => void) {
   const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
   try {
@@ -960,6 +1475,21 @@ function withEnv(values: Record<string, string | undefined>, run: () => void) {
       }
     }
   }
+}
+
+function enrichedSynthesisFields(overrides: Partial<{
+  probable_cause: string;
+  technical_impact: string;
+  probability_of_failure: "very_likely" | "likely" | "possible" | "unlikely" | "very_unlikely";
+  impact_if_fails: "severe" | "significant" | "moderate" | "minor" | "negligible";
+}> = {}) {
+  return {
+    probable_cause: "Causa probable basada en evidencia trazable.",
+    technical_impact: "Impacto tecnico acotado al dispositivo o ambito citado.",
+    probability_of_failure: "possible" as const,
+    impact_if_fails: "moderate" as const,
+    ...overrides
+  };
 }
 
 function findingFixture(patch: Partial<Finding> = {}): Finding {

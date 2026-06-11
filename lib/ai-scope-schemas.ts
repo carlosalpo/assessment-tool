@@ -6,6 +6,9 @@ export type ScopeQueryPattern = "graph" | "entity" | "aggregation" | "synthesis"
 
 const WIRED_PATTERN_QUERIES = new Set<ScopeQueryPattern>(["entity", "graph", "aggregation"]);
 const remediationCategoryEnum = ["professional_services", "new_technology", "platform_upgrade", "operational_change", "pending_validation"];
+const coverageLedgerScopes = new Set<AIScopeId>(["configuration", "security", "evidence"]);
+export const probabilityOfFailureEnum = ["very_likely", "likely", "possible", "unlikely", "very_unlikely"] as const;
+export const impactIfFailsEnum = ["severe", "significant", "moderate", "minor", "negligible"] as const;
 
 export const scopePattern: Record<AIScopeId, ScopeQueryPattern> = {
   inventory: "entity",
@@ -34,30 +37,47 @@ export function usesPatternQuery(scopeId: AIScopeId): boolean {
   return process.env.AI_PATTERN_QUERIES === "1" && WIRED_PATTERN_QUERIES.has(patternForScope(scopeId));
 }
 
-export function baseFindingSchema(): JsonSchema {
+export function isEnrichedFindingsEnabled(): boolean {
+  return process.env.AI_ENRICHED_FINDINGS === "1";
+}
+
+export function isCoverageLedgerEnabled(): boolean {
+  return process.env.AI_COVERAGE_LEDGER === "1";
+}
+
+export function isCoverageLedgerScope(scopeId: AIScopeId | string | undefined): scopeId is AIScopeId {
+  return Boolean(scopeId && coverageLedgerScopes.has(scopeId as AIScopeId));
+}
+
+function shouldRequireCoverageLedger(scopeId: AIScopeId | string | undefined) {
+  return isCoverageLedgerEnabled() && isCoverageLedgerScope(scopeId);
+}
+
+export function baseFindingSchema(scopeId?: AIScopeId): JsonSchema {
   return {
     type: "object",
     additionalProperties: false,
-    required: baseFindingRequiredProperties(),
-    properties: baseFindingProperties()
+    required: baseFindingRequiredProperties(scopeId),
+    properties: baseFindingProperties(scopeId)
   };
 }
 
-export function scopeAnalysisResultSchemaForPattern(pattern: ScopeQueryPattern): JsonSchema {
+export function scopeAnalysisResultSchemaForPattern(pattern: ScopeQueryPattern, scopeId?: AIScopeId): JsonSchema {
   if (pattern === "synthesis") throw new Error("synthesis scopes use synthesisResultSchema(target)");
   return {
     type: "object",
     additionalProperties: false,
-    required: ["phase", "scopeId", "findings", "recommendations", "limitations"],
+    required: resultRequiredProperties(scopeId),
     properties: {
       phase: { type: "string" },
       scopeId: { type: "string" },
       findings: {
         type: "array",
-        items: findingSchemaForPattern(pattern)
+        items: findingSchemaForPattern(pattern, scopeId)
       },
       recommendations: { type: "array", items: { type: "string" } },
-      limitations: { type: "array", items: { type: "string" } }
+      limitations: { type: "array", items: { type: "string" } },
+      ...coverageResultProperties(scopeId)
     }
   };
 }
@@ -165,14 +185,14 @@ function sourceFindingIdsSchema(): JsonSchema {
   };
 }
 
-function findingSchemaForPattern(pattern: Exclude<ScopeQueryPattern, "synthesis">): JsonSchema {
+function findingSchemaForPattern(pattern: Exclude<ScopeQueryPattern, "synthesis">, scopeId?: AIScopeId): JsonSchema {
   const extension = findingExtensionForPattern(pattern);
   return {
     type: "object",
     additionalProperties: false,
-    required: [...baseFindingRequiredProperties(), ...Object.keys(extension)],
+    required: [...baseFindingRequiredProperties(scopeId), ...Object.keys(extension)],
     properties: {
-      ...baseFindingProperties(),
+      ...baseFindingProperties(scopeId),
       ...extension
     }
   };
@@ -202,8 +222,8 @@ function findingExtensionForPattern(pattern: Exclude<ScopeQueryPattern, "synthes
   };
 }
 
-function baseFindingRequiredProperties() {
-  return [
+function baseFindingRequiredProperties(scopeId?: AIScopeId) {
+  const required = [
     "finding_id",
     "scope",
     "title",
@@ -225,10 +245,15 @@ function baseFindingRequiredProperties() {
     "related_sites",
     "dependencies"
   ];
+  const coverageRequired = shouldRequireCoverageLedger(scopeId) ? ["criterion_ids"] : [];
+  const baseRequired = [...required, ...coverageRequired];
+  return isEnrichedFindingsEnabled()
+    ? [...baseRequired, "probable_cause", "technical_impact", "probability_of_failure", "impact_if_fails"]
+    : baseRequired;
 }
 
-function baseFindingProperties(): JsonSchema {
-  return {
+function baseFindingProperties(scopeId?: AIScopeId): JsonSchema {
+  const properties = {
     finding_id: { type: "string" },
     scope: { type: "string" },
     title: { type: "string" },
@@ -262,6 +287,60 @@ function baseFindingProperties(): JsonSchema {
     validation_questions: { type: "array", items: { type: "string" } },
     related_devices: { type: "array", items: { type: "string" } },
     related_sites: { type: "array", items: { type: "string" } },
-    dependencies: { type: "array", items: { type: "string" } }
+    dependencies: { type: "array", items: { type: "string" } },
+    ...(shouldRequireCoverageLedger(scopeId) ? { criterion_ids: { type: "array", items: { type: "string" } } } : {})
+  };
+  return isEnrichedFindingsEnabled()
+    ? {
+      ...properties,
+      probable_cause: { type: "string" },
+      technical_impact: { type: "string" },
+      probability_of_failure: { type: "string", enum: probabilityOfFailureEnum },
+      impact_if_fails: { type: "string", enum: impactIfFailsEnum }
+    }
+    : properties;
+}
+
+export function evidenceGapSchema(): JsonSchema {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["device_hostname", "criterion_id", "reason"],
+    properties: {
+      device_hostname: { type: "string" },
+      criterion_id: { type: "string" },
+      reason: { type: "string" }
+    }
+  };
+}
+
+export function evaluatedCleanSchema(): JsonSchema {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["device_hostname", "criterion_id"],
+    properties: {
+      device_hostname: { type: "string" },
+      criterion_id: { type: "string" }
+    }
+  };
+}
+
+export function resultRequiredProperties(scopeId?: AIScopeId) {
+  const required = ["phase", "scopeId", "findings", "recommendations", "limitations"];
+  return shouldRequireCoverageLedger(scopeId) ? [...required, "evidence_gaps", "evaluated_clean"] : required;
+}
+
+export function coverageResultProperties(scopeId?: AIScopeId): JsonSchema {
+  if (!shouldRequireCoverageLedger(scopeId)) return {};
+  return {
+    evidence_gaps: {
+      type: "array",
+      items: evidenceGapSchema()
+    },
+    evaluated_clean: {
+      type: "array",
+      items: evaluatedCleanSchema()
+    }
   };
 }

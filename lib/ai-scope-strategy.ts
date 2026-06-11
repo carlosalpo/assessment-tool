@@ -8,7 +8,8 @@ import {
   type EvidenceReference,
   type OperationalStateFact
 } from "./ai-analysis.ts";
-import { patternForScope } from "./ai-scope-schemas.ts";
+import { impactIfFailsEnum, isEnrichedFindingsEnabled, patternForScope, probabilityOfFailureEnum } from "./ai-scope-schemas.ts";
+import { isVacuousRemediation } from "./remediation-quality.ts";
 import { mapLegacyRemediation, type RemediationCategory } from "./types.ts";
 
 export type AIScopeId =
@@ -209,7 +210,33 @@ const scopeStrategies: Partial<Record<AIScopeId, AIScopeStrategy>> = {
       "No afirmes SPOF sin inventario critico y evidencia topologica.",
       "Si falta CDP/LLDP, genera visibility_gap o validation_required."
     ],
-    evidenceKeywords: ["cdp", "lldp", "neighbor", "port-channel", "vpc", "stack", "redundancy", "spanning-tree"]
+    evidenceKeywords: [
+      "cdp",
+      "lldp",
+      "neighbor",
+      "port-channel",
+      "vpc",
+      "stack",
+      "redundancy",
+      "spanning-tree",
+      "ospf",
+      "eigrp",
+      "bgp",
+      "standby",
+      "hsrp",
+      "vrrp",
+      "glbp",
+      "show spanning-tree",
+      "show ip ospf",
+      "show ip eigrp",
+      "show standby",
+      "show module",
+      "show power",
+      "supervisor",
+      "root",
+      "priority",
+      "show ip route"
+    ]
   },
   configuration: {
     id: "configuration",
@@ -359,9 +386,10 @@ export function buildAIScopePacket(input: {
     .slice(0, input.scopeId === "topology" ? 140 : 60);
   relationships.forEach((relation) => relevantEvidenceIds.add(relation.evidenceSource));
 
-  const configFacts = graph.nodes.configFacts
+  const configFactLimit = input.scopeId === "configuration" || input.scopeId === "security" ? 120 : 45;
+  const configFacts = selectDiverseConfigFacts(graph.nodes.configFacts
     .filter((fact) => hostnameMatchesPartition(fact.deviceId, partitionDeviceSet) && isConfigFactRelevant(fact, strategy, relevantDeviceIds))
-    .slice(0, input.scopeId === "configuration" || input.scopeId === "security" ? 120 : 45);
+    .sort(compareConfigFactSignal), configFactLimit);
   configFacts.forEach((fact) => relevantEvidenceIds.add(fact.evidenceRef));
 
   const stateFacts = graph.nodes.stateFacts
@@ -548,6 +576,31 @@ export function validateScopeAnalysisResult(parsed: any, packet: AIScopePacket):
     if (evidenceRefs.length === 0 && !["visibility_gap", "validation_required"].includes(findingType)) {
       reasons.push("Hallazgo sin evidence_refs debe ser visibility_gap o validation_required.");
     }
+    if (isEnrichedFindingsEnabled() && !["visibility_gap", "validation_required"].includes(findingType)) {
+      if (typeof finding.probable_cause !== "string" || finding.probable_cause.trim().length === 0) {
+        reasons.push("probable_cause requerido para hallazgos accionables.");
+      }
+      if (typeof finding.technical_impact !== "string" || finding.technical_impact.trim().length === 0) {
+        reasons.push("technical_impact requerido para hallazgos accionables.");
+      }
+      if (!probabilityOfFailureEnum.includes(finding.probability_of_failure)) {
+        reasons.push("probability_of_failure ausente o invalido.");
+      }
+      if (!impactIfFailsEnum.includes(finding.impact_if_fails)) {
+        reasons.push("impact_if_fails ausente o invalido.");
+      }
+    }
+    if (isRemediationQualityEnabled() && isActionableFindingType(findingType)) {
+      if (isVacuousRemediation(finding.recommendation)) {
+        reasons.push("recommendation vacia o generica; requiere accion concreta.");
+      }
+      if (normalizeStringArray(finding.remediation_steps).length === 0) {
+        reasons.push("remediation_steps requerido para hallazgos accionables.");
+      }
+      if (finding.remediation_category === "pending_validation") {
+        reasons.push("hallazgo accionable no puede ser pending_validation.");
+      }
+    }
     const unknownEvidence = evidenceRefs.filter((ref) => !evidenceCatalog.has(ref));
     if (unknownEvidence.length > 0) reasons.push(`evidence_refs desconocidos: ${unknownEvidence.join(", ")}.`);
     const unknownFacts = relatedFactIds.filter((id) => !configFactCatalog.has(id) && !stateFactCatalog.has(id));
@@ -594,6 +647,14 @@ export function validateScopeAnalysisResult(parsed: any, packet: AIScopePacket):
   }
 
   return { validFindings, rejectedFindings };
+}
+
+function isRemediationQualityEnabled() {
+  return process.env.AI_REMEDIATION_QUALITY === "1";
+}
+
+function isActionableFindingType(findingType: string) {
+  return findingType !== "visibility_gap" && findingType !== "validation_required";
 }
 
 function normalizeScopeRemediationCategory(value: unknown): RemediationCategory {
@@ -827,6 +888,79 @@ function isConfigFactRelevant(fact: ConfigurationFact, strategy: AIScopeStrategy
   return strategy.factCategories.includes(fact.category) || relevantDeviceIds.has(normalize(fact.deviceId));
 }
 
+function selectDiverseConfigFacts(facts: ConfigurationFact[], limit: number) {
+  if (facts.length <= limit) return facts;
+  const groups = new Map<string, ConfigurationFact[]>();
+  for (const fact of facts) {
+    const group = groups.get(fact.factType) ?? [];
+    group.push(fact);
+    groups.set(fact.factType, group);
+  }
+  for (const group of groups.values()) group.sort(compareConfigFactSignal);
+
+  const keys = [...groups.keys()].sort((left, right) => {
+    const rankDelta = configFactTypeRank(right) - configFactTypeRank(left);
+    return rankDelta || left.localeCompare(right, "en");
+  });
+  const selected: ConfigurationFact[] = [];
+  while (selected.length < limit && keys.some((key) => (groups.get(key)?.length ?? 0) > 0)) {
+    for (const key of keys) {
+      const group = groups.get(key);
+      const next = group?.shift();
+      if (!next) continue;
+      selected.push(next);
+      if (selected.length >= limit) break;
+    }
+  }
+  return selected;
+}
+
+function compareConfigFactSignal(left: ConfigurationFact, right: ConfigurationFact) {
+  const severityDelta = riskRank(right.riskRelevance) - riskRank(left.riskRelevance);
+  if (severityDelta !== 0) return severityDelta;
+  const categoryDelta = configCategoryRank(right.category) - configCategoryRank(left.category);
+  if (categoryDelta !== 0) return categoryDelta;
+  const deviceDelta = left.deviceId.localeCompare(right.deviceId, "en");
+  if (deviceDelta !== 0) return deviceDelta;
+  return left.factType.localeCompare(right.factType, "en");
+}
+
+function configFactTypeRank(value: string) {
+  const ranks: Record<string, number> = {
+    telnet_enabled: 100,
+    insecure_snmp: 95,
+    weak_local_credentials: 90,
+    aaa_missing: 85,
+    syslog_missing: 80,
+    ntp_missing: 78,
+    trunk_allowed_vlan_missing: 75,
+    bpdu_guard_missing_access: 73,
+    dhcp_snooping_missing: 70,
+    vpc_feature_without_domain: 68,
+    stp_mode_or_root_missing: 65,
+    port_channel_configured: 45,
+    interface_configured: 10
+  };
+  return ranks[value] ?? 30;
+}
+
+function riskRank(value: string) {
+  if (value === "critical") return 4;
+  if (value === "high") return 3;
+  if (value === "medium") return 2;
+  if (value === "low") return 1;
+  return 0;
+}
+
+function configCategoryRank(value: ConfigurationFact["category"]) {
+  if (value === "security") return 5;
+  if (value === "management") return 4;
+  if (value === "resiliency") return 3;
+  if (value === "switching") return 2;
+  if (value === "routing") return 1;
+  return 0;
+}
+
 function isStateFactRelevant(fact: OperationalStateFact, strategy: AIScopeStrategy, relevantDeviceIds: Set<string>) {
   if (strategy.id === "security") return strategy.factCategories.includes(fact.category);
   return strategy.factCategories.includes(fact.category) || relevantDeviceIds.has(normalize(fact.deviceId)) || ["high", "critical"].includes(fact.severityHint);
@@ -856,6 +990,7 @@ function isMissingEvidenceRelevant(item: AssessmentAIContext["missingEvidence"][
   const value = `${item.expectedEvidence} ${item.reason}`.toLowerCase();
   if (scopeId === "topology") return /cdp|lldp|topolog|vecino/.test(value);
   if (scopeId === "operations" || scopeId === "evidence") return /metric|performance|historico|evidencia|monitor/.test(value);
+  if (scopeId === "configuration") return false;
   return true;
 }
 

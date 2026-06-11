@@ -138,10 +138,10 @@ test("hashScopeInput changes when AI_SCOPE_BRIEF changes the effective prompt ve
 });
 
 test("buildScopeSystemPrompt keeps the base prompt unless a map pattern query is wired", () => {
-  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_PER_DEVICE: undefined }, () => {
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_PER_DEVICE: undefined, AI_ENRICHED_FINDINGS: undefined, AI_REMEDIATION_QUALITY: undefined }, () => {
     assert.equal(buildScopeSystemPrompt("security"), baseSystemPrompt());
   });
-  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: "1", AI_PER_DEVICE: undefined }, () => {
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: "1", AI_PER_DEVICE: undefined, AI_ENRICHED_FINDINGS: undefined, AI_REMEDIATION_QUALITY: undefined }, () => {
     const entityPrompt = buildScopeSystemPrompt("security");
     assert.notEqual(entityPrompt, baseSystemPrompt());
     assert.match(entityPrompt, /Razona por equipo\/grupo contra el estandar\/control esperado/);
@@ -167,10 +167,10 @@ test("buildScopeSystemPrompt keeps the base prompt unless a map pattern query is
 });
 
 test("buildScopeSystemPrompt adds per-device instructions only for ai-per-device scopes when enabled", () => {
-  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_PER_DEVICE: undefined, AI_DESIGN_RUBRIC: undefined }, () => {
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_PER_DEVICE: undefined, AI_DESIGN_RUBRIC: undefined, AI_ENRICHED_FINDINGS: undefined, AI_REMEDIATION_QUALITY: undefined }, () => {
     assert.equal(buildScopeSystemPrompt("security"), baseSystemPrompt());
   });
-  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_PER_DEVICE: "1", AI_DESIGN_RUBRIC: undefined }, () => {
+  withEnv({ AI_SCOPE_BRIEF: undefined, AI_PATTERN_QUERIES: undefined, AI_PER_DEVICE: "1", AI_DESIGN_RUBRIC: undefined, AI_ENRICHED_FINDINGS: undefined, AI_REMEDIATION_QUALITY: undefined }, () => {
     const securityPrompt = buildScopeSystemPrompt("security");
     assert.notEqual(securityPrompt, baseSystemPrompt());
     assert.match(securityPrompt, /Modo por equipo/);

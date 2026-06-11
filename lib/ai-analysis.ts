@@ -239,7 +239,9 @@ export function buildAssessmentAIContext(input: AssessmentAIContextInput): Asses
   const configurationFacts = extractConfigurationFacts(input);
   const operationalStateFacts = extractOperationalStateFacts(input);
   const performanceMetrics = input.performance.metrics.map((metric) => performanceMetricFact(metric));
-  const deterministicFindings = input.parsed.findings.map((finding) => deterministicFindingRef(finding));
+  const deterministicFindings = input.parsed.findings
+    .filter(includeFindingAsPriorSignal)
+    .map((finding) => deterministicFindingRef(finding));
   const missingEvidence = buildMissingEvidence(input, devices);
   const evidenceReferences = buildEvidenceReferences({
     devices,
@@ -331,11 +333,13 @@ export function executiveSummaryFindings(findings: Finding[]) {
 function buildContextDevices(input: AssessmentAIContextInput): AIContextDevice[] {
   const assetsByHost = new Map(input.targetInventory.map((asset) => [asset.hostname.toLowerCase(), asset]));
   const parsedByHost = new Map(input.parsed.devices.map((device) => [device.hostname.toLowerCase(), device]));
-  const hostnames = new Set([...assetsByHost.keys(), ...parsedByHost.keys()]);
+  const evidenceByHost = buildParsedEvidenceByHost(input.parsed);
+  const hostnames = new Set([...assetsByHost.keys(), ...parsedByHost.keys(), ...evidenceByHost.keys()]);
 
   return Array.from(hostnames).map((key) => {
     const asset = assetsByHost.get(key);
     const parsed = parsedByHost.get(key);
+    const inferredEvidence = Array.from(evidenceByHost.get(key) ?? []);
     const hostname = parsed?.hostname ?? asset?.hostname ?? key;
     const lifecycleEvaluation = inferLifecycleEvaluation(parsed, input.lifecycleEoxRecords ?? {});
     return {
@@ -352,9 +356,29 @@ function buildContextDevices(input: AssessmentAIContextInput): AIContextDevice[]
         ? (lifecycleEvaluation.source === "hardware" ? lifecycleEvaluation.hardware.dates : lifecycleEvaluation.software.dates)
         : undefined,
       criticality: normalizeCriticality(asset?.priority, asset?.role || parsed?.suggestedRole || ""),
-      evidenceRefs: Array.from(new Set([...(parsed?.sourceFiles ?? []), ...(parsed?.evidence ?? [])])).slice(0, 8)
+      evidenceRefs: Array.from(new Set([...(parsed?.sourceFiles ?? []), ...(parsed?.evidence ?? []), ...inferredEvidence])).slice(0, 8)
     };
   });
+}
+
+function buildParsedEvidenceByHost(parsed: ParsedAssessment) {
+  const refs = new Map<string, Set<string>>();
+  const add = (hostname: string | undefined, values: Array<string | undefined>) => {
+    if (!hostname) return;
+    const key = hostname.toLowerCase();
+    const set = refs.get(key) ?? new Set<string>();
+    values.filter((value): value is string => Boolean(value?.trim())).forEach((value) => set.add(value));
+    refs.set(key, set);
+  };
+
+  for (const intf of parsed.interfaces) {
+    add(intf.hostname, intf.evidence);
+  }
+  for (const relation of parsed.relations) {
+    add(relation.localHostname, relation.evidence);
+    add(relation.remoteHostname, relation.evidence);
+  }
+  return refs;
 }
 
 function relationshipFact(relation: NeighborRelation): TopologyRelationshipFact {
@@ -373,16 +397,139 @@ function relationshipFact(relation: NeighborRelation): TopologyRelationshipFact 
 function extractConfigurationFacts(input: AssessmentAIContextInput): ConfigurationFact[] {
   const facts: ConfigurationFact[] = [];
   for (const file of input.evidenceFiles) {
-    const hostname = extractHostname(file.content) || file.name.replace(/\.[^.]+$/, "");
-    addMatches(facts, file, hostname, /^snmp-server community\s+(public|private)\b[^\n]*/gim, "security", "insecure_snmp", "Comunidad SNMP insegura o por defecto", "critical");
-    addMatches(facts, file, hostname, /transport input[^\n]*telnet[^\n]*/gim, "management", "telnet_enabled", "Acceso administrativo permite Telnet", "critical");
-    addMatches(facts, file, hostname, /^ip http server\b[^\n]*/gim, "management", "http_server_enabled", "Servidor HTTP no cifrado habilitado", "medium");
-    addMatches(facts, file, hostname, /^access-list\s+\S+[^\n]*permit\s+ip\s+any\s+any[^\n]*/gim, "security", "permit_any_acl", "ACL permisiva permit ip any any", "critical");
-    addMatches(facts, file, hostname, /^username\s+\S+\s+privilege\s+15\s+password\s+0\s+[^\n]+/gim, "management", "weak_local_credentials", "Credenciales locales en texto claro o privilegio amplio", "high");
-    addMatches(facts, file, hostname, /^interface\s+Port-channel|^interface\s+TenGigabitEthernet|^interface\s+GigabitEthernet/gim, "interface", "interface_configured", "Configuracion de interfaz detectada", "low");
-    addMatches(facts, file, hostname, /^Group\s+Port-channel|Po\d+\(S[D]\)|\(\w*s\)|\(\w*I\)/gim, "resiliency", "port_channel_configured", "Port-channel configurado o con miembros no agrupados", "medium");
+    const segments = splitEvidenceIntoDeviceSegments(file);
+    const includeHostnameInEvidence = segments.length > 1;
+    for (const segment of segments) {
+      addMatches(facts, file.name, segment.content, segment.hostname, includeHostnameInEvidence, /^snmp-server community\s+(public|private)\b[^\n]*/gim, "security", "insecure_snmp", "Comunidad SNMP insegura o por defecto", "critical");
+      addMatches(facts, file.name, segment.content, segment.hostname, includeHostnameInEvidence, /transport input[^\n]*telnet[^\n]*/gim, "management", "telnet_enabled", "Acceso administrativo permite Telnet", "critical");
+      addMatches(facts, file.name, segment.content, segment.hostname, includeHostnameInEvidence, /^ip http server\b[^\n]*/gim, "management", "http_server_enabled", "Servidor HTTP no cifrado habilitado", "medium");
+      addMatches(facts, file.name, segment.content, segment.hostname, includeHostnameInEvidence, /^access-list\s+\S+[^\n]*permit\s+ip\s+any\s+any[^\n]*/gim, "security", "permit_any_acl", "ACL permisiva permit ip any any", "critical");
+      addMatches(facts, file.name, segment.content, segment.hostname, includeHostnameInEvidence, /^username\s+\S+\s+privilege\s+15\s+password\s+0\s+[^\n]+/gim, "management", "weak_local_credentials", "Credenciales locales en texto claro o privilegio amplio", "high");
+      addMatches(facts, file.name, segment.content, segment.hostname, includeHostnameInEvidence, /^interface\s+Port-channel|^interface\s+TenGigabitEthernet|^interface\s+GigabitEthernet/gim, "interface", "interface_configured", "Configuracion de interfaz detectada", "low");
+      addMatches(facts, file.name, segment.content, segment.hostname, includeHostnameInEvidence, /^Group\s+Port-channel|Po\d+\(S[D]\)|\(\w*s\)|\(\w*I\)/gim, "resiliency", "port_channel_configured", "Port-channel configurado o con miembros no agrupados", "medium");
+      addRunningConfigFacts(facts, file.name, segment.content, segment.hostname, includeHostnameInEvidence);
+    }
   }
-  return facts;
+  for (const intf of input.parsed.interfaces) {
+    facts.push({
+      id: `cfg_${stableId(`${intf.hostname}-interface_inventory-${intf.name}-${intf.status}-${intf.vlan ?? ""}`)}`,
+      deviceId: intf.hostname,
+      category: "interface",
+      factType: "interface_configured",
+      description: "Interfaz detectada en evidencia operacional",
+      normalizedValue: `${intf.name} ${intf.description ?? ""} ${intf.status} ${intf.vlan ?? ""}`.trim(),
+      evidenceRef: intf.evidence[0] ?? `${intf.hostname}: ${intf.name} ${intf.status}`,
+      riskRelevance: /err-disabled|suspended/i.test(intf.status) ? "medium" : "low"
+    });
+  }
+  return dedupeConfigurationFacts(facts);
+}
+
+function addRunningConfigFacts(
+  facts: ConfigurationFact[],
+  sourceFile: string,
+  content: string,
+  hostname: string,
+  includeHostnameInEvidence: boolean
+) {
+  const runningConfig = extractCommandOutput(content, "show running-config");
+  if (!runningConfig) return;
+
+  const add = (
+    factType: string,
+    category: ConfigurationFact["category"],
+    description: string,
+    normalizedValue: string,
+    evidence: string,
+    riskRelevance: ConfigurationFact["riskRelevance"]
+  ) => {
+    const evidenceRef = includeHostnameInEvidence ? `${sourceFile}: ${hostname}: ${evidence}` : `${sourceFile}: ${evidence}`;
+    facts.push({
+      id: `cfg_${stableId(`${hostname}-${factType}-${normalizedValue}`)}`,
+      deviceId: hostname,
+      category,
+      factType,
+      description,
+      normalizedValue,
+      evidenceRef,
+      riskRelevance
+    });
+  };
+
+  if (!/^\s*aaa\s+new-model\b|^\s*feature\s+tacacs\+?\b|^\s*(tacacs|radius)-server\b|^\s*aaa\s+group\s+server\b/im.test(runningConfig)) {
+    add("aaa_missing", "management", "AAA centralizado no visible en running-config", "Sin AAA/TACACS/RADIUS en running-config", "show running-config sin aaa new-model, TACACS ni RADIUS", "high");
+  }
+  if (!/^\s*logging\s+(host|server)\b/im.test(runningConfig)) {
+    add("syslog_missing", "management", "Syslog central no visible en running-config", "Sin logging host/server en running-config", "show running-config sin logging host/server", "medium");
+  }
+  if (!/^\s*ntp\s+(server|peer)\b/im.test(runningConfig)) {
+    add("ntp_missing", "management", "NTP confiable no visible en running-config", "Sin ntp server/peer en running-config", "show running-config sin ntp server/peer", "medium");
+  }
+
+  const interfaceBlocks = extractInterfaceBlocks(runningConfig);
+  const trunkWithoutAllowed = interfaceBlocks
+    .filter((item) => /^\s*switchport\s+mode\s+trunk\b/im.test(item.body))
+    .filter((item) => !/^\s*switchport\s+trunk\s+allowed\s+vlan\b/im.test(item.body))
+    .map((item) => item.name);
+  if (trunkWithoutAllowed.length > 0) {
+    add(
+      "trunk_allowed_vlan_missing",
+      "switching",
+      "Trunks sin lista allowed VLAN explicita",
+      `${trunkWithoutAllowed.length} trunks sin allowed VLAN explicita: ${trunkWithoutAllowed.slice(0, 8).join(", ")}`,
+      `show running-config: ${trunkWithoutAllowed.length} trunks sin switchport trunk allowed vlan (${trunkWithoutAllowed.slice(0, 8).join(", ")})`,
+      "medium"
+    );
+  }
+
+  const hasGlobalBpduGuard = /^\s*spanning-tree\s+portfast\s+(edge\s+)?bpduguard\s+default\b/im.test(runningConfig);
+  const accessWithoutBpduGuard = interfaceBlocks
+    .filter((item) => /^\s*switchport\s+mode\s+access\b/im.test(item.body))
+    .filter((item) => !/^\s*spanning-tree\s+bpduguard\s+enable\b/im.test(item.body))
+    .map((item) => item.name);
+  if (!hasGlobalBpduGuard && accessWithoutBpduGuard.length > 0) {
+    add(
+      "bpdu_guard_missing_access",
+      "switching",
+      "Puertos de acceso sin BPDU Guard visible",
+      `${accessWithoutBpduGuard.length} access ports sin BPDU Guard: ${accessWithoutBpduGuard.slice(0, 8).join(", ")}`,
+      `show running-config: ${accessWithoutBpduGuard.length} access ports sin spanning-tree bpduguard enable (${accessWithoutBpduGuard.slice(0, 8).join(", ")})`,
+      "medium"
+    );
+  }
+
+  if (accessWithoutBpduGuard.length > 0 && !/^\s*ip\s+dhcp\s+snooping\b/im.test(runningConfig)) {
+    add(
+      "dhcp_snooping_missing",
+      "security",
+      "DHCP Snooping no visible en switches con puertos de acceso",
+      "Sin ip dhcp snooping en running-config con puertos de acceso",
+      "show running-config contiene puertos access pero no ip dhcp snooping",
+      "medium"
+    );
+  }
+
+  if (/^\s*feature\s+vpc\b/im.test(runningConfig) && !/^\s*vpc\s+domain\b/im.test(runningConfig)) {
+    add(
+      "vpc_feature_without_domain",
+      "resiliency",
+      "NX-OS tiene feature vPC habilitado sin dominio vPC visible",
+      "feature vpc sin vpc domain/peer-keepalive/peer-link en running-config",
+      "show running-config contiene feature vpc pero no vpc domain",
+      "high"
+    );
+  }
+
+  if ((/^\s*vlan\s+\d+/im.test(runningConfig) || interfaceBlocks.some((item) => /switchport/i.test(item.body))) && !/^\s*spanning-tree\s+(mode|vlan)\b/im.test(runningConfig)) {
+    add(
+      "stp_mode_or_root_missing",
+      "switching",
+      "Modo o root STP no visible en running-config",
+      "Sin spanning-tree mode ni prioridades/root por VLAN en running-config",
+      "show running-config con VLAN/switchport sin spanning-tree mode ni spanning-tree vlan",
+      "medium"
+    );
+  }
 }
 
 function extractOperationalStateFacts(input: AssessmentAIContextInput): OperationalStateFact[] {
@@ -402,11 +549,14 @@ function extractOperationalStateFacts(input: AssessmentAIContextInput): Operatio
   }
 
   for (const file of input.evidenceFiles) {
-    const hostname = extractHostname(file.content) || file.name.replace(/\.[^.]+$/, "");
-    addStateMatches(facts, file, hostname, /%OSPF|EXSTART|DOWN\/|Active|neighbor.*down|BGP.*Active/gi, "routing", "routing_instability", "Routing neighbor instability", "high");
-    addStateMatches(facts, file, hostname, /%SPANTREE|topology changes|RECV_PVID_ERR|bpduguard/gi, "switching", "stp_instability", "STP/BPDU event detected", "high");
-    addStateMatches(facts, file, hostname, /Po\d+\(SD\)|\(\w*s\)|\(\w*I\)|CANNOT_BUNDLE/gi, "switching", "port_channel_degraded", "Port-channel member down/suspended/not bundled", "high");
-    addStateMatches(facts, file, hostname, /NTP.*UNSYNC|unsynchronized|\.INIT\./gi, "logging", "time_sync_issue", "NTP/time synchronization issue", "medium");
+    const segments = splitEvidenceIntoDeviceSegments(file);
+    const includeHostnameInEvidence = segments.length > 1;
+    for (const segment of segments) {
+      addStateMatches(facts, file.name, segment.content, segment.hostname, includeHostnameInEvidence, /%OSPF|EXSTART|DOWN\/|Active|neighbor.*down|BGP.*Active/gi, "routing", "routing_instability", "Routing neighbor instability", "high");
+      addStateMatches(facts, file.name, segment.content, segment.hostname, includeHostnameInEvidence, /%SPANTREE|topology changes|RECV_PVID_ERR|bpduguard/gi, "switching", "stp_instability", "STP/BPDU event detected", "high");
+      addStateMatches(facts, file.name, segment.content, segment.hostname, includeHostnameInEvidence, /Po\d+\(SD\)|\(\w*s\)|\(\w*I\)|CANNOT_BUNDLE/gi, "switching", "port_channel_degraded", "Port-channel member down/suspended/not bundled", "high");
+      addStateMatches(facts, file.name, segment.content, segment.hostname, includeHostnameInEvidence, /NTP.*UNSYNC|unsynchronized|\.INIT\./gi, "logging", "time_sync_issue", "NTP/time synchronization issue", "medium");
+    }
   }
   return facts;
 }
@@ -441,6 +591,14 @@ function deterministicFindingRef(finding: Finding): DeterministicFindingRef {
     sourceEngine: finding.id.startsWith("PF-") ? "performance-engine" : finding.aiMetadata ? "ai" : "cisco-parser",
     status: finding.status
   };
+}
+
+function includeFindingAsPriorSignal(finding: Finding) {
+  if (finding.status === "discarded") return false;
+  if (finding.aiMetadata) {
+    return finding.status === "accepted" || finding.status === "edited" || finding.status === "validated";
+  }
+  return true;
 }
 
 function buildEvidenceReferences(input: {
@@ -731,16 +889,19 @@ function candidate(context: AssessmentAIContext, correlationType: CorrelationTyp
 
 function addMatches(
   facts: ConfigurationFact[],
-  file: EvidenceFile,
+  sourceFile: string,
+  content: string,
   hostname: string,
+  includeHostnameInEvidence: boolean,
   pattern: RegExp,
   category: ConfigurationFact["category"],
   factType: string,
   description: string,
   riskRelevance: ConfigurationFact["riskRelevance"]
 ) {
-  for (const match of file.content.matchAll(pattern)) {
+  for (const match of content.matchAll(pattern)) {
     const evidence = match[0].trim();
+    const evidenceRef = includeHostnameInEvidence ? `${sourceFile}: ${hostname}: ${evidence}` : `${sourceFile}: ${evidence}`;
     facts.push({
       id: `cfg_${stableId(`${hostname}-${factType}-${evidence}`)}`,
       deviceId: hostname,
@@ -748,7 +909,7 @@ function addMatches(
       factType,
       description,
       normalizedValue: evidence,
-      evidenceRef: `${file.name}: ${evidence}`,
+      evidenceRef,
       riskRelevance
     });
   }
@@ -756,16 +917,19 @@ function addMatches(
 
 function addStateMatches(
   facts: OperationalStateFact[],
-  file: EvidenceFile,
+  sourceFile: string,
+  content: string,
   hostname: string,
+  includeHostnameInEvidence: boolean,
   pattern: RegExp,
   category: OperationalStateFact["category"],
   factType: string,
   description: string,
   severityHint: RiskLevel
 ) {
-  for (const match of file.content.matchAll(pattern)) {
+  for (const match of content.matchAll(pattern)) {
     const evidence = match[0].trim();
+    const evidenceRef = includeHostnameInEvidence ? `${sourceFile}: ${hostname}: ${evidence}` : `${sourceFile}: ${evidence}`;
     facts.push({
       id: `state_${stableId(`${hostname}-${factType}-${evidence}`)}`,
       deviceId: hostname,
@@ -773,9 +937,92 @@ function addStateMatches(
       factType,
       observedState: description,
       severityHint,
-      evidenceRef: `${file.name}: ${evidence}`
+      evidenceRef
     });
   }
+}
+
+type EvidenceDeviceSegment = {
+  content: string;
+  hostname: string;
+};
+
+function splitEvidenceIntoDeviceSegments(file: EvidenceFile): EvidenceDeviceSegment[] {
+  const fallbackHostname = file.name.replace(/\.[^.]+$/, "");
+  const content = file.content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const promptSegments = splitByPromptCommands(content);
+  const segments = promptSegments.length > 1 ? promptSegments : splitByUptimeHeaders(content);
+
+  return segments.map((segment) => ({
+    content: segment.content,
+    hostname: extractHostname(segment.content) || segment.hostname || fallbackHostname
+  })).filter((segment) => segment.content.trim() && segment.hostname.trim());
+}
+
+function splitByPromptCommands(content: string): Array<{ content: string; hostname?: string }> {
+  const promptRegex = /^([A-Za-z0-9_.:-]+)[#>]\s*show\s+[^\n]*$/gim;
+  const matches = Array.from(content.matchAll(promptRegex));
+  if (matches.length <= 1) return [{ content }];
+
+  const grouped: Array<{ content: string; hostname?: string }> = [];
+  for (const [index, match] of matches.entries()) {
+    const hostname = match[1];
+    const segment = content.slice(match.index ?? 0, matches[index + 1]?.index ?? content.length);
+    const previous = grouped[grouped.length - 1];
+    if (previous?.hostname?.toLowerCase() === hostname.toLowerCase()) {
+      previous.content = `${previous.content.trimEnd()}\n${segment}`;
+    } else {
+      grouped.push({ hostname, content: segment });
+    }
+  }
+  return grouped;
+}
+
+function splitByUptimeHeaders(content: string): Array<{ content: string; hostname?: string }> {
+  const uptimeRegex = /^([A-Za-z0-9_.:-]+)\s+uptime is\s+/gim;
+  const matches = Array.from(content.matchAll(uptimeRegex));
+  if (matches.length <= 1) return [{ content }];
+
+  return matches.map((match, index) => ({
+    hostname: match[1],
+    content: content.slice(match.index ?? 0, matches[index + 1]?.index ?? content.length)
+  }));
+}
+
+function extractCommandOutput(content: string, command: string) {
+  const lines = content.split("\n");
+  const commandLine = new RegExp(`^[A-Za-z0-9_.:-]+[#>]\\s*${escapeRegExp(command)}\\s*$`, "i");
+  const nextCommandLine = /^[A-Za-z0-9_.:-]+[#>]\s*show\s+/i;
+  const start = lines.findIndex((line) => commandLine.test(line.trim()));
+  if (start < 0) return "";
+  let end = lines.length;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (nextCommandLine.test(lines[index].trim())) {
+      end = index;
+      break;
+    }
+  }
+  return lines.slice(start + 1, end).join("\n").trim();
+}
+
+function extractInterfaceBlocks(runningConfig: string) {
+  const matches = Array.from(runningConfig.matchAll(/^interface\s+(.+)$/gim));
+  return matches.map((match, index) => {
+    const start = match.index ?? 0;
+    const end = matches[index + 1]?.index ?? runningConfig.length;
+    return {
+      name: match[1].trim(),
+      body: runningConfig.slice(start, end)
+    };
+  });
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function dedupeConfigurationFacts(facts: ConfigurationFact[]) {
+  return Array.from(new Map(facts.map((fact) => [fact.id, fact])).values());
 }
 
 function relationshipCount(context: AssessmentAIContext, hostname: string) {
@@ -842,7 +1089,7 @@ function looksLikeFileName(value: string) {
 }
 
 function inferCommandFromExcerpt(excerpt: string) {
-  if (/snmp-server|line vty|transport input|username|ip http|access-list/i.test(excerpt)) return "show running-config";
+  if (/snmp-server|line vty|transport input|username|ip http|access-list|aaa|tacacs|radius|logging host|logging server|ntp server|switchport|bpduguard|dhcp snooping|feature vpc|vpc domain|spanning-tree/i.test(excerpt)) return "show running-config";
   if (/Group\s+Port-channel|Po\d+|CANNOT_BUNDLE|LACP|PAgP/i.test(excerpt)) return "show etherchannel summary";
   if (/%OSPF|BGP.*Active|neighbor.*down/i.test(excerpt)) return "show ip ospf neighbor / show bgp summary / show logging";
   if (/%SPANTREE|bpduguard|topology changes/i.test(excerpt)) return "show spanning-tree / show logging";
@@ -852,7 +1099,21 @@ function inferCommandFromExcerpt(excerpt: string) {
 }
 
 function commandForConfigurationFact(factType: string) {
-  if (["insecure_snmp", "telnet_enabled", "http_server_enabled", "permit_any_acl", "weak_local_credentials"].includes(factType)) {
+  if ([
+    "insecure_snmp",
+    "telnet_enabled",
+    "http_server_enabled",
+    "permit_any_acl",
+    "weak_local_credentials",
+    "aaa_missing",
+    "syslog_missing",
+    "ntp_missing",
+    "trunk_allowed_vlan_missing",
+    "bpdu_guard_missing_access",
+    "dhcp_snooping_missing",
+    "vpc_feature_without_domain",
+    "stp_mode_or_root_missing"
+  ].includes(factType)) {
     return "show running-config";
   }
   if (factType === "port_channel_configured") return "show etherchannel summary";

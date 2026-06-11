@@ -82,6 +82,7 @@ export type DataCoverageWidgetData = {
   historicalAvailable: number;
   interfacesAnalyzed: number;
   criticalInterfacesWithoutEvidence: number;
+  criticalInterfacesWithoutEvidenceRefs: string[];
   confidenceScore: number;
   coverageScore: number;
   deviceCoverageScore: number;
@@ -105,6 +106,9 @@ export type PerformanceInsight = {
   relatedInterfaces: string[];
   evidenceRefs: string[];
   recommendation: string;
+  validationStatus?: PerformanceFinding["status"] | "deterministic";
+  probableCause?: string;
+  remediationCategory?: string;
 };
 
 export type PerformanceKpiRingData = {
@@ -148,6 +152,14 @@ export type PerformanceTopPriority = {
   affectedInterfaces: string[];
   affectedMetricCount: number;
   impact: string;
+  observedSummary: string;
+  validationStatus: PerformanceFinding["status"] | "deterministic";
+  probableCause: string;
+  remediationCategory: string;
+  evidenceCommand?: string;
+  evidenceFile?: string;
+  sampleType?: "snapshot" | "historical";
+  timeWindow?: PerformanceTimeWindow;
 };
 
 export type PerformanceExecutiveHeatmapData = {
@@ -314,8 +326,9 @@ export function buildTechnicalPerformanceViewData(input: {
 }
 
 export function buildKpiRingData(performance: PerformanceState, dashboard: PerformanceDashboardData): PerformanceKpiRingData[] {
-  const validatedFindings = performance.findings.filter((finding) => finding.status === "validated").length;
   const alertInterfaces = new Set(dashboard.criticalMetricsTable.filter((point) => point.interfaceId).map((point) => `${point.deviceId}:${point.interfaceId}`)).size;
+  const alertMetrics = dashboard.criticalMetricsTable.length;
+  const criticalPriorities = buildTopPrioritiesData(dashboard).filter((priority) => priority.severity === "critical").length;
   return [
     {
       key: "risk",
@@ -327,35 +340,8 @@ export function buildKpiRingData(performance: PerformanceState, dashboard: Perfo
       helper: "Riesgo agregado por capacidad, errores, drops, recursos e inestabilidad."
     },
     {
-      key: "confidence",
-      label: "Confidence",
-      value: dashboard.dataCoverage.confidenceScore,
-      displayValue: `${dashboard.dataCoverage.confidenceScore}%`,
-      max: 100,
-      severity: dashboard.dataCoverage.confidenceScore >= 70 ? "normal" : dashboard.dataCoverage.confidenceScore >= 45 ? "warning" : "high",
-      helper: "Confianza ajustada por cobertura, fuente identificada y disponibilidad historica."
-    },
-    {
-      key: "device-coverage",
-      label: "Device Coverage",
-      value: dashboard.dataCoverage.deviceCoverageScore,
-      displayValue: `${dashboard.dataCoverage.deviceCoverageScore}%`,
-      max: 100,
-      severity: dashboard.dataCoverage.deviceCoverageScore >= 70 ? "normal" : dashboard.dataCoverage.deviceCoverageScore >= 45 ? "warning" : "high",
-      helper: "Dispositivos esperados con al menos una metrica reconocida."
-    },
-    {
-      key: "historical-depth",
-      label: "Historical Depth",
-      value: dashboard.dataCoverage.historicalCoverageScore,
-      displayValue: `${dashboard.dataCoverage.historicalCoverageScore}%`,
-      max: 100,
-      severity: dashboard.dataCoverage.historicalCoverageScore >= 70 ? "normal" : dashboard.dataCoverage.historicalCoverageScore >= 25 ? "warning" : "high",
-      helper: "Porcentaje de dispositivos con evidencia historica. Snapshot no confirma tendencia."
-    },
-    {
       key: "alert-interfaces",
-      label: "Alert IFs",
+      label: "Interfaces en alerta",
       value: alertInterfaces,
       displayValue: String(alertInterfaces),
       max: Math.max(alertInterfaces, dashboard.dataCoverage.interfacesAnalyzed, 1),
@@ -363,13 +349,22 @@ export function buildKpiRingData(performance: PerformanceState, dashboard: Perfo
       helper: "Interfaces con metricas warning, high o critical."
     },
     {
-      key: "validated",
-      label: "Validados",
-      value: validatedFindings,
-      displayValue: String(validatedFindings),
-      max: Math.max(validatedFindings, performance.findings.length, 1),
-      severity: validatedFindings > 0 ? "normal" : "warning",
-      helper: "Hallazgos de performance validados por arquitecto."
+      key: "metric-alerts",
+      label: "Metricas con alerta",
+      value: alertMetrics,
+      displayValue: String(alertMetrics),
+      max: Math.max(alertMetrics, dashboard.filteredMetrics.length, 1),
+      severity: alertMetrics > 0 ? "high" : "normal",
+      helper: "Metricas en warning, high o critical listas para validar."
+    },
+    {
+      key: "critical-priorities",
+      label: "Prioridades criticas",
+      value: criticalPriorities,
+      displayValue: String(criticalPriorities),
+      max: Math.max(criticalPriorities, dashboard.insights.length, 1),
+      severity: criticalPriorities > 0 ? "critical" : "normal",
+      helper: "Prioridades ejecutivas con severidad critical."
     }
   ];
 }
@@ -392,22 +387,33 @@ export function buildProcessingFunnelData(performance: PerformanceState, dashboa
 export function buildTopPrioritiesData(dashboard: PerformanceDashboardData, limit = 5): PerformanceTopPriority[] {
   const insightPriorities = dashboard.insights
     .filter((insight) => insight.evidenceRefs.length > 0 || insight.insightType === "visibility_gap")
-    .map((insight) => ({
-      id: insight.id,
-      title: insight.title,
-      category: insight.insightType,
-      affectedTarget: [insight.relatedDevices[0], insight.relatedInterfaces[0]].filter(Boolean).join(" · ") || "Assessment",
-      severity: insight.severity,
-      confidence: insight.confidence,
-      recommendation: insight.recommendation,
-      sourceType: insight.sourceType,
-      evidenceRefs: insight.evidenceRefs,
-      point: dashboard.criticalMetricsTable.find((point) => insight.relatedMetrics.includes(point.id)),
-      affectedDevices: insight.relatedDevices,
-      affectedInterfaces: insight.relatedInterfaces,
-      affectedMetricCount: insight.relatedMetrics.length,
-      impact: impactForInsightType(insight.insightType)
-    }));
+    .map((insight) => {
+      const point = dashboard.criticalMetricsTable.find((item) => insight.relatedMetrics.includes(item.id));
+      return {
+        id: insight.id,
+        title: insight.title,
+        category: insight.insightType,
+        affectedTarget: [insight.relatedDevices[0], insight.relatedInterfaces[0]].filter(Boolean).join(" · ") || "Assessment",
+        severity: insight.severity,
+        confidence: insight.confidence,
+        recommendation: insight.recommendation,
+        sourceType: insight.sourceType,
+        evidenceRefs: insight.evidenceRefs,
+        point,
+        affectedDevices: insight.relatedDevices,
+        affectedInterfaces: insight.relatedInterfaces,
+        affectedMetricCount: insight.relatedMetrics.length,
+        impact: insight.description || impactForInsightType(insight.insightType),
+        observedSummary: point ? observedSummaryForPoint(point) : insight.evidenceRefs[0] ?? "Brecha de visibilidad sin metrica asociada.",
+        validationStatus: insight.validationStatus ?? "deterministic" as const,
+        probableCause: insight.probableCause ?? probableCauseForInsightType(insight.insightType),
+        remediationCategory: insight.remediationCategory ?? remediationCategoryForInsightType(insight.insightType),
+        evidenceCommand: point?.evidenceCommand,
+        evidenceFile: point?.source ?? insight.evidenceRefs[0],
+        sampleType: point?.sampleType,
+        timeWindow: point?.metrics[0]?.timeWindow
+      };
+    });
   const metricPriorities = dashboard.criticalMetricsTable.map((point) => ({
     id: `priority_${point.id}`,
     title: `${point.metrics[0].metricType.replace(/_/g, " ")} en ${point.interfaceId ?? point.deviceId}`,
@@ -422,7 +428,15 @@ export function buildTopPrioritiesData(dashboard: PerformanceDashboardData, limi
     affectedDevices: [point.deviceId],
     affectedInterfaces: point.interfaceId ? [point.interfaceId] : [],
     affectedMetricCount: point.metrics.length,
-    impact: impactForInsightType(insightTypeForMetric(point.metrics[0].metricType))
+    impact: impactForInsightType(insightTypeForMetric(point.metrics[0].metricType)),
+    observedSummary: observedSummaryForPoint(point),
+    validationStatus: "deterministic" as const,
+    probableCause: probableCauseForMetric(point.metrics[0].metricType),
+    remediationCategory: remediationCategoryForInsightType(insightTypeForMetric(point.metrics[0].metricType)),
+    evidenceCommand: point.evidenceCommand,
+    evidenceFile: point.source,
+    sampleType: point.sampleType,
+    timeWindow: point.metrics[0]?.timeWindow
   }));
   return groupExecutivePriorities([...insightPriorities, ...metricPriorities])
     .sort((left, right) => severityScore(right.severity) - severityScore(left.severity) || right.confidence - left.confidence)
@@ -632,7 +646,9 @@ export function buildDataCoverageWidget(input: {
   const historicalDevices = new Set(input.metrics.filter((metric) => metric.sampleType === "historical").map((metric) => metric.deviceId));
   const snapshotDevices = new Set(input.metrics.filter((metric) => metric.sampleType === "snapshot").map((metric) => metric.deviceId));
   const interfacesWithData = new Set(input.metrics.map((metric) => `${metric.deviceId}:${metric.interfaceId ?? ""}`).filter((value) => !value.endsWith(":")));
-  const criticalInterfacesWithoutEvidence = input.criticalInterfaces.filter((item) => !interfacesWithData.has(`${item.deviceId}:${item.interfaceId}`)).length;
+  const criticalInterfacesWithoutEvidenceRefs = input.criticalInterfaces
+    .filter((item) => !interfacesWithData.has(`${item.deviceId}:${item.interfaceId}`))
+    .map((item) => `${item.deviceId} · ${item.interfaceId}`);
   const unknownSourceMetrics = input.metrics.filter((metric) => !metric.sourceType).length;
   const metricsWithoutCommand = input.metrics.filter((metric) => !metric.evidenceCommand).length;
   const sourceTraceability = input.metrics.length > 0 ? ((input.metrics.length - unknownSourceMetrics) / input.metrics.length) * 100 : 0;
@@ -649,7 +665,8 @@ export function buildDataCoverageWidget(input: {
     snapshotOnly: Array.from(snapshotDevices).filter((device) => !historicalDevices.has(device)).length,
     historicalAvailable: historicalDevices.size,
     interfacesAnalyzed: interfacesWithData.size,
-    criticalInterfacesWithoutEvidence,
+    criticalInterfacesWithoutEvidence: criticalInterfacesWithoutEvidenceRefs.length,
+    criticalInterfacesWithoutEvidenceRefs,
     confidenceScore: Math.min(input.assessment.confidenceScore, adjustedConfidenceScore),
     coverageScore: input.assessment.dataCoverageScore,
     deviceCoverageScore,
@@ -787,7 +804,10 @@ function buildPerformanceInsights(assessmentId: string, metrics: PerformanceMetr
       relatedDevices: finding.affectedDeviceIds,
       relatedInterfaces: finding.affectedInterfaceIds,
       evidenceRefs: finding.evidence,
-      recommendation: finding.recommendation
+      recommendation: finding.recommendation,
+      validationStatus: finding.status,
+      probableCause: finding.probableCause,
+      remediationCategory: finding.remediationCategory
     }));
   const visibility = assessment.visibilityGaps.map((gap) => ({
     id: `pi_gap_${stableId(gap)}`,
@@ -802,7 +822,10 @@ function buildPerformanceInsights(assessmentId: string, metrics: PerformanceMetr
     relatedDevices: [],
     relatedInterfaces: [],
     evidenceRefs: [],
-    recommendation: "Completar evidencia de performance para mejorar confianza del analisis."
+    recommendation: "Completar evidencia de performance para mejorar confianza del analisis.",
+    validationStatus: "deterministic" as const,
+    probableCause: "Evidencia incompleta o no reconocida por el parser de performance.",
+    remediationCategory: "pending_validation"
   }));
   return dedupeBy([...fromFindings, ...deterministic, ...visibility], (insight) => insight.id).slice(0, 18);
 }
@@ -942,6 +965,7 @@ function groupExecutivePriorities(priorities: DraftPerformanceTopPriority[]): Dr
   }
   return Array.from(grouped.values()).map((items) => {
     const first = items[0];
+    const representative = items.find((item) => item.point) ?? first;
     const affectedDevices = Array.from(new Set(items.flatMap((item) => item.affectedDevices)));
     const affectedInterfaces = Array.from(new Set(items.flatMap((item) => item.affectedInterfaces)));
     const evidenceRefs = Array.from(new Set(items.flatMap((item) => item.evidenceRefs)));
@@ -960,7 +984,15 @@ function groupExecutivePriorities(priorities: DraftPerformanceTopPriority[]): Dr
       affectedInterfaces,
       affectedMetricCount: items.reduce((sum, item) => sum + item.affectedMetricCount, 0),
       impact: impactForInsightType(first.category),
-      point: items.find((item) => item.point)?.point
+      point: representative.point,
+      observedSummary: representative.observedSummary,
+      validationStatus: items.some((item) => item.validationStatus === "validated") ? "validated" : first.validationStatus,
+      probableCause: representative.probableCause,
+      remediationCategory: representative.remediationCategory,
+      evidenceCommand: representative.evidenceCommand,
+      evidenceFile: representative.evidenceFile,
+      sampleType: representative.sampleType,
+      timeWindow: representative.timeWindow
     };
   });
 }
@@ -1006,6 +1038,17 @@ function impactForInsightType(type: PerformanceInsight["insightType"]) {
   return impacts[type];
 }
 
+function observedSummaryForPoint(point: PerformanceChartPoint) {
+  const metricType = point.metrics[0]?.metricType.replace(/_/g, " ") ?? "metrica";
+  return `${metricType} ${formatMetricValue(point.value, point.unit)} vs warn ${formatMetricValue(point.thresholdWarning, point.unit)} / crit ${formatMetricValue(point.thresholdCritical, point.unit)}`;
+}
+
+function formatMetricValue(value: number, unit: string) {
+  if (!Number.isFinite(value) || value >= Number.MAX_SAFE_INTEGER / 2) return "N/A";
+  const rounded = Math.abs(value) >= 100 ? Math.round(value) : Math.round(value * 10) / 10;
+  return unit === "%" ? `${rounded}${unit}` : `${rounded} ${unit}`;
+}
+
 function insightTypeForFinding(finding: PerformanceFinding): PerformanceInsight["insightType"] {
   if (finding.performanceCategory === "resource_exhaustion") return "resource_pressure";
   if (finding.performanceCategory === "qos") return "qos_congestion";
@@ -1024,6 +1067,38 @@ function recommendationForMetric(metricType: PerformanceMetricType) {
   if (dropMetricTypes.has(metricType)) return "Revisar colas, QoS y oversubscription en el camino de trafico.";
   if (metricType === "cpu" || metricType === "memory") return "Validar procesos, features y dimensionamiento de plataforma.";
   return "Correlacionar con logs, topologia y ventana operacional.";
+}
+
+function probableCauseForMetric(metricType: PerformanceMetricType) {
+  return probableCauseForInsightType(insightTypeForMetric(metricType));
+}
+
+function probableCauseForInsightType(type: PerformanceInsight["insightType"]) {
+  const causes: Record<PerformanceInsight["insightType"], string> = {
+    saturation: "Capacidad insuficiente, crecimiento de trafico o ventana operacional con picos recurrentes.",
+    errors: "Posible degradacion fisica, transceiver/cableado, duplex/speed o counters acumulados sin clear.",
+    drops: "Colas congestionadas, microbursts, buffers insuficientes u oversubscription.",
+    resource_pressure: "Carga de procesos, features habilitados o dimensionamiento de plataforma cercano al limite.",
+    instability: "Flaps de enlace, cambios STP/routing o inestabilidad fisica/logica intermitente.",
+    visibility_gap: "Evidencia incompleta, snapshot aislado o ausencia de historico para confirmar recurrencia.",
+    capacity_risk: "Patron de capacidad sin historico suficiente o tendencia que requiere validacion.",
+    qos_congestion: "Congestion en colas, politica QoS restrictiva o trafico prioritario excediendo perfil."
+  };
+  return causes[type];
+}
+
+function remediationCategoryForInsightType(type: PerformanceInsight["insightType"]) {
+  const categories: Record<PerformanceInsight["insightType"], string> = {
+    saturation: "capacity_upgrade",
+    errors: "operational_change",
+    drops: "traffic_engineering",
+    resource_pressure: "platform_tuning",
+    instability: "pending_validation",
+    visibility_gap: "pending_validation",
+    capacity_risk: "capacity_planning",
+    qos_congestion: "qos_tuning"
+  };
+  return categories[type];
 }
 
 function normalizeFilters(filters?: PerformanceDashboardFilters): Required<PerformanceDashboardFilters> {

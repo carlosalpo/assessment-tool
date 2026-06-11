@@ -1,4 +1,5 @@
 import type { EvidenceFile, Finding, RemediationCategory } from "@/lib/types";
+import { isEnrichedFindingsEnabled } from "./ai-scope-schemas.ts";
 
 export type PerformanceAnalysisMode = "snapshot" | "historical" | "hybrid";
 export type PerformanceEvidenceSourceType = "cli_snapshot" | "nms_export" | "telemetry_export" | "syslog" | "netflow" | "report" | "manual_upload";
@@ -346,7 +347,7 @@ export function generatePerformanceFindings(assessmentId: string, metrics: Perfo
   const findings: PerformanceFinding[] = [];
   const critical = metrics.filter((metric) => isCriticalMetric(metric));
   for (const metric of critical.slice(0, 12)) {
-    findings.push(metricToFinding(assessmentId, metric));
+    findings.push(metricToFinding(assessmentId, metric, metrics));
   }
   if (summary.historicalEvidenceCount === 0 && mode !== "snapshot") {
     findings.push({
@@ -465,26 +466,31 @@ export function buildPerformanceAIContext(input: {
 export function performanceFindingsToGenericFindings(findings: PerformanceFinding[]): Finding[] {
   return findings
     .filter((finding) => finding.evidence.length > 0 && finding.confidence > 0)
-    .map((finding) => ({
-      id: finding.id,
-      title: finding.title,
-      category: "operations",
-      risk: finding.severity,
-      affectedAssets: [...finding.affectedDeviceIds, ...finding.affectedInterfaceIds],
-      evidence: finding.evidence,
-      recommendation: finding.recommendation,
-      remediationCategory: finding.remediationCategory,
-      serviceOffer: "Performance Analysis",
-      confidence: finding.confidence,
-      status:
-        finding.status === "validated"
-          ? "validated"
-          : finding.status === "discarded"
-            ? "discarded"
-            : finding.status === "ai_suggested"
-              ? "ai_suggested"
-              : "ai-draft"
-    }));
+    .map((finding) => {
+      const enriched = isEnrichedFindingsEnabled() ? performanceEnrichedFindingFields(finding) : {};
+      return {
+        id: finding.id,
+        scope: "performance",
+        title: finding.title,
+        category: "operations",
+        risk: finding.severity,
+        affectedAssets: [...finding.affectedDeviceIds, ...finding.affectedInterfaceIds],
+        evidence: finding.evidence,
+        recommendation: finding.recommendation,
+        remediationCategory: finding.remediationCategory,
+        serviceOffer: "Performance Analysis",
+        confidence: finding.confidence,
+        status:
+          finding.status === "validated"
+            ? "validated"
+            : finding.status === "discarded"
+              ? "discarded"
+              : finding.status === "ai_suggested"
+                ? "ai_suggested"
+                : "ai-draft",
+        ...enriched
+      } as Finding;
+    });
 }
 
 function parsePerformanceMetrics(assessmentId: string, file: PerformanceEvidenceFile): PerformanceMetric[] {
@@ -574,8 +580,9 @@ function metric(assessmentId: string, file: PerformanceEvidenceFile, deviceId: s
   };
 }
 
-function metricToFinding(assessmentId: string, metricItem: PerformanceMetric): PerformanceFinding {
+function metricToFinding(assessmentId: string, metricItem: PerformanceMetric, metrics: PerformanceMetric[] = []): PerformanceFinding {
   const category = metricCategory(metricItem.metricType);
+  const companions = companionMetricsFor(metricItem, metrics);
   return {
     id: `PF-${stableId(metricItem.id).slice(0, 6).toUpperCase()}`,
     assessmentId,
@@ -586,9 +593,9 @@ function metricToFinding(assessmentId: string, metricItem: PerformanceMetric): P
     severity: metricSeverity(metricItem),
     performanceCategory: category,
     metricRefs: [metricItem.id],
-    evidence: [`${metricItem.source}: ${metricLabel(metricItem)}`],
-    impact: "Puede degradar disponibilidad, estabilidad o experiencia de usuarios/aplicaciones.",
-    probableCause: "Saturacion, errores fisicos/logicos, drops o presion de recursos. Requiere validacion tecnica.",
+    evidence: [`${metricItem.source}: ${metricLabel(metricItem)}`, ...companionMetricsEvidence(companions)],
+    impact: performanceImpact(category),
+    probableCause: performanceProbableCause(metricItem, category, companions),
     recommendation: metricRecommendation(metricItem.metricType),
     remediationCategory: category === "capacity" || category === "resource_exhaustion" ? "new_technology" : "operational_change",
     confidence: metricItem.confidence,
@@ -818,12 +825,150 @@ function metricLabel(metricItem: PerformanceMetric) {
   return `${metricTitle(metricItem.metricType)} ${metricItem.value}${metricItem.unit} (${metricItem.deviceId}${metricItem.interfaceId ? ` ${metricItem.interfaceId}` : ""})`;
 }
 
-function metricRecommendation(metricType: PerformanceMetricType) {
-  if (metricType === "crc_errors") return "Validar capa fisica, transceiver/cableado, errores de puerto y reemplazo preventivo si aplica.";
-  if (metricType === "utilization") return "Validar capacidad del enlace, patrones de trafico y necesidad de upgrade o redistribucion.";
-  if (metricType === "cpu" || metricType === "memory") return "Revisar procesos, features habilitados y dimensionamiento de plataforma.";
-  if (metricType === "drops" || metricType === "qos_drops") return "Revisar colas, politicas QoS, oversubscription y congestiones intermitentes.";
-  return "Validar metrica con historico y correlacionar con logs/eventos.";
+export function metricRecommendation(metricType: PerformanceMetricType) {
+  if (["crc_errors", "input_errors", "output_errors", "frame_errors"].includes(metricType)) {
+    return "Inspeccionar capa fisica del enlace afectado: reasentar y limpiar conectores/patch cords, reemplazar el transceiver/SFP sospechoso, verificar coincidencia de fibra/cobre y duplex; re-medir el contador tras el cambio y escalar a RMA del puerto si persiste.";
+  }
+  if (metricType === "utilization" || metricType === "utilization_in" || metricType === "utilization_out" || metricType === "input_rate_bps" || metricType === "output_rate_bps") {
+    return "Cuantificar top talkers/aplicaciones, evaluar upgrade del enlace o agregacion (port-channel) y aplicar QoS para priorizar trafico critico; si es WAN, revisar el ancho de banda contratado.";
+  }
+  if (metricType === "cpu") {
+    return "Identificar procesos de mayor consumo (show processes cpu sorted), distinguir control-plane vs data-plane, aplicar CoPP/hardening del plano de control y evaluar upgrade de plataforma si el alto consumo es sostenido.";
+  }
+  if (metricType === "memory") {
+    return "Revisar consumo por proceso y fugas (show memory/processes memory), liberar o upgradear recursos y programar reinicio controlado si hay degradacion; evaluar plataforma si el baseline es alto.";
+  }
+  if (["drops", "input_drops", "output_drops", "queue_drops", "qos_drops"].includes(metricType)) {
+    return "Verificar sobre-suscripcion del uplink y la politica de QoS (marcado/colas), ampliar capacidad o balancear trafico, y correlacionar con la utilizacion del enlace.";
+  }
+  if (metricType === "flaps" || metricType === "routing_neighbor_stability") {
+    return "Estabilizar el enlace o vecino: revisar capa fisica y errores asociados, timers/dampening del protocolo y vecino, y correlacionar con CRC o saturacion.";
+  }
+  return "Asignar responsable de performance para revisar historico de la metrica, correlacionarla con logs/eventos y cerrar con evidencia de tendencia normalizada o plan de remediacion aprobado.";
+}
+
+function performanceImpact(category: PerformanceFinding["performanceCategory"]) {
+  if (category === "errors") {
+    return "Puede provocar perdida de paquetes, retransmisiones, microcortes y degradacion perceptible en aplicaciones sensibles al enlace afectado.";
+  }
+  if (category === "saturation" || category === "capacity") {
+    return "Puede generar latencia, colas, caida de throughput y degradacion durante horas pico o ventanas de mayor demanda.";
+  }
+  if (category === "drops" || category === "qos") {
+    return "Puede descartar trafico critico o best-effort, degradando voz/video, aplicaciones transaccionales y experiencia de usuario bajo congestion.";
+  }
+  if (category === "resource_exhaustion") {
+    return "Puede afectar control-plane, convergencia, administracion del equipo y procesamiento de paquetes si la presion de CPU/memoria se sostiene.";
+  }
+  if (category === "instability") {
+    return "Puede causar reconvergencias, perdida intermitente de conectividad, flaps de vecinos y degradacion de disponibilidad.";
+  }
+  return "Puede limitar la capacidad para sostener niveles de servicio y anticipar degradacion de performance.";
+}
+
+function performanceProbableCause(metricItem: PerformanceMetric, category: PerformanceFinding["performanceCategory"], companions: PerformanceMetric[]) {
+  const companionNote = companionCorrelationNote(metricItem, category, companions);
+  if (category === "errors") {
+    return `Degradacion probable de capa fisica: transceiver/SFP, cableado, fibra/cobre, duplex o puerto/peer del enlace afectado.${companionNote}`;
+  }
+  if (category === "saturation" || category === "capacity") {
+    return `Capacidad insuficiente o patron de trafico que supera el ancho de banda disponible en la ventana observada.${companionNote}`;
+  }
+  if (category === "drops") {
+    return `Congestion, sobre-suscripcion del uplink o colas saturadas; tambien puede indicar politica QoS insuficiente para el perfil de trafico.${companionNote}`;
+  }
+  if (category === "qos") {
+    return `Drops asociados a marcado, colas, shaping/policing o clase QoS mal dimensionada frente a la demanda observada.${companionNote}`;
+  }
+  if (category === "resource_exhaustion") {
+    return `Carga sostenida de control-plane/data-plane, proceso consumidor, feature costosa o fuga de memoria que presiona recursos del equipo.${companionNote}`;
+  }
+  if (category === "instability") {
+    return `Inestabilidad fisica o de protocolo en interfaz/vecino, posiblemente correlacionada con errores fisicos, saturacion, timers o cambios de control-plane.${companionNote}`;
+  }
+  return `Capacidad o tendencia de performance fuera del baseline esperado para el rol del equipo.${companionNote}`;
+}
+
+function companionMetricsFor(metricItem: PerformanceMetric, metrics: PerformanceMetric[]) {
+  return metrics
+    .filter((candidate) => candidate.id !== metricItem.id && samePerformanceEntity(metricItem, candidate))
+    .sort((left, right) => Number(isCriticalMetric(right)) - Number(isCriticalMetric(left)) || right.value - left.value)
+    .slice(0, 3);
+}
+
+function samePerformanceEntity(left: PerformanceMetric, right: PerformanceMetric) {
+  if (left.deviceId !== right.deviceId) return false;
+  if (left.interfaceId && right.interfaceId) return left.interfaceId === right.interfaceId;
+  return true;
+}
+
+function companionMetricsEvidence(companions: PerformanceMetric[]) {
+  if (companions.length === 0) return [];
+  return [`Metricas companeras en la misma interfaz/equipo: ${companions.map(metricLabel).join("; ")}.`];
+}
+
+function companionCorrelationNote(metricItem: PerformanceMetric, category: PerformanceFinding["performanceCategory"], companions: PerformanceMetric[]) {
+  if (companions.length === 0) return "";
+  const saturation = companions.find((item) => metricCategory(item.metricType) === "saturation");
+  const errors = companions.find((item) => metricCategory(item.metricType) === "errors");
+  const drops = companions.find((item) => metricCategory(item.metricType) === "drops" || metricCategory(item.metricType) === "qos");
+  const resource = companions.find((item) => metricCategory(item.metricType) === "resource_exhaustion");
+  if (category === "errors" && saturation) {
+    return ` Errores ${metricTitle(metricItem.metricType)} coinciden con utilizacion del enlace al ${saturation.value}${saturation.unit}; evaluar capa fisica y saturacion en conjunto.`;
+  }
+  if (category === "saturation" && errors) {
+    return ` La saturacion coincide con errores fisicos (${metricTitle(errors.metricType)} ${errors.value}${errors.unit}); descartar degradacion de capa fisica ademas de capacidad.`;
+  }
+  if ((category === "drops" || category === "qos") && saturation) {
+    return ` Los drops coinciden con utilizacion del enlace al ${saturation.value}${saturation.unit}; priorizar analisis de congestion, sobre-suscripcion y QoS.`;
+  }
+  if (category === "instability" && (errors || saturation)) {
+    const related = errors ?? saturation;
+    if (!related) return "";
+    return ` La inestabilidad coincide con ${metricTitle(related.metricType)} ${related.value}${related.unit}; correlacionar flaps con capa fisica y saturacion.`;
+  }
+  if (category === "resource_exhaustion" && (drops || saturation)) {
+    const related = drops ?? saturation;
+    if (!related) return "";
+    return ` La presion de recursos coincide con ${metricTitle(related.metricType)} ${related.value}${related.unit}; revisar si hay tormenta, congestion o trafico hacia control-plane.`;
+  }
+  if (resource) {
+    return ` Tambien hay presion de recursos (${metricTitle(resource.metricType)} ${resource.value}${resource.unit}) en el mismo equipo.`;
+  }
+  return ` Metricas relacionadas en la misma interfaz/equipo sugieren analizar causa raiz de forma conjunta.`;
+}
+
+function performanceEnrichedFindingFields(finding: PerformanceFinding) {
+  const probabilityOfFailure = performanceProbabilityOfFailure(finding.severity);
+  const impactIfFails = performanceImpactIfFails(finding.severity);
+  return {
+    probabilityOfFailure,
+    impactIfFails,
+    probable_cause: finding.probableCause,
+    technical_impact: finding.impact,
+    probability_of_failure: probabilityOfFailure,
+    impact_if_fails: impactIfFails,
+    aiMetadata: {
+      domain: "performance" as const,
+      relatedMetrics: finding.metricRefs,
+      probableCause: finding.probableCause,
+      technicalImpact: finding.impact,
+      businessImpact: finding.impact
+    }
+  };
+}
+
+function performanceProbabilityOfFailure(severity: PerformanceFinding["severity"]): NonNullable<Finding["probabilityOfFailure"]> {
+  if (severity === "critical" || severity === "high") return "likely";
+  if (severity === "medium") return "possible";
+  return "unlikely";
+}
+
+function performanceImpactIfFails(severity: PerformanceFinding["severity"]): NonNullable<Finding["impactIfFails"]> {
+  if (severity === "critical") return "severe";
+  if (severity === "high") return "significant";
+  if (severity === "medium") return "moderate";
+  return "minor";
 }
 
 function performanceRecommendations(findings: PerformanceFinding[], summary: PerformanceEvidenceSummary) {

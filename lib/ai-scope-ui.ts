@@ -18,8 +18,17 @@ export type AIScopeDisplayId =
 
 export type AITransversalStageId = "cross_scope_correlation";
 export type AIScopeOrStageDisplayId = AIScopeDisplayId | AITransversalStageId;
-export type AIScopeDisplayGroup = "Fundamentos" | "Riesgo" | "Dominios" | "Operación" | "Síntesis";
+export type AmbitoId = "configuration" | "security" | "logs" | "lifecycle" | "topology" | "operations" | "performance";
+export type AIScopeDisplayGroup = "Configuraciones" | "Seguridad" | "Logs y Eventos" | "Vigencia tecnológica" | "Topología" | "Operaciones" | "Performance" | "Síntesis";
 export type AIStageFlag = "AI_REDUCE_STAGE" | "AI_SYNTHESIS_STAGE";
+export type CoverageLedgerEntry = {
+  deviceHostname: string;
+  applicable: number;
+  withFinding: number;
+  gap: number;
+  clean: number;
+  notEvaluated: number;
+};
 
 export type AIScopeDisplayMetadata = {
   id: AIScopeOrStageDisplayId;
@@ -59,24 +68,98 @@ type ScopeProgressJob = {
   steps: ScopeProgressStep[];
 };
 
+export const ambitoOrder: AmbitoId[] = ["configuration", "security", "logs", "lifecycle", "topology", "operations", "performance"];
+
+export const ambitoMeta: Record<AmbitoId, { label: string; description: string }> = {
+  configuration: { label: "Configuraciones", description: "Consistencia de configuración, estándares y desviaciones operativas." },
+  security: { label: "Seguridad", description: "Hardening, exposición administrativa y controles de seguridad." },
+  logs: { label: "Logs y Eventos", description: "Eventos, recurrencias, evidencia de logs y brechas de trazabilidad." },
+  lifecycle: { label: "Vigencia tecnológica", description: "Inventario, modelos, versiones y riesgos de ciclo de vida." },
+  topology: { label: "Topología", description: "Relaciones, routing, dominios de red y resiliencia." },
+  operations: { label: "Operaciones", description: "Monitoreo, procesos, soporte, mantenibilidad y operación diaria." },
+  performance: { label: "Performance", description: "Capacidad, errores, drops, CPU, memoria y tendencias." }
+};
+
+export const ambitoMemberScopes: Record<AmbitoId, AIScopeDisplayId[]> = {
+  configuration: ["configuration"],
+  security: ["security"],
+  logs: ["evidence"],
+  lifecycle: ["lifecycle", "inventory"],
+  topology: ["topology", "routing", "wan", "datacenter", "campus", "perimeter", "high_availability"],
+  operations: ["operations"],
+  performance: ["performance"]
+};
+
+export function activeAmbitoMemberScopes(ambito: AmbitoId, opts?: { topologyPlaybookEnabled?: boolean }): AIScopeDisplayId[] {
+  if (ambito === "topology" && opts?.topologyPlaybookEnabled === true) return ["topology"];
+  return ambitoMemberScopes[ambito];
+}
+
+const scopeAmbitoMap = Object.fromEntries(
+  Object.entries(ambitoMemberScopes).flatMap(([ambito, scopes]) => scopes.map((scope) => [scope, ambito]))
+) as Record<string, AmbitoId>;
+
+export function scopeToAmbito(scopeId: string | undefined | null): AmbitoId | null {
+  if (!scopeId) return null;
+  return scopeAmbitoMap[scopeId] ?? null;
+}
+
+export function ambitoCoverageLedger(
+  ambito: AmbitoId,
+  scopes: Array<{ id: string; coverageLedger?: CoverageLedgerEntry[] | null }>
+): CoverageLedgerEntry[] {
+  const memberScopes = new Set<string>(ambitoMemberScopes[ambito]);
+  const byDevice = new Map<string, CoverageLedgerEntry>();
+
+  for (const scope of scopes) {
+    if (!memberScopes.has(scope.id) || !Array.isArray(scope.coverageLedger)) continue;
+    for (const entry of scope.coverageLedger) {
+      const deviceHostname = String(entry.deviceHostname ?? "").trim();
+      if (!deviceHostname) continue;
+      const existing = byDevice.get(deviceHostname) ?? {
+        deviceHostname,
+        applicable: 0,
+        withFinding: 0,
+        gap: 0,
+        clean: 0,
+        notEvaluated: 0
+      };
+      byDevice.set(deviceHostname, {
+        deviceHostname,
+        applicable: existing.applicable + safeLedgerNumber(entry.applicable),
+        withFinding: existing.withFinding + safeLedgerNumber(entry.withFinding),
+        gap: existing.gap + safeLedgerNumber(entry.gap),
+        clean: existing.clean + safeLedgerNumber(entry.clean),
+        notEvaluated: existing.notEvaluated + safeLedgerNumber(entry.notEvaluated)
+      });
+    }
+  }
+
+  return Array.from(byDevice.values());
+}
+
+export function isCoverageComplete(ledger: CoverageLedgerEntry[]): boolean {
+  return ledger.length > 0 && ledger.every((entry) => entry.notEvaluated === 0);
+}
+
 // Display-only order for finding scopes plus optional synthesis stages.
 // Keep finding scopes in sync with lib/ai-analysis-jobs.ts fullAssessmentScopeOrder;
 // do not import server/prisma code into the client bundle.
 export const aiScopeDisplayOrder: AIScopeDisplayMetadata[] = [
-  { id: "topology", label: "Topología", group: "Fundamentos" },
-  { id: "configuration", label: "Configuración", group: "Fundamentos" },
-  { id: "security", label: "Seguridad", group: "Riesgo" },
-  { id: "lifecycle", label: "Lifecycle", group: "Riesgo" },
-  { id: "operations", label: "Operación", group: "Operación" },
-  { id: "evidence", label: "Evidencia", group: "Fundamentos" },
-  { id: "inventory", label: "Inventario", group: "Fundamentos" },
-  { id: "routing", label: "Routing", group: "Dominios" },
-  { id: "wan", label: "WAN", group: "Dominios" },
-  { id: "datacenter", label: "Datacenter", group: "Dominios" },
-  { id: "campus", label: "Campus", group: "Dominios" },
-  { id: "perimeter", label: "Perímetro", group: "Dominios" },
-  { id: "performance", label: "Performance", group: "Riesgo" },
-  { id: "high_availability", label: "Alta disponibilidad", group: "Riesgo" },
+  { id: "configuration", label: "Configuración", group: "Configuraciones" },
+  { id: "security", label: "Seguridad", group: "Seguridad" },
+  { id: "evidence", label: "Evidencia", group: "Logs y Eventos" },
+  { id: "lifecycle", label: "Lifecycle", group: "Vigencia tecnológica" },
+  { id: "inventory", label: "Inventario", group: "Vigencia tecnológica" },
+  { id: "topology", label: "Topología", group: "Topología" },
+  { id: "routing", label: "Routing", group: "Topología" },
+  { id: "wan", label: "WAN", group: "Topología" },
+  { id: "datacenter", label: "Datacenter", group: "Topología" },
+  { id: "campus", label: "Campus", group: "Topología" },
+  { id: "perimeter", label: "Perímetro", group: "Topología" },
+  { id: "high_availability", label: "Alta disponibilidad", group: "Topología" },
+  { id: "operations", label: "Operación", group: "Operaciones" },
+  { id: "performance", label: "Performance", group: "Performance" },
   { id: "roadmap", label: "Roadmap", group: "Síntesis" },
   { id: "executive_summary", label: "Resumen ejecutivo", group: "Síntesis" }
 ];
@@ -107,9 +190,6 @@ export function scopeProgressFromStatus(
   aiAnalysisStatus?: ScopeProgressStatus,
   latestJob?: ScopeProgressJob | null
 ): number {
-  const scopeStatus = aiAnalysisStatus?.scopes?.find((scope) => scope.id === scopeId)?.status;
-  if (isCompletedScopeStatus(scopeStatus)) return 100;
-
   const stepsByPhase = new Map<string, ScopeProgressStep>();
   for (const step of [
     ...(aiAnalysisStatus?.jobs ?? []).flatMap((job) => job.steps),
@@ -122,6 +202,9 @@ export function scopeProgressFromStatus(
   const steps = Array.from(stepsByPhase.values());
   const currentPhase = latestJob?.currentPhase;
   const currentScopeIsActive = Boolean(currentPhase?.startsWith(`${scopeId}:`) && isActiveJobStatus(latestJob?.status));
+
+  const scopeStatus = aiAnalysisStatus?.scopes?.find((scope) => scope.id === scopeId)?.status;
+  if (!currentScopeIsActive && isCompletedScopeStatus(scopeStatus)) return 100;
   if (steps.length === 0) return currentScopeIsActive ? 1 : 0;
 
   const completedSteps = steps.filter((step) => isCompletedScopeStatus(step.status)).length;
@@ -145,4 +228,8 @@ function isActiveJobStatus(status: string | undefined) {
 function clampProgress(value: number) {
   if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(100, value));
+}
+
+function safeLedgerNumber(value: number) {
+  return Number.isFinite(value) ? value : 0;
 }

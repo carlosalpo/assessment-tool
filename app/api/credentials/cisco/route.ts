@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import {
-  deleteCiscoApiToken,
+  deleteCiscoOAuthCredential,
   getCiscoCredentialMetadata,
-  saveCiscoApiToken
+  saveCiscoOAuthCredential
 } from "@/lib/server-credentials";
 
 export const runtime = "nodejs";
@@ -17,14 +17,15 @@ export async function GET() {
 
 export async function PUT(request: Request) {
   const body = await request.json().catch(() => null);
-  const apiToken = typeof body?.apiToken === "string" ? body.apiToken.trim() : "";
+  const clientId = typeof body?.clientId === "string" ? body.clientId.trim() : "";
+  const clientSecret = typeof body?.clientSecret === "string" ? body.clientSecret.trim() : "";
   const updatedBy = typeof body?.updatedBy === "string" ? body.updatedBy.trim() : undefined;
-  if (!apiToken) {
-    return NextResponse.json({ error: "Solicitud invalida: apiToken es requerido." }, { status: 400 });
+  if (!clientId || !clientSecret) {
+    return NextResponse.json({ error: "Solicitud invalida: clientId y clientSecret son requeridos." }, { status: 400 });
   }
 
   try {
-    return NextResponse.json({ credential: await saveCiscoApiToken(apiToken, updatedBy) });
+    return NextResponse.json({ credential: await saveCiscoOAuthCredential({ clientId, clientSecret }, updatedBy) });
   } catch (error) {
     return NextResponse.json({ error: errorMessage(error) }, { status: 503 });
   }
@@ -32,7 +33,7 @@ export async function PUT(request: Request) {
 
 export async function DELETE() {
   try {
-    return NextResponse.json({ credential: await deleteCiscoApiToken() });
+    return NextResponse.json({ credential: await deleteCiscoOAuthCredential() });
   } catch (error) {
     return NextResponse.json({ error: errorMessage(error) }, { status: 503 });
   }

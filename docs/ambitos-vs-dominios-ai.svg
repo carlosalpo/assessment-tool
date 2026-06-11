@@ -1,0 +1,154 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1240" viewBox="0 0 1800 1240" role="img" aria-labelledby="title desc">
+  <title id="title">Diferencia entre ambitos de evaluacion y dominios tecnicos del analisis AI</title>
+  <desc id="desc">Ilustracion que explica como los ambitos visibles en la UI se relacionan con los dominios internos que ejecuta el motor de analisis AI.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#071014"/>
+      <stop offset="56%" stop-color="#0d1720"/>
+      <stop offset="100%" stop-color="#10131d"/>
+    </linearGradient>
+    <filter id="shadow" x="-8%" y="-8%" width="116%" height="116%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#000000" flood-opacity="0.32"/>
+    </filter>
+    <marker id="arrowCyan" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="10" markerHeight="10" orient="auto">
+      <path d="M 0 1 L 11 6 L 0 11 z" fill="#67e8f9"/>
+    </marker>
+    <marker id="arrowBlue" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="10" markerHeight="10" orient="auto">
+      <path d="M 0 1 L 11 6 L 0 11 z" fill="#93c5fd"/>
+    </marker>
+    <style>
+      .bg { fill: url(#bg); }
+      .frame { fill: none; stroke: #1f3343; stroke-width: 2; }
+      .panel { fill: #101b25; stroke: #263848; stroke-width: 2; filter: url(#shadow); }
+      .panelPlain { fill: #101b25; stroke: #263848; stroke-width: 2; }
+      .scope { fill: #142130; stroke: #33485d; stroke-width: 2; }
+      .scopeDirect { fill: #10252c; stroke: #2dd4bf; stroke-width: 2; }
+      .scopeDomain { fill: #171d2e; stroke: #7aa2ff; stroke-width: 2; }
+      .scopeRisk { fill: #251827; stroke: #f472b6; stroke-width: 2; }
+      .scopeOps { fill: #152417; stroke: #34d399; stroke-width: 2; }
+      .scopeSynth { fill: #251c12; stroke: #f59e0b; stroke-width: 2; }
+      .out { fill: #0f211d; stroke: #34d399; stroke-width: 2; }
+      .lineCyan { stroke: #67e8f9; stroke-width: 3; fill: none; marker-end: url(#arrowCyan); }
+      .lineBlue { stroke: #93c5fd; stroke-width: 3; fill: none; marker-end: url(#arrowBlue); }
+      .dash { stroke-dasharray: 8 8; }
+      .title { font: 800 44px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #f8fafc; }
+      .subtitle { font: 400 20px Inter, ui-sans-serif, system-ui, sans-serif; fill: #b7c3d1; }
+      .h1 { font: 800 26px Inter, ui-sans-serif, system-ui, sans-serif; fill: #ecfeff; }
+      .h2 { font: 750 18px Inter, ui-sans-serif, system-ui, sans-serif; fill: #f8fafc; }
+      .body { font: 400 15px Inter, ui-sans-serif, system-ui, sans-serif; fill: #c7d2de; }
+      .small { font: 400 13px Inter, ui-sans-serif, system-ui, sans-serif; fill: #aab8c6; }
+      .tiny { font: 700 11px Inter, ui-sans-serif, system-ui, sans-serif; fill: #8fa2b5; letter-spacing: 0.08em; }
+      .chip { font: 700 13px Inter, ui-sans-serif, system-ui, sans-serif; fill: #bffcf6; }
+      .muted { fill: #8fa2b5; }
+    </style>
+  </defs>
+
+  <rect class="bg" width="1800" height="1240"/>
+  <rect class="frame" x="36" y="36" width="1728" height="1168" rx="30"/>
+
+  <text class="title" x="82" y="106">Ambito de evaluacion vs dominio tecnico</text>
+  <text class="subtitle" x="84" y="142">La UI usa ambitos para que el usuario trabaje simple. El motor AI usa dominios/scopes para analizar la red con lentes tecnicas mas especificas.</text>
+
+  <rect class="panel" x="80" y="205" width="470" height="780" rx="24"/>
+  <text class="tiny" x="112" y="245">LO QUE VE EL USUARIO</text>
+  <text class="h1" x="112" y="280">Ambitos de evaluacion</text>
+  <text class="body" x="112" y="314">Son las puertas de entrada del tab Analisis.</text>
+  <text class="body" x="112" y="340">Sirven para ejecutar/revisar por tema de negocio.</text>
+
+  <g transform="translate(112 382)">
+    <rect class="scopeDirect" x="0" y="0" width="375" height="62" rx="14"/>
+    <text class="h2" x="22" y="27">Topologia</text>
+    <text class="small" x="22" y="49">Redundancia, vecinos, SPOF, enlaces.</text>
+  </g>
+  <g transform="translate(112 462)">
+    <rect class="scopeDirect" x="0" y="0" width="375" height="62" rx="14"/>
+    <text class="h2" x="22" y="27">Configuraciones</text>
+    <text class="small" x="22" y="49">Running-config, estandares, desviaciones.</text>
+  </g>
+  <g transform="translate(112 542)">
+    <rect class="scopeDirect" x="0" y="0" width="375" height="62" rx="14"/>
+    <text class="h2" x="22" y="27">Seguridad</text>
+    <text class="small" x="22" y="49">Hardening, protocolos, AAA, SNMP.</text>
+  </g>
+  <g transform="translate(112 622)">
+    <rect class="scopeDirect" x="0" y="0" width="375" height="62" rx="14"/>
+    <text class="h2" x="22" y="27">Vigencia tecnologica</text>
+    <text class="small" x="22" y="49">Lifecycle, EoX, versiones, obsolescencia.</text>
+  </g>
+  <g transform="translate(112 702)">
+    <rect class="scopeDirect" x="0" y="0" width="375" height="62" rx="14"/>
+    <text class="h2" x="22" y="27">Operaciones</text>
+    <text class="small" x="22" y="49">Procesos, monitoreo, backups, cambios.</text>
+  </g>
+  <g transform="translate(112 782)">
+    <rect class="scopeDirect" x="0" y="0" width="375" height="62" rx="14"/>
+    <text class="h2" x="22" y="27">Logs y eventos</text>
+    <text class="small" x="22" y="49">Eventos, evidencia, gaps de levantamiento.</text>
+  </g>
+
+  <rect class="panel" x="700" y="205" width="830" height="780" rx="24"/>
+  <text class="tiny" x="732" y="245">LO QUE EJECUTA EL MOTOR</text>
+  <text class="h1" x="732" y="280">Dominios / scopes tecnicos</text>
+  <text class="body" x="732" y="314">Son lentes internos de analisis. Algunos coinciden con un ambito.</text>
+  <text class="body" x="732" y="340">Otros aparecen solo en evaluacion completa para profundizar.</text>
+
+  <text class="tiny" x="732" y="386">FUNDAMENTOS</text>
+  <g transform="translate(732 404)">
+    <rect class="scopeDirect" x="0" y="0" width="170" height="56" rx="13"/><text class="h2" x="18" y="34">topology</text>
+    <rect class="scopeDirect" x="190" y="0" width="205" height="56" rx="13"/><text class="h2" x="208" y="34">configuration</text>
+    <rect class="scope" x="415" y="0" width="160" height="56" rx="13"/><text class="h2" x="433" y="34">inventory</text>
+    <rect class="scopeDirect" x="595" y="0" width="170" height="56" rx="13"/><text class="h2" x="613" y="34">evidence</text>
+  </g>
+
+  <text class="tiny" x="732" y="500">RIESGO</text>
+  <g transform="translate(732 518)">
+    <rect class="scopeRisk" x="0" y="0" width="160" height="56" rx="13"/><text class="h2" x="18" y="34">security</text>
+    <rect class="scopeRisk" x="180" y="0" width="160" height="56" rx="13"/><text class="h2" x="198" y="34">lifecycle</text>
+    <rect class="scopeRisk" x="360" y="0" width="180" height="56" rx="13"/><text class="h2" x="378" y="34">performance</text>
+    <rect class="scopeRisk" x="560" y="0" width="205" height="56" rx="13"/><text class="h2" x="578" y="34">high availability</text>
+  </g>
+
+  <text class="tiny" x="732" y="614">DOMINIOS TECNICOS EXTRA</text>
+  <g transform="translate(732 632)">
+    <rect class="scopeDomain" x="0" y="0" width="150" height="56" rx="13"/><text class="h2" x="18" y="34">routing</text>
+    <rect class="scopeDomain" x="170" y="0" width="120" height="56" rx="13"/><text class="h2" x="188" y="34">WAN</text>
+    <rect class="scopeDomain" x="310" y="0" width="180" height="56" rx="13"/><text class="h2" x="328" y="34">datacenter</text>
+    <rect class="scopeDomain" x="510" y="0" width="150" height="56" rx="13"/><text class="h2" x="528" y="34">campus</text>
+    <rect class="scopeDomain" x="680" y="0" width="120" height="56" rx="13"/><text class="h2" x="698" y="34">edge</text>
+  </g>
+
+  <text class="tiny" x="732" y="728">OPERACION Y SINTESIS</text>
+  <g transform="translate(732 746)">
+    <rect class="scopeOps" x="0" y="0" width="180" height="56" rx="13"/><text class="h2" x="18" y="34">operations</text>
+    <rect class="scopeSynth" x="220" y="0" width="150" height="56" rx="13"/><text class="h2" x="238" y="34">roadmap</text>
+    <rect class="scopeSynth" x="390" y="0" width="260" height="56" rx="13"/><text class="h2" x="408" y="34">executive summary</text>
+  </g>
+
+  <rect class="panelPlain" x="732" y="835" width="760" height="92" rx="16"/>
+  <text class="h2" x="760" y="870">Regla mental</text>
+  <text class="body" x="760" y="900">Ambito = carpeta de trabajo para el usuario. Dominio/scope = lente tecnica que el motor ejecuta.</text>
+
+  <!-- arrows and relationship -->
+  <path class="lineCyan" d="M 555 415 C 610 415 640 425 690 430"/>
+  <path class="lineCyan" d="M 555 495 C 610 495 640 450 690 448"/>
+  <path class="lineCyan" d="M 555 575 C 610 575 640 536 690 536"/>
+  <path class="lineCyan" d="M 555 655 C 610 655 640 552 690 552"/>
+  <path class="lineCyan" d="M 555 735 C 610 735 640 768 690 768"/>
+  <path class="lineCyan" d="M 555 815 C 610 815 640 448 690 448"/>
+
+  <rect class="panel" x="80" y="1035" width="1450" height="110" rx="22"/>
+  <text class="h1" x="112" y="1074">Entonces, ¿por qué ves cuadros desde Topologia hasta Datacenter y Campus?</text>
+  <text class="body" x="112" y="1108">Porque la evaluacion completa abre mas lentes internos que los 6 ambitos visibles.</text>
+  <text class="body" x="112" y="1134">Datacenter, Campus, WAN, Perimetro, Routing y Alta disponibilidad son dominios tecnicos que enriquecen o especializan el analisis.</text>
+
+  <rect class="out" x="1560" y="205" width="170" height="940" rx="24"/>
+  <text class="tiny" x="1590" y="248">SALIDA</text>
+  <text class="h2" x="1590" y="282">Hallazgos</text>
+  <text class="small" x="1590" y="322">• por ambito</text>
+  <text class="small" x="1590" y="350">• por equipo</text>
+  <text class="small" x="1590" y="378">• por nivel</text>
+  <text class="small" x="1590" y="406">• por dominio</text>
+  <text class="small" x="1590" y="434">• por sitio</text>
+  <text class="small" x="1590" y="462">• por rol</text>
+  <path class="lineBlue dash" d="M 1534 760 C 1550 760 1550 760 1558 760"/>
+</svg>

@@ -21,8 +21,14 @@ import {
   validateScopeAnalysisResult
 } from "./ai-scope-strategy.ts";
 import {
+  baseFindingSchema,
+  coverageResultProperties,
+  isEnrichedFindingsEnabled,
+  isCoverageLedgerEnabled,
+  isCoverageLedgerScope,
   patternForScope,
   reduceResultSchema,
+  resultRequiredProperties,
   scopeAnalysisResultSchemaForPattern,
   synthesisResultSchema,
   usesPatternQuery
@@ -48,11 +54,13 @@ import {
 } from "./ai-design-guidelines.ts";
 import {
   applyExclusions,
+  buildCoveragePlan,
   buildPlaybookPromptSection,
   isScopePlaybookEnabled,
   isSupportedScopePlaybookScopeId,
   resolvePlaybookForOsFamilies,
   supportedScopePlaybookScopeIds,
+  type CoveragePlanEntry,
   type DeviceOsLookup,
   type OsFamily,
   type ScopePlaybook,
@@ -62,6 +70,7 @@ import {
   getScopePlaybook,
   type ScopePlaybookSnapshot
 } from "./scope-playbook-store.ts";
+import type { CoverageLedgerEntry } from "./ai-scope-ui.ts";
 import {
   consolidateGapFindings,
   isGapConsolidationEnabled,
@@ -196,7 +205,9 @@ export type SynthesisDigest = {
   catalog: Record<string, string[]>;
 };
 
-const engineVersion = "ai-analysis-engine-v5";
+export function getEngineVersion() {
+  return isEnrichedFindingsEnabled() ? "ai-analysis-engine-v6" : "ai-analysis-engine-v5";
+}
 const remediationCategoryEnum = ["professional_services", "new_technology", "platform_upgrade", "operational_change", "pending_validation"];
 const maxChunkChars = 14000;
 const defaultOpenAIAnalysisModel = "gpt-5.2";
@@ -204,6 +215,7 @@ const crossScopeCorrelationScopeId = "cross_scope_correlation";
 const reduceFindingsPerScopeLimit = 8;
 const synthesisFindingsPerScopeLimit = 12;
 const staleAIJobMessage = "Job huerfano reclamado tras inactividad/reinicio.";
+const skippedAfterFailureMessage = "No ejecutado porque fallo una fase anterior.";
 
 export const aiAnalysisScopes: Array<{ id: AIAnalysisScopeId; label: string; description: string }> = [
   { id: "inventory", label: "Inventario", description: "Inventario, identidad, modelos, seriales y roles." },
@@ -225,26 +237,28 @@ export const aiAnalysisScopes: Array<{ id: AIAnalysisScopeId; label: string; des
 ];
 
 export const fullAssessmentScopeOrder: AIAnalysisScopeId[] = [
-  "topology",
   "configuration",
   "security",
-  "lifecycle",
-  "operations",
   "evidence",
+  "lifecycle",
   "inventory",
+  "topology",
   "routing",
   "wan",
   "datacenter",
   "campus",
   "perimeter",
-  "performance",
-  "high_availability"
+  "high_availability",
+  "operations",
+  "performance"
 ];
 
 export const synthesisAssessmentScopeOrder: AIAnalysisScopeId[] = [
   "roadmap",
   "executive_summary"
 ];
+
+const FOLDED_TOPOLOGY_SCOPES = ["routing", "wan", "datacenter", "campus", "perimeter", "high_availability"] as const satisfies readonly AIAnalysisScopeId[];
 
 const scopePhases: AIAnalysisPhaseName[] = [
   "context_preparation",
@@ -383,15 +397,31 @@ export async function getAssessmentAIAnalysisStatus(assessmentId: string) {
 
   return {
     assessmentId,
+    topologyPlaybookEnabled: isTopologyPlaybookEnabled(),
     jobs: jobs.map(jobToSnapshot),
     scopes: aiAnalysisScopes.map((scope) => {
       const result = results.find((item) => item.scopeId === scope.id);
+      const activeJob = jobs.find((job) =>
+        (job.status === "queued" || job.status === "running") &&
+        (
+          job.currentPhase?.startsWith(`${scope.id}:`) ||
+          job.scopeId === scope.id ||
+          job.steps.some((step) => step.scopeId === scope.id && (step.status === "running" || step.status === "pending"))
+        )
+      );
+      const activeStep = activeJob?.steps.find((step) =>
+        activeJob.currentPhase === `${step.scopeId}:${step.phaseName}` ||
+        (step.scopeId === scope.id && step.status === "running")
+      ) ?? activeJob?.steps.find((step) => step.scopeId === scope.id && step.status === "pending");
       const latestStep = jobs.flatMap((job) => job.steps).find((step) => step.scopeId === scope.id);
+      const statusSource = activeStep ?? latestStep;
+      const activeScopeStatus = activeStep?.status ?? (activeJob ? activeJob.status : null);
       return {
         ...scope,
-        status: result?.status ?? latestStep?.status ?? "pending",
-        inputHash: result?.inputHash ?? latestStep?.inputHash ?? null,
-        updatedAt: result?.updatedAt?.toISOString() ?? latestStep?.updatedAt?.toISOString() ?? null,
+        status: activeScopeStatus ?? result?.status ?? latestStep?.status ?? "pending",
+        inputHash: statusSource?.inputHash ?? result?.inputHash ?? null,
+        updatedAt: statusSource?.updatedAt?.toISOString() ?? result?.updatedAt?.toISOString() ?? null,
+        coverageLedger: ((result?.resultJson as any)?.coverageLedger ?? null) as CoverageLedgerEntry[] | null,
         stale: false
       };
     })
@@ -418,7 +448,7 @@ export async function getAssessmentAIAnalysisResults(assessmentId: string) {
   };
 }
 
-export async function reclaimStaleAIJobs(maxAgeMs = 180000, db: StaleJobPrismaClient = prisma) {
+export async function reclaimStaleAIJobs(maxAgeMs = 15 * 60 * 1000, db: StaleJobPrismaClient = prisma) {
   const now = new Date();
   const cutoff = new Date(now.getTime() - maxAgeMs);
   const staleJobs = await db.aiAnalysisJob.findMany({
@@ -435,12 +465,23 @@ export async function reclaimStaleAIJobs(maxAgeMs = 180000, db: StaleJobPrismaCl
     db.aiAnalysisJobStep.updateMany({
       where: {
         jobId: { in: jobIds },
-        status: { in: ["pending", "running"] }
+        status: { in: ["running"] }
       },
       data: {
         status: "failed",
         completedAt: now,
         errorMessage: staleAIJobMessage
+      }
+    }),
+    db.aiAnalysisJobStep.updateMany({
+      where: {
+        jobId: { in: jobIds },
+        status: { in: ["pending"] }
+      },
+      data: {
+        status: "cancelled",
+        completedAt: now,
+        errorMessage: skippedAfterFailureMessage
       }
     }),
     db.aiAnalysisJob.updateMany({
@@ -507,12 +548,13 @@ export async function runAIAnalysisJob(jobId: string, options?: RunAIAnalysisJob
   const designRubric = isDesignRubricEnabled()
     ? await loadDesignRubricContext(job.assessmentId)
     : null;
-  const scopePlaybook = isScopePlaybookEnabled()
+  const scopePlaybook = shouldLoadScopePlaybookContext()
     ? await loadScopePlaybookContext()
     : null;
   let failedScopes = 0;
   let completedScopes = 0;
   let skippedScopes = 0;
+  const scopeFailureMessages: string[] = [];
 
   for (const scopeId of scopes) {
     const cancelled = await cancelIfRequested(jobId);
@@ -606,7 +648,7 @@ export async function runAIAnalysisJob(jobId: string, options?: RunAIAnalysisJob
           status: "completed",
           inputHash,
           promptVersion: getPromptVersion(),
-          engineVersion,
+          engineVersion: getEngineVersion(),
           resultJson: finalArtifact as Prisma.InputJsonValue,
           executiveSummary: finalArtifact.executiveSummary ?? null,
           findingsJson: (finalArtifact.findings ?? []) as Prisma.InputJsonValue,
@@ -616,7 +658,7 @@ export async function runAIAnalysisJob(jobId: string, options?: RunAIAnalysisJob
           status: "completed",
           inputHash,
           promptVersion: getPromptVersion(),
-          engineVersion,
+          engineVersion: getEngineVersion(),
           resultJson: finalArtifact as Prisma.InputJsonValue,
           executiveSummary: finalArtifact.executiveSummary ?? null,
           findingsJson: (finalArtifact.findings ?? []) as Prisma.InputJsonValue,
@@ -627,13 +669,30 @@ export async function runAIAnalysisJob(jobId: string, options?: RunAIAnalysisJob
     } catch (error) {
       if (await cancelIfRequested(jobId)) return;
       failedScopes += 1;
-      const message = error instanceof Error ? error.message : "Error desconocido ejecutando ambito.";
+      const message = errorMessageFromUnknown(error, "Error desconocido ejecutando ambito.");
+      const failedStep = await prisma.aiAnalysisJobStep.findFirst({
+        where: { jobId, scopeId, status: "running" },
+        orderBy: { updatedAt: "desc" }
+      });
+      const failureMessage = formatScopeFailureMessage(scopeId, failedStep?.phaseName ?? null, message);
+      scopeFailureMessages.push(failureMessage);
+      console.warn("AI analysis scope failed", {
+        jobId,
+        assessmentId: job.assessmentId,
+        scopeId,
+        phaseName: failedStep?.phaseName ?? null,
+        message
+      });
       await prisma.aiAnalysisJobStep.updateMany({
-        where: { jobId, scopeId, status: { in: ["pending", "running"] } },
+        where: { jobId, scopeId, status: "running" },
         data: { status: "failed", errorMessage: message, completedAt: new Date() }
       });
+      await prisma.aiAnalysisJobStep.updateMany({
+        where: { jobId, scopeId, status: "pending" },
+        data: { status: "cancelled", errorMessage: skippedAfterFailureMessage, completedAt: new Date() }
+      });
       if (job.mode === "scope") {
-        await failJob(jobId, message);
+        await failJob(jobId, failureMessage);
         return;
       }
     }
@@ -681,7 +740,9 @@ export async function runAIAnalysisJob(jobId: string, options?: RunAIAnalysisJob
       progress: 100,
       currentPhase: null,
       completedAt: new Date(),
-      errorMessage: failedScopes > 0 ? `${failedScopes} ambitos fallaron; ${completedScopes} completados; ${skippedScopes} reutilizados.` : null
+      errorMessage: failedScopes > 0
+        ? formatFailedScopesMessage(failedScopes, completedScopes, skippedScopes, scopeFailureMessages)
+        : null
     }
   });
 }
@@ -758,7 +819,7 @@ async function runPhase(input: RunPhaseInput) {
         }
       } : {}),
       promptVersion: getPromptVersion(),
-      engineVersion
+      engineVersion: getEngineVersion()
     };
   }
 
@@ -818,12 +879,13 @@ async function runPhase(input: RunPhaseInput) {
         }
         return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model);
       case "ai-design":
-        // DOM-C: design rubric.
+        // DOM-C: design rubric, optionally composed with the topology playbook.
+        const basePrompt = playbookSystemPrompt ?? buildScopeSystemPrompt(input.scopeId);
         if (usesDesignRubric(input.scopeId) && input.designGuidelines) {
-          const systemPrompt = buildDesignRubricSystemPrompt(buildScopeSystemPrompt(input.scopeId), input.designGuidelines);
+          const systemPrompt = buildDesignRubricSystemPrompt(basePrompt, input.designGuidelines);
           return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model, systemPrompt);
         }
-        return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model, playbookSystemPrompt);
+        return runCurrentScopeAIAnalysis(input, scopePacket, priorScopeResults, explicitMaxInputTokens, model, basePrompt);
       case "ai-per-device":
         // DOM-B: per-device packing.
         if (isPerDeviceEnabled()) {
@@ -905,7 +967,10 @@ async function runCurrentScopeAIAnalysis(
   }
 
   const partitionResults = [];
-  for (const partition of [...partitions].sort((left, right) => left.id.localeCompare(right.id))) {
+  const sortedPartitions = [...partitions].sort((left, right) => left.id.localeCompare(right.id));
+  for (let index = 0; index < sortedPartitions.length; index += 1) {
+    const partition = sortedPartitions[index];
+    await updateRunningPhaseProgress(input.jobId, input.scopeId, input.phase, partitionProgress(index, sortedPartitions.length));
     const partitionPacket = buildAIScopePacket({
       record: input.record,
       scopeId: input.scopeId,
@@ -925,8 +990,10 @@ async function runCurrentScopeAIAnalysis(
       partitionId: partition.id,
       partitionDevices: partition.deviceHostnames
     });
+    await updateRunningPhaseProgress(input.jobId, input.scopeId, input.phase, partitionProgress(index + 1, sortedPartitions.length));
   }
 
+  await updateRunningPhaseProgress(input.jobId, input.scopeId, input.phase, 95);
   return mergeScopePartitionResults(input.scopeId, partitionResults, partitions);
 }
 
@@ -945,7 +1012,9 @@ async function runPerDeviceScopeAIAnalysis(
   }
 
   const partitionResults = [];
-  for (const batch of batches) {
+  for (let index = 0; index < batches.length; index += 1) {
+    const batch = batches[index];
+    await updateRunningPhaseProgress(input.jobId, input.scopeId, input.phase, partitionProgress(index, batches.length));
     const batchDeviceContexts = batch.deviceHostnames.map((hostname) => buildDeviceContext(context, hostname));
     const batchOsFamilies = new Set<OsFamily>(batchDeviceContexts.map((deviceContext) => deviceContext.identity.osFamily));
     const batchPlaybook = isSupportedScopePlaybookScopeId(input.scopeId) && input.scopePlaybook
@@ -955,6 +1024,9 @@ async function runPerDeviceScopeAIAnalysis(
       ? buildScopePlaybookSystemPrompt(input.scopeId, batchPlaybook)
       : systemPrompt;
     const batchDeviceOsByName = deviceOsLookupFromDeviceContexts(batchDeviceContexts);
+    const coveragePlan = shouldUseCoverageLedger(input.scopeId, undefined) && batchPlaybook
+      ? buildCoveragePlan(batchPlaybook, batchDeviceContexts)
+      : undefined;
     const batchPacket = buildAIScopePacket({
       record: input.record,
       scopeId: input.scopeId,
@@ -968,7 +1040,8 @@ async function runPerDeviceScopeAIAnalysis(
       debugCapture: input.debugCapture,
       systemPrompt: batchSystemPrompt,
       scopePlaybook: batchPlaybook,
-      deviceOsByName: batchDeviceOsByName
+      deviceOsByName: batchDeviceOsByName,
+      coveragePlan
     });
     partitionResults.push({
       ...partitionResult,
@@ -976,8 +1049,10 @@ async function runPerDeviceScopeAIAnalysis(
       partitionDevices: batch.deviceHostnames,
       tokenEstimate: batch.tokenEstimate
     });
+    await updateRunningPhaseProgress(input.jobId, input.scopeId, input.phase, partitionProgress(index + 1, batches.length));
   }
 
+  await updateRunningPhaseProgress(input.jobId, input.scopeId, input.phase, 95);
   return mergeScopePartitionResults(input.scopeId, partitionResults, batches);
 }
 
@@ -1019,7 +1094,8 @@ async function runDeterministicOperationsScopeAnalysis(
     findings: deterministicFindings,
     apiKey: input.apiKey,
     model,
-    jobId: input.jobId
+    jobId: input.jobId,
+    scopePlaybook: input.scopePlaybook
   });
   const findings = operationsFindingsToScopeAnalysisFindings(narratedFindings);
   return {
@@ -1041,6 +1117,7 @@ async function narrateOperationsFindings(input: {
   apiKey: string;
   model: string;
   jobId?: string;
+  scopePlaybook?: ScopePlaybook | null;
 }) {
   if (!input.apiKey || input.findings.length === 0) return input.findings;
   const controller = new AbortController();
@@ -1060,22 +1137,7 @@ async function narrateOperationsFindings(input: {
         role: "user",
         content: [{
           type: "input_text",
-          text: JSON.stringify({
-            task: "Redacta solo narrativa para estos hallazgos operacionales determinísticos.",
-            fixedFindings: input.findings.map((finding) => ({
-              id: finding.id,
-              area: finding.area,
-              dimension: finding.dimension,
-              gap: finding.gap,
-              severity: finding.severity,
-              remediationCategory: finding.remediationCategory,
-              currentText: {
-                technical_rationale: finding.technical_rationale,
-                business_impact: finding.business_impact,
-                recommendation: finding.recommendation
-              }
-            }))
-          })
+          text: JSON.stringify(buildOperationsNarrationPayload(input.findings, input.scopePlaybook))
         }]
       }
     ],
@@ -1123,12 +1185,59 @@ function pollJobCancellation(jobId: string, controller: AbortController) {
 }
 
 export function buildOperationsNarrationSystemPrompt() {
-  return [
+  const lines = [
     "Eres un redactor tecnico para hallazgos operacionales ya decididos por un motor determinístico.",
     "NO cambies el hallazgo, estado, severidad, categoria de remediacion, area ni brecha.",
     "Solo redacta technical_rationale, business_impact y recommendation en espanol profesional y conciso.",
     "No inventes entrevistas, evidencias, procesos ni herramientas no incluidas."
-  ].join("\n");
+  ];
+  if (isOperationsPlaybookEnabled()) {
+    lines.splice(lines.length - 1, 0,
+      "Alinea technical_rationale, business_impact y recommendation a los criterios y hallazgos esperados del playbook para el dominio del hallazgo (finding.area).",
+      "La recommendation debe ser ACCIONABLE y concreta: responsable, accion especifica, KPI/evidencia esperada y cadencia de seguimiento. No uses recomendaciones genericas como 'validar' o 'priorizar'. Ejemplo: Implementar monitoreo SNMP/syslog centralizado con alertas por umbral y un runbook de respuesta para CPU/interfaces criticas.",
+      "La narracion NO debe alterar severity, area ni remediationCategory."
+    );
+  }
+  return lines.join("\n");
+}
+
+export function buildOperationsNarrationPayload(findings: OperationsFinding[], scopePlaybook?: ScopePlaybook | null) {
+  const payload: any = {
+    task: "Redacta solo narrativa para estos hallazgos operacionales determinísticos.",
+    fixedFindings: findings.map((finding) => ({
+      id: finding.id,
+      area: finding.area,
+      dimension: finding.dimension,
+      gap: finding.gap,
+      severity: finding.severity,
+      remediationCategory: finding.remediationCategory,
+      currentText: {
+        technical_rationale: finding.technical_rationale,
+        business_impact: finding.business_impact,
+        recommendation: finding.recommendation
+      }
+    }))
+  };
+  if (isOperationsPlaybookEnabled() && scopePlaybook) {
+    payload.playbook = {
+      scopeId: scopePlaybook.scopeId,
+      criteria: scopePlaybook.criteria.map((criterion) => ({
+        aspect: criterion.aspect,
+        guidance: criterion.guidance
+      })),
+      expected: scopePlaybook.expected.map((expected) => ({
+        title: expected.title,
+        description: expected.description,
+        severityHint: expected.severityHint
+      }))
+    };
+    payload.playbookInstructions = [
+      "Usa finding.area para ubicar el dominio operacional del hallazgo.",
+      "Alinea la recomendacion de cada hallazgo al criterio y hallazgo esperado del playbook que correspondan a ese dominio.",
+      "Devuelve solo narrativa; severity, area y remediationCategory son campos fijos."
+    ];
+  }
+  return payload;
 }
 
 function operationsNarrationResultSchema() {
@@ -1155,7 +1264,7 @@ function operationsNarrationResultSchema() {
   };
 }
 
-function operationsFindingsToScopeAnalysisFindings(findings: OperationsFinding[]) {
+export function operationsFindingsToScopeAnalysisFindings(findings: OperationsFinding[]) {
   return findings.map((finding) => ({
     finding_id: finding.id,
     scope: "operations",
@@ -1195,8 +1304,31 @@ function operationsFindingsToScopeAnalysisFindings(findings: OperationsFinding[]
     time_window: "assessment",
     correlated_entity: finding.dimension,
     operational_area: finding.area,
-    operational_gap: finding.gap
+    operational_gap: finding.gap,
+    ...(isEnrichedFindingsEnabled() ? operationsEnrichedFindingFields(finding) : {})
   }));
+}
+
+function operationsEnrichedFindingFields(finding: OperationsFinding) {
+  return {
+    probable_cause: `Madurez operativa insuficiente o proceso no formalizado en ${finding.dimension} para cerrar la brecha: ${finding.gap}.`,
+    technical_impact: `La brecha en ${finding.dimension} puede degradar la deteccion, trazabilidad, recuperacion o control operativo relacionado con ${finding.area}.`,
+    probability_of_failure: operationsProbabilityOfFailure(finding.severity),
+    impact_if_fails: operationsImpactIfFails(finding.severity)
+  };
+}
+
+function operationsProbabilityOfFailure(severity: OperationsFinding["severity"]) {
+  if (severity === "critical" || severity === "high") return "likely";
+  if (severity === "medium") return "possible";
+  return "unlikely";
+}
+
+function operationsImpactIfFails(severity: OperationsFinding["severity"]) {
+  if (severity === "critical") return "severe";
+  if (severity === "high") return "significant";
+  if (severity === "medium") return "moderate";
+  return "minor";
 }
 
 async function narrateLifecycleFindings(input: {
@@ -1235,6 +1367,13 @@ async function narrateLifecycleFindings(input: {
               remediationCategory: finding.remediationCategory,
               criticality: finding.criticality,
               role: finding.role,
+              productId: finding.productId,
+              model: finding.model,
+              softwareVersion: finding.softwareVersion,
+              site: finding.site,
+              deviceId: finding.deviceId,
+              bulletinUrl: finding.bulletinUrl,
+              bulletinNumber: finding.bulletinNumber,
               currentText: {
                 technical_rationale: finding.technical_rationale,
                 business_impact: finding.business_impact,
@@ -1283,7 +1422,7 @@ export function applyLifecycleNarration(findings: LifecycleFinding[], narrations
     if (!narration) return finding;
     return {
       ...finding,
-      technical_rationale: boundedNarrationText(narration.technical_rationale, finding.technical_rationale),
+      technical_rationale: ensureLifecycleNarrativeFacts(finding, boundedNarrationText(narration.technical_rationale, finding.technical_rationale)),
       business_impact: boundedNarrationText(narration.business_impact, finding.business_impact),
       recommendation: boundedNarrationText(narration.recommendation, finding.recommendation)
     };
@@ -1295,6 +1434,10 @@ export function buildLifecycleNarrationSystemPrompt() {
     "Eres un redactor tecnico para hallazgos lifecycle ya decididos por un motor determinístico.",
     "NO cambies el hallazgo, estado, severidad, categoria de remediacion, fechas, fuente ni equipo.",
     "Solo redacta technical_rationale, business_impact y recommendation en espanol profesional y conciso.",
+    "En hardware, referencia explicitamente el SKU/PID, modelo, id del equipo, rol, sitio, fechas End of Sale y ultima fecha de soporte cuando existan, y el link publico de Cisco cuando exista.",
+    "En software, referencia explicitamente la version, id del equipo, rol, sitio, fechas End of Sale y ultima fecha de soporte cuando existan, y el link publico de Cisco cuando exista.",
+    "Diferencia claramente si el riesgo proviene de hardware o de software.",
+    "La recomendacion debe ser accionable: reemplazo/upgrade de plataforma para hardware, o upgrade/migracion a release soportado para software.",
     "No inventes soporte, fechas, boletines ni evidencia no incluida."
   ].join("\n");
 }
@@ -1323,12 +1466,20 @@ function lifecycleNarrationResultSchema() {
   };
 }
 
-function lifecycleFindingsToScopeAnalysisFindings(findings: LifecycleFinding[], packet: ReturnType<typeof buildAIScopePacket>) {
+export function lifecycleFindingsToScopeAnalysisFindings(findings: LifecycleFinding[], packet: ReturnType<typeof buildAIScopePacket>) {
   const evidenceById = new Map(fullEvidenceCatalogForPacket(packet).map((ref) => [ref.id, ref]));
   return findings.map((finding) => {
     const evidenceRefs = finding.evidenceRefs.filter((ref) => evidenceById.has(ref)).slice(0, 8);
+    const lifecycleSummaryEvidence = {
+      source_type: "document",
+      source_name: finding.source === "software" ? "Software lifecycle lookup" : "Hardware lifecycle lookup",
+      hostname: finding.device,
+      command: null,
+      excerpt: lifecycleFindingEvidenceExcerpt(finding)
+    };
     const evidence = evidenceRefs.length > 0
-      ? evidenceRefs.map((refId) => {
+      ? [
+        ...evidenceRefs.map((refId) => {
           const ref = evidenceById.get(refId);
           return {
             source_type: ref?.sourceFile ? "cli" : "document",
@@ -1337,14 +1488,10 @@ function lifecycleFindingsToScopeAnalysisFindings(findings: LifecycleFinding[], 
             command: ref?.command ?? null,
             excerpt: ref?.excerpt ?? refId
           };
-        })
-      : [{
-          source_type: "document",
-          source_name: finding.source === "software" ? "Software lifecycle lookup" : "Hardware lifecycle lookup",
-          hostname: finding.device,
-          command: null,
-          excerpt: lifecycleFindingEvidenceExcerpt(finding)
-        }];
+        }),
+        lifecycleSummaryEvidence
+      ]
+      : [lifecycleSummaryEvidence];
     return {
       finding_id: finding.id,
       scope: "lifecycle",
@@ -1364,21 +1511,55 @@ function lifecycleFindingsToScopeAnalysisFindings(findings: LifecycleFinding[], 
       remediation_steps: lifecycleRemediationSteps(finding),
       validation_questions: finding.validation_questions,
       related_devices: finding.affectedAssets,
-      related_sites: [],
+      related_sites: finding.site ? [finding.site] : [],
       dependencies: ["Inventario lifecycle", finding.source === "software" ? "Version de software" : "PID hardware"],
       lifecycle_status: finding.status,
       lifecycle_source: finding.source,
-      lifecycle_dates: finding.dates
+      lifecycle_dates: finding.dates,
+      ...(isEnrichedFindingsEnabled() ? lifecycleEnrichedFindingFields(finding) : {})
     };
   });
 }
 
 function lifecycleFindingEvidenceExcerpt(finding: LifecycleFinding) {
+  const asset = finding.source === "software"
+    ? `version ${finding.softwareVersion || finding.productId || "no identificada"}`
+    : `${finding.model || "hardware"}${finding.productId ? ` (PID ${finding.productId})` : ""}`;
   const dates = [
-    finding.dates.endOfSaleDate ? `End-of-Sale ${finding.dates.endOfSaleDate}` : "",
+    finding.dates.endOfSaleDate ? `End of Sale ${finding.dates.endOfSaleDate}` : "",
     finding.dates.lastDateOfSupport ? `Last Date of Support ${finding.dates.lastDateOfSupport}` : ""
   ].filter(Boolean).join("; ");
-  return `${finding.device}: ${finding.source} lifecycle ${finding.status}${dates ? ` (${dates})` : ""}.`;
+  const ciscoRef = finding.bulletinUrl ? ` Cisco ${finding.bulletinUrl}.` : "";
+  return `${finding.device}${finding.deviceId ? ` (id ${finding.deviceId})` : ""}: ${asset}; rol ${finding.role}; sitio ${finding.site || "no especificado"}; lifecycle ${finding.source} ${finding.status}${dates ? `; ${dates}` : ""}.${ciscoRef}`;
+}
+
+function lifecycleEnrichedFindingFields(finding: LifecycleFinding) {
+  const asset = finding.source === "software"
+    ? `version ${finding.softwareVersion || finding.productId || "no identificada"}`
+    : `PID ${finding.productId || finding.model || "no identificado"}`;
+  return {
+    probable_cause: finding.status === "obsolete"
+      ? `${asset} obsoleto o sin ruta de soporte vigente segun evidencia lifecycle disponible.`
+      : `${asset} con hito Cisco lifecycle ${finding.status} segun fechas EoX/EoS disponibles.`,
+    technical_impact: finding.source === "software"
+      ? "La version puede quedar sin correcciones, soporte del fabricante y compatibilidad validada para incidentes o cambios."
+      : "La plataforma puede enfrentar restricciones de reemplazo, soporte del fabricante, RMA y continuidad operacional ante fallas.",
+    probability_of_failure: lifecycleProbabilityOfFailure(finding),
+    impact_if_fails: lifecycleImpactIfFails(finding)
+  };
+}
+
+function lifecycleProbabilityOfFailure(finding: LifecycleFinding) {
+  if (finding.status === "obsolete" || finding.status === "end_of_support") return "likely";
+  if (finding.criticality === "critical" || finding.criticality === "high") return "possible";
+  return "unlikely";
+}
+
+function lifecycleImpactIfFails(finding: LifecycleFinding) {
+  if (finding.criticality === "critical" && (finding.status === "obsolete" || finding.status === "end_of_support")) return "severe";
+  if (finding.criticality === "critical" || finding.criticality === "high") return "significant";
+  if (finding.criticality === "medium") return "moderate";
+  return "minor";
 }
 
 function lifecycleRemediationSteps(finding: LifecycleFinding) {
@@ -1399,6 +1580,23 @@ function lifecycleRemediationSteps(finding: LifecycleFinding) {
 function boundedNarrationText(value: unknown, fallback: string) {
   const text = String(value ?? "").trim();
   return text ? text.slice(0, 1600) : fallback;
+}
+
+function ensureLifecycleNarrativeFacts(finding: LifecycleFinding, text: string) {
+  const requiredFacts = [
+    finding.source === "software" ? finding.softwareVersion || finding.productId : finding.productId || finding.model,
+    finding.deviceId,
+    finding.role,
+    finding.site,
+    finding.dates.endOfSaleDate,
+    finding.dates.lastDateOfSupport,
+    finding.bulletinUrl
+  ].filter(Boolean) as string[];
+  const missingRequiredFact = requiredFacts.some((fact) => !text.includes(fact));
+  if (!missingRequiredFact) return text;
+  const evidenceSummary = lifecycleFindingEvidenceExcerpt(finding);
+  if (text.includes(evidenceSummary)) return text;
+  return `${text} Evidencia lifecycle: ${evidenceSummary}`;
 }
 
 async function runReduceStage(input: {
@@ -1565,7 +1763,7 @@ async function runReduceStage(input: {
         status: "completed",
         inputHash,
         promptVersion: getPromptVersion(),
-        engineVersion,
+        engineVersion: getEngineVersion(),
         resultJson: resultJson as Prisma.InputJsonValue,
         executiveSummary: validation.validFindings.length > 0
           ? `Reduce transversal: ${validation.validFindings.length} hallazgos compuestos cross-dominio.`
@@ -1577,7 +1775,7 @@ async function runReduceStage(input: {
         status: "completed",
         inputHash,
         promptVersion: getPromptVersion(),
-        engineVersion,
+        engineVersion: getEngineVersion(),
         resultJson: resultJson as Prisma.InputJsonValue,
         executiveSummary: validation.validFindings.length > 0
           ? `Reduce transversal: ${validation.validFindings.length} hallazgos compuestos cross-dominio.`
@@ -1794,7 +1992,7 @@ async function runSynthesisTarget(
         status: "completed",
         inputHash,
         promptVersion: getPromptVersion(),
-        engineVersion,
+        engineVersion: getEngineVersion(),
         resultJson: resultJson as Prisma.InputJsonValue,
         executiveSummary,
         findingsJson: validation.valid as Prisma.InputJsonValue,
@@ -1804,7 +2002,7 @@ async function runSynthesisTarget(
         status: "completed",
         inputHash,
         promptVersion: getPromptVersion(),
-        engineVersion,
+        engineVersion: getEngineVersion(),
         resultJson: resultJson as Prisma.InputJsonValue,
         executiveSummary,
         findingsJson: validation.valid as Prisma.InputJsonValue,
@@ -1838,7 +2036,7 @@ async function callOpenAIForScopeAnalysis(
   previousArtifacts: any[],
   apiKey: string,
   model: string,
-  debug?: { jobId: string; assessmentId: string; debugCapture: boolean; systemPrompt?: string; scopePlaybook?: ScopePlaybook | null; deviceOsByName?: DeviceOsLookup }
+  debug?: { jobId: string; assessmentId: string; debugCapture: boolean; systemPrompt?: string; scopePlaybook?: ScopePlaybook | null; deviceOsByName?: DeviceOsLookup; coveragePlan?: CoveragePlanEntry[] }
 ) {
   if (!apiKey) {
     throw new Error("OpenAI API key no esta configurada para el motor persistente.");
@@ -1847,8 +2045,10 @@ async function callOpenAIForScopeAnalysis(
   const deterministicFindings = scopePacket.memory.acceptedOrDeterministicFindings ?? [];
   const deterministicScopeFindings = deterministicFindingsToScopeAnalysisFindings(deterministicFindings, scopePacket);
   const promptVersion = getPromptVersion();
-  const audit = createAIAnalysisAudit({ packet: scopePacket, model, promptVersion, engineVersion });
-  const resultSchema = usesPatternQuery(scopeId) ? scopeAnalysisResultSchemaForPattern(patternForScope(scopeId)) : scopeAnalysisResultSchema();
+  const audit = createAIAnalysisAudit({ packet: scopePacket, model, promptVersion, engineVersion: getEngineVersion() });
+  const coveragePlan = shouldUseCoverageLedger(scopeId, debug?.coveragePlan) ? debug?.coveragePlan : undefined;
+  const schemaScopeId = coveragePlan ? scopeId : undefined;
+  const resultSchema = usesPatternQuery(scopeId) ? scopeAnalysisResultSchemaForPattern(patternForScope(scopeId), schemaScopeId) : scopeAnalysisResultSchema(schemaScopeId);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), Number(process.env.OPENAI_TIMEOUT_MS ?? 90000));
   const cancelPoll = debug?.jobId ? pollJobCancellation(debug.jobId, controller) : null;
@@ -1875,9 +2075,18 @@ async function callOpenAIForScopeAnalysis(
               "No devuelvas findings vacio cuando la memoria tenga candidatos validos soportados por evidencia.",
               "Incluye evidence_refs, related_fact_ids, related_metric_ids y related_correlation_ids usando solo IDs existentes en el packet.",
               "Incluye remediation_category con una de las 4 categorias accionables; usa pending_validation solo si no aplica remediacion o falta validacion del arquitecto.",
+              ...(coveragePlan ? [
+                "Evalua CADA criterio del coveragePlan para CADA equipo indicado.",
+                "En cada hallazgo, completa criterion_ids con los criterios del playbook que aborda.",
+                "Si un criterio aplicable NO se puede evaluar por falta de evidencia, agregalo a evidence_gaps con device_hostname, criterion_id y reason.",
+                "Por cada equipo, lista en evaluated_clean los criterios del coveragePlan que SI evaluaste y resultaron SIN problema usando solo device_hostname y criterion_id.",
+                "Un criterio aplicable debe quedar en exactamente uno de: un finding (criterion_ids), evidence_gaps o evaluated_clean.",
+                "NO inventes un hallazgo para criterios sin problema: reportalos en evaluated_clean."
+              ] : []),
               ...(isGapConsolidationEnabled() ? ["Si el hallazgo es sobre falta o insuficiencia de datos recolectados (cobertura de vecinos, metricas, monitoreo), clasificalo como visibility_gap severidad low y no lo repitas por equipo."] : [])
             ],
             aiScopePacket: scopePacket,
+            ...(coveragePlan ? { coveragePlan } : {}),
             ...(debug?.deviceOsByName ? { deviceOsFamilies: serializeDeviceOsLookup(debug.deviceOsByName) } : {}),
             previousArtifacts: compactPreviousArtifacts(previousArtifacts),
             audit
@@ -1926,7 +2135,7 @@ async function callOpenAIForScopeAnalysis(
       });
       capturedFailure = true;
       if (response.status === 401 || response.status === 403 || deterministicScopeFindings.length === 0) throw new Error(message);
-      return deterministicScopeAnalysisFallback(scopeId, deterministicScopeFindings, message, debug?.scopePlaybook ?? null, debug?.deviceOsByName);
+      return deterministicScopeAnalysisFallback(scopeId, deterministicScopeFindings, message, debug?.scopePlaybook ?? null, debug?.deviceOsByName, coveragePlan);
     }
     const parsed = JSON.parse(extractResponseText(payload) || "{\"findings\":[],\"recommendations\":[]}");
     const validation = validateScopeAnalysisResult(parsed, scopePacket);
@@ -1947,6 +2156,9 @@ async function callOpenAIForScopeAnalysis(
     const mergedFindings = mergeScopeFindings(validation.validFindings, deterministicScopeFindings);
     const gapProcessedFindings = applyGapConsolidationForScope(scopeId, mergedFindings);
     const exclusionResult = applyScopePlaybookExclusions(scopeId, gapProcessedFindings, debug?.scopePlaybook ?? null, debug?.deviceOsByName);
+    const evidenceGaps = coveragePlan ? normalizeEvidenceGaps(parsed.evidence_gaps) : [];
+    const evaluatedClean = coveragePlan ? normalizeEvaluatedClean(parsed.evaluated_clean) : [];
+    const coverageLedger = coveragePlan ? computeCoverageLedger(coveragePlan, exclusionResult.kept, evidenceGaps, evaluatedClean) : undefined;
     return {
       ...parsed,
       phase: "scope_analysis",
@@ -1955,6 +2167,7 @@ async function callOpenAIForScopeAnalysis(
       audit,
       packetSummary: summarizeScopePacket(scopePacket),
       findings: exclusionResult.kept,
+      ...(coveragePlan ? { evidence_gaps: evidenceGaps, evaluated_clean: evaluatedClean, coverageLedger } : {}),
       suppressedFindings: exclusionResult.suppressed,
       rejectedFindings: validation.rejectedFindings,
       recommendations: Array.from(new Set([...(Array.isArray(parsed.recommendations) ? parsed.recommendations : []), ...exclusionResult.kept.map((finding: any) => finding.recommendation).filter(Boolean)]))
@@ -1977,7 +2190,7 @@ async function callOpenAIForScopeAnalysis(
     }
     if (deterministicScopeFindings.length === 0) throw error;
     const message = error instanceof Error ? error.message : "OpenAI no respondio durante scope_analysis.";
-    return deterministicScopeAnalysisFallback(scopeId, deterministicScopeFindings, message, debug?.scopePlaybook ?? null, debug?.deviceOsByName);
+    return deterministicScopeAnalysisFallback(scopeId, deterministicScopeFindings, message, debug?.scopePlaybook ?? null, debug?.deviceOsByName, coveragePlan);
   } finally {
     clearTimeout(timeout);
     if (cancelPoll) clearInterval(cancelPoll);
@@ -2009,7 +2222,7 @@ async function captureOpenAIInteraction(
     phaseName: "scope_analysis",
     model: input.model,
     promptVersion: getPromptVersion(),
-    engineVersion,
+    engineVersion: getEngineVersion(),
     httpStatus: input.httpStatus,
     status: input.status,
     latencyMs: input.latencyMs,
@@ -2047,7 +2260,7 @@ async function captureReduceInteraction(
     phaseName: "reduce",
     model: input.model,
     promptVersion: getPromptVersion(),
-    engineVersion,
+    engineVersion: getEngineVersion(),
     httpStatus: input.httpStatus,
     status: input.status,
     latencyMs: input.latencyMs,
@@ -2086,7 +2299,7 @@ async function captureSynthesisInteraction(
     phaseName: "synthesis",
     model: input.model,
     promptVersion: getPromptVersion(),
-    engineVersion,
+    engineVersion: getEngineVersion(),
     httpStatus: input.httpStatus,
     status: input.status,
     latencyMs: input.latencyMs,
@@ -2101,19 +2314,137 @@ async function captureSynthesisInteraction(
   });
 }
 
-function deterministicScopeAnalysisFallback(scopeId: AIAnalysisScopeId, findings: any[], reason: string, playbook?: ScopePlaybook | null, deviceOsByName?: DeviceOsLookup) {
+function deterministicScopeAnalysisFallback(
+  scopeId: AIAnalysisScopeId,
+  findings: any[],
+  reason: string,
+  playbook?: ScopePlaybook | null,
+  deviceOsByName?: DeviceOsLookup,
+  coveragePlan?: CoveragePlanEntry[]
+) {
   const gapProcessedFindings = applyGapConsolidationForScope(scopeId, findings);
   const exclusionResult = applyScopePlaybookExclusions(scopeId, gapProcessedFindings, playbook ?? null, deviceOsByName);
+  const coverageLedger = coveragePlan ? computeCoverageLedger(coveragePlan, exclusionResult.kept, [], []) : undefined;
   return {
     phase: "scope_analysis",
     scopeId,
     pattern: usesPatternQuery(scopeId) ? patternForScope(scopeId) : "generic",
     provider: "deterministic-fallback",
     findings: exclusionResult.kept,
+    ...(coveragePlan ? { evidence_gaps: [], evaluated_clean: [], coverageLedger } : {}),
     suppressedFindings: exclusionResult.suppressed,
     recommendations: Array.from(new Set(exclusionResult.kept.map((finding: any) => finding.recommendation).filter(Boolean))),
     limitations: [`OpenAI no completo la fase scope_analysis; se usaron candidatos determinísticos con evidencia. Detalle: ${reason}`]
   };
+}
+
+type EvidenceGap = {
+  device_hostname: string;
+  criterion_id: string;
+  reason: string;
+};
+
+type EvaluatedClean = {
+  device_hostname: string;
+  criterion_id: string;
+};
+
+function shouldUseCoverageLedger(scopeId: AIAnalysisScopeId, coveragePlan: CoveragePlanEntry[] | undefined) {
+  if (!isCoverageLedgerEnabled() || !isCoverageLedgerScope(scopeId)) return false;
+  return Boolean(coveragePlan?.some((entry) => entry.criteria.length > 0));
+}
+
+function normalizeEvidenceGaps(value: unknown): EvidenceGap[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => ({
+      device_hostname: String((item as any)?.device_hostname ?? "").trim(),
+      criterion_id: String((item as any)?.criterion_id ?? "").trim(),
+      reason: String((item as any)?.reason ?? "").trim()
+    }))
+    .filter((item) => item.device_hostname && item.criterion_id && item.reason);
+}
+
+function normalizeEvaluatedClean(value: unknown): EvaluatedClean[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => ({
+      device_hostname: String((item as any)?.device_hostname ?? "").trim(),
+      criterion_id: String((item as any)?.criterion_id ?? "").trim()
+    }))
+    .filter((item) => item.device_hostname && item.criterion_id);
+}
+
+export function computeCoverageLedger(
+  coveragePlan: CoveragePlanEntry[],
+  findings: any[],
+  evidenceGaps: Array<{ device_hostname?: unknown; criterion_id?: unknown; reason?: unknown }>,
+  evaluatedClean: Array<{ device_hostname?: unknown; criterion_id?: unknown }>
+): CoverageLedgerEntry[] {
+  return [...coveragePlan]
+    .sort((left, right) => left.deviceHostname.localeCompare(right.deviceHostname))
+    .map((entry) => {
+      const applicableCriteria = new Set(entry.criteria.map((criterion) => criterion.id));
+      const withFinding = new Set<string>();
+      const gap = new Set<string>();
+      const clean = new Set<string>();
+
+      for (const finding of Array.isArray(findings) ? findings : []) {
+        if (!findingTouchesDevice(finding, entry.deviceHostname)) continue;
+        for (const criterionId of stringArray((finding as any)?.criterion_ids)) {
+          if (applicableCriteria.has(criterionId)) withFinding.add(criterionId);
+        }
+      }
+
+      for (const evidenceGap of Array.isArray(evidenceGaps) ? evidenceGaps : []) {
+        const deviceHostname = String(evidenceGap?.device_hostname ?? "").trim();
+        const criterionId = String(evidenceGap?.criterion_id ?? "").trim();
+        if (normalizeDeviceName(deviceHostname) === normalizeDeviceName(entry.deviceHostname) && applicableCriteria.has(criterionId)) {
+          gap.add(criterionId);
+        }
+      }
+
+      for (const criterionId of withFinding) gap.delete(criterionId);
+
+      for (const evaluatedItem of Array.isArray(evaluatedClean) ? evaluatedClean : []) {
+        const deviceHostname = String(evaluatedItem?.device_hostname ?? "").trim();
+        const criterionId = String(evaluatedItem?.criterion_id ?? "").trim();
+        if (normalizeDeviceName(deviceHostname) === normalizeDeviceName(entry.deviceHostname) && applicableCriteria.has(criterionId)) {
+          clean.add(criterionId);
+        }
+      }
+
+      for (const criterionId of withFinding) clean.delete(criterionId);
+      for (const criterionId of gap) clean.delete(criterionId);
+      const covered = new Set([...withFinding, ...gap, ...clean]);
+      const notEvaluated = Math.max(0, applicableCriteria.size - covered.size);
+      return {
+        deviceHostname: entry.deviceHostname,
+        applicable: applicableCriteria.size,
+        withFinding: withFinding.size,
+        gap: gap.size,
+        clean: clean.size,
+        notEvaluated
+      };
+    });
+}
+
+function findingTouchesDevice(finding: any, deviceHostname: string) {
+  const expected = normalizeDeviceName(deviceHostname);
+  const candidates = [
+    ...stringArray(finding?.related_devices),
+    String(finding?.entity_target ?? ""),
+    ...(Array.isArray(finding?.evidence) ? finding.evidence.map((item: any) => String(item?.hostname ?? "")) : [])
+  ];
+  return candidates.some((candidate) => normalizeDeviceName(candidate) === expected);
+}
+
+function normalizeDeviceName(value: unknown) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function stringArray(value: unknown) {
+  return Array.isArray(value) ? value.map((item) => String(item).trim()).filter(Boolean) : [];
 }
 
 function synthesisScopePlaceholder(scopeId: AIAnalysisScopeId) {
@@ -2186,12 +2517,14 @@ export function deterministicFindingsToScopeAnalysisFindings(findings: any[], pa
         ...normalizeStringArray(finding.related_correlation_ids),
         ...normalizeStringArray(finding.relatedCorrelationIds)
       ]).filter((id) => fullCorrelationIds.has(id)).slice(0, 12);
+      const findingType = evidenceRefs.length > 0 ? "probable_issue" : "validation_required";
+      const severity = normalizeScopeSeverity(finding.severity);
       return {
         finding_id: String(finding.id ?? "deterministic_finding"),
         scope: packet.scopeId,
         title: String(finding.title ?? "Hallazgo deterministico"),
-        finding_type: evidenceRefs.length > 0 ? "probable_issue" : "validation_required",
-        severity: normalizeScopeSeverity(finding.severity),
+        finding_type: findingType,
+        severity,
         confidence: normalizeScopeConfidence(finding.confidence),
         evidence_refs: evidenceRefs,
         related_fact_ids: relatedFactIds,
@@ -2215,9 +2548,19 @@ export function deterministicFindingsToScopeAnalysisFindings(findings: any[], pa
         validation_questions: ["Confirmar si la evidencia representa el estado actual de produccion."],
         related_devices: Array.isArray(finding.affectedAssets) ? finding.affectedAssets : [],
         related_sites: [],
-        dependencies: ["Evidencia del assessment"]
+        dependencies: ["Evidencia del assessment"],
+        ...(isEnrichedFindingsEnabled() && findingType !== "validation_required" ? deterministicEnrichedFindingFields(severity) : {})
       };
     });
+}
+
+function deterministicEnrichedFindingFields(severity: string) {
+  return {
+    probable_cause: "Regla deterministica activada por evidencia trazable del assessment.",
+    technical_impact: "Puede afectar disponibilidad, seguridad u operacion segun el alcance confirmado.",
+    probability_of_failure: severity === "critical" || severity === "high" ? "likely" : severity === "medium" ? "possible" : "unlikely",
+    impact_if_fails: severity === "critical" ? "severe" : severity === "high" ? "significant" : severity === "medium" ? "moderate" : "minor"
+  };
 }
 
 function normalizeStringArray(value: unknown) {
@@ -2282,6 +2625,18 @@ export function isDeterministicOperationsEnabled() {
   return process.env.AI_DETERMINISTIC_OPERATIONS === "1";
 }
 
+function isRemediationQualityEnabled() {
+  return process.env.AI_REMEDIATION_QUALITY === "1";
+}
+
+function isOperationsPlaybookEnabled() {
+  return process.env.AI_OPERATIONS_PLAYBOOK === "1";
+}
+
+function isTopologyPlaybookEnabled() {
+  return process.env.AI_TOPOLOGY_PLAYBOOK === "1";
+}
+
 function openAISynthesisModel() {
   return process.env.OPENAI_SYNTHESIS_MODEL || openAIReduceModel();
 }
@@ -2340,7 +2695,7 @@ export function buildScopeSystemPrompt(scopeId: AIAnalysisScopeId) {
     "Todo hallazgo debe incluir remediation_category. Usa professional_services, new_technology, platform_upgrade u operational_change para hallazgos accionables; pending_validation solo para gaps, validaciones o casos que el arquitecto debe categorizar.",
     "Respeta la estrategia, tipos de hallazgo y reglas de validacion especificas del ambito.",
     "Si la evidencia es insuficiente, usa validation_required o visibility_gap en vez de inferir.",
-    `Prompt version: ${promptVersion}. Engine version: ${engineVersion}.`
+    `Prompt version: ${promptVersion}. Engine version: ${getEngineVersion()}.`
   ];
   if (usesPatternQuery(scopeId) && patternForScope(scopeId) === "entity") {
     lines.splice(lines.length - 1, 0, "Razona por equipo/grupo contra el estandar/control esperado. Para cada hallazgo completa `entity_target` (equipo o grupo), `expected_state`, `observed_state` y `standard_or_control`. No infieras estado sin fact/evidencia; usa visibility_gap/validation_required si falta.");
@@ -2350,6 +2705,12 @@ export function buildScopeSystemPrompt(scopeId: AIAnalysisScopeId) {
   }
   if (usesPatternQuery(scopeId) && patternForScope(scopeId) === "aggregation") {
     lines.splice(lines.length - 1, 0, "Razona por agregacion temporal/recurrencia o por ausencia (gap). Para cada hallazgo completa `aggregation_basis` (ventana/recurrencia o ausencia detectada), `occurrence_count` (entero), `time_window` y `correlated_entity`. No marques 'recurrente' con una sola evidencia: requiere >=2 evidencias o una ventana temporal; si es evento aislado usa probable_issue/validation_required, y si falta monitoreo/documentacion usa visibility_gap.");
+  }
+  if (isEnrichedFindingsEnabled()) {
+    lines.splice(lines.length - 1, 0, "Para cada hallazgo accionable separa `probable_cause` (causa probable) y `technical_impact` (impacto tecnico) de `technical_rationale`; completa `probability_of_failure` con very_likely, likely, possible, unlikely o very_unlikely, y `impact_if_fails` con severe, significant, moderate, minor o negligible. Los visibility_gap y validation_required pueden omitir esos campos cuando no haya evidencia suficiente.");
+  }
+  if (isRemediationQualityEnabled()) {
+    lines.splice(lines.length - 1, 0, "La recommendation debe ser ACCIONABLE, concreta y realista (accion especifica + objeto + criterio de cierre) y completa remediation_steps con pasos concretos; nunca uses recomendaciones genericas como 'validar', 'revisar' o 'verificar' a secas. Para hallazgos accionables usa una remediation_category real (no pending_validation).");
   }
   if (isPerDeviceEnabled() && engineForScope(scopeId) === "ai-per-device") {
     lines.splice(lines.length - 1, 0, "Modo por equipo: el contexto incluye varios equipos con su rol, vecinos y protocolos. Genera hallazgos POR EQUIPO; cada hallazgo indica en `related_devices` el equipo especifico. No mezcles equipos en un mismo hallazgo salvo interaccion explicita entre ellos.");
@@ -2374,7 +2735,7 @@ export function buildDesignRubricSystemPrompt(basePrompt: string, guidelines: Re
 }
 
 export function buildScopePlaybookSystemPrompt(scopeId: AIAnalysisScopeId, playbook?: ScopePlaybook | null) {
-  if (!playbook || !isSupportedScopePlaybookScopeId(scopeId) || engineForScope(scopeId) !== "ai-per-device" || !isScopePlaybookEnabled()) return undefined;
+  if (!playbook || !scopePlaybookAppliesToScope(scopeId)) return undefined;
   const playbookSection = buildPlaybookPromptSection(playbook);
   if (!playbookSection) return undefined;
   return [
@@ -2389,10 +2750,25 @@ export function buildScopePlaybookSystemPrompt(scopeId: AIAnalysisScopeId, playb
 }
 
 export function applyScopePlaybookExclusions(scopeId: AIAnalysisScopeId, findings: any[], playbook?: ScopePlaybook | null, deviceOsByName?: DeviceOsLookup) {
-  if (!playbook || !isSupportedScopePlaybookScopeId(scopeId) || engineForScope(scopeId) !== "ai-per-device" || !isScopePlaybookEnabled()) {
+  if (!playbook || !scopePlaybookAppliesToScope(scopeId)) {
     return { kept: findings, suppressed: [] as ReturnType<typeof applyExclusions>["suppressed"] };
   }
   return applyExclusions(findings, playbook.exclusions, { deviceOsByName });
+}
+
+function scopePlaybookAppliesToScope(scopeId: AIAnalysisScopeId) {
+  return isSupportedScopePlaybookScopeId(scopeId)
+    && isScopePlaybookEnabled()
+    && (engineForScope(scopeId) === "ai-per-device" || (scopeId === "topology" && isTopologyPlaybookEnabled()));
+}
+
+function scopePlaybookContextAppliesToScope(scopeId: AIAnalysisScopeId) {
+  return scopePlaybookAppliesToScope(scopeId)
+    || (isSupportedScopePlaybookScopeId(scopeId) && scopeId === "operations" && isOperationsPlaybookEnabled());
+}
+
+function shouldLoadScopePlaybookContext() {
+  return isScopePlaybookEnabled() || isOperationsPlaybookEnabled();
 }
 
 function applyGapConsolidationForScope(scopeId: AIAnalysisScopeId, findings: any[]) {
@@ -2457,81 +2833,21 @@ function buildSynthesisSystemPrompt(target: SynthesisTarget) {
   ].join("\n");
 }
 
-function scopeAnalysisResultSchema() {
+function scopeAnalysisResultSchema(scopeId?: AIAnalysisScopeId) {
   return {
     type: "object",
     additionalProperties: false,
-    required: ["phase", "scopeId", "findings", "recommendations", "limitations"],
+    required: resultRequiredProperties(scopeId),
     properties: {
       phase: { type: "string" },
       scopeId: { type: "string" },
       findings: {
         type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: [
-            "finding_id",
-            "scope",
-            "title",
-            "finding_type",
-            "severity",
-            "confidence",
-            "evidence_refs",
-            "related_fact_ids",
-            "related_metric_ids",
-            "related_correlation_ids",
-            "evidence",
-            "technical_rationale",
-            "business_impact",
-            "recommendation",
-            "remediation_category",
-            "remediation_steps",
-            "validation_questions",
-            "related_devices",
-            "related_sites",
-            "dependencies"
-          ],
-          properties: {
-            finding_id: { type: "string" },
-            scope: { type: "string" },
-            title: { type: "string" },
-            finding_type: { type: "string", enum: ["confirmed_finding", "probable_issue", "correlation_suspicion", "visibility_gap", "validation_required"] },
-            severity: { type: "string", enum: ["critical", "high", "medium", "low", "informational"] },
-            confidence: { type: "string", enum: ["high", "medium", "low"] },
-            evidence_refs: { type: "array", items: { type: "string" } },
-            related_fact_ids: { type: "array", items: { type: "string" } },
-            related_metric_ids: { type: "array", items: { type: "string" } },
-            related_correlation_ids: { type: "array", items: { type: "string" } },
-            evidence: {
-              type: "array",
-              items: {
-                type: "object",
-                additionalProperties: false,
-                required: ["source_type", "source_name", "hostname", "command", "excerpt"],
-                properties: {
-                  source_type: { type: "string", enum: ["inventory", "cli", "performance", "interview", "document"] },
-                  source_name: { type: "string" },
-                  hostname: { type: ["string", "null"] },
-                  command: { type: ["string", "null"] },
-                  excerpt: { type: "string" }
-                }
-              }
-            },
-            technical_rationale: { type: "string" },
-            business_impact: { type: "string" },
-            recommendation: { type: "string" },
-            remediation_category: { type: "string", enum: remediationCategoryEnum },
-            remediation_steps: { type: "array", items: { type: "string" } },
-            validation_questions: { type: "array", items: { type: "string" } },
-            related_devices: { type: "array", items: { type: "string" } },
-            related_sites: { type: "array", items: { type: "string" } },
-            dependencies: { type: "array", items: { type: "string" } }
-          }
-        }
+        items: baseFindingSchema(scopeId)
       },
       recommendations: { type: "array", items: { type: "string" } },
-      limitations: { type: "array", items: { type: "string" } }
+      limitations: { type: "array", items: { type: "string" } },
+      ...coverageResultProperties(scopeId)
     }
   };
 }
@@ -2973,6 +3289,9 @@ export function mergeScopePartitionResults(scopeId: AIAnalysisScopeId, results: 
     `merged from ${sortedPartitions.length} partitions`
   ];
   const rejectedFindings = sortedResults.flatMap((result) => Array.isArray(result?.rejectedFindings) ? result.rejectedFindings : []);
+  const evidenceGaps = sortedResults.flatMap((result) => Array.isArray(result?.evidence_gaps) ? result.evidence_gaps : []);
+  const evaluatedClean = sortedResults.flatMap((result) => Array.isArray(result?.evaluated_clean) ? result.evaluated_clean : []);
+  const coverageLedger = sortedResults.flatMap((result) => Array.isArray(result?.coverageLedger) ? result.coverageLedger : []);
 
   return {
     phase: "scope_analysis",
@@ -2981,6 +3300,9 @@ export function mergeScopePartitionResults(scopeId: AIAnalysisScopeId, results: 
     findings,
     recommendations,
     limitations,
+    ...(evidenceGaps.length > 0 ? { evidence_gaps: evidenceGaps } : {}),
+    ...(evaluatedClean.length > 0 ? { evaluated_clean: evaluatedClean } : {}),
+    ...(coverageLedger.length > 0 ? { coverageLedger } : {}),
     rejectedFindings,
     partitions: sortedPartitions.length,
     partitionIds,
@@ -3162,12 +3484,14 @@ export function hashScopeInput(record: any, scopeId: AIAnalysisScopeId, options?
       ...(isEvidenceTieringEnabled() ? { evidenceTiering: true } : {}),
       ...(isDomainPartitionEnabled() ? { domainPartition: true } : {}),
       ...(isPerDeviceEnabled() && engineForScope(scopeId) === "ai-per-device" ? { perDevice: true } : {}),
+      ...(isCoverageLedgerEnabled() && isCoverageLedgerScope(scopeId) ? { coverageLedger: true } : {}),
       ...(isGapConsolidationEnabled() ? { gapConsolidation: true } : {}),
+      ...(isRemediationQualityEnabled() ? { remediationQuality: true } : {}),
       ...(isDeterministicLifecycleEnabled() && scopeId === "lifecycle" ? { deterministicLifecycle: true } : {}),
       ...(isDeterministicOperationsEnabled() && scopeId === "operations" ? { deterministicOperations: true } : {}),
       ...(usesDesignRubric(scopeId) && options?.designGuidelinesHash ? { designGuidelinesHash: options.designGuidelinesHash } : {}),
-      ...(isScopePlaybookEnabled() && isSupportedScopePlaybookScopeId(scopeId) && options?.scopePlaybookHash ? { scopePlaybookHash: options.scopePlaybookHash } : {}),
-      engineVersion,
+      ...(scopePlaybookContextAppliesToScope(scopeId) && options?.scopePlaybookHash ? { scopePlaybookHash: options.scopePlaybookHash } : {}),
+      engineVersion: getEngineVersion(),
       client: context.client,
       assessment: context.assessment,
       sourceCounts: context.sourceCounts,
@@ -3188,8 +3512,8 @@ async function loadScopePlaybookContext(): Promise<ScopePlaybookContext> {
 }
 
 function scopePlaybookForScope(scopeId: AIAnalysisScopeId, context: ScopePlaybookContext | null) {
-  if (!context || !isSupportedScopePlaybookScopeId(scopeId) || engineForScope(scopeId) !== "ai-per-device" || !isScopePlaybookEnabled()) return null;
-  return context[scopeId] ?? null;
+  if (!context || !scopePlaybookContextAppliesToScope(scopeId)) return null;
+  return context[scopeId as SupportedScopePlaybookScopeId] ?? null;
 }
 
 async function loadDesignRubricContext(assessmentId: string): Promise<DesignRubricContext> {
@@ -3211,7 +3535,7 @@ function hashReduceDigest(digest: ReduceDigest) {
   return createHash("sha256")
     .update(stableStringify({
       promptVersion: getPromptVersion(),
-      engineVersion,
+      engineVersion: getEngineVersion(),
       digest
     }))
     .digest("hex");
@@ -3222,7 +3546,7 @@ function hashSynthesisDigest(digest: SynthesisDigest, target: SynthesisTarget) {
     .update(stableStringify({
       target,
       promptVersion: getPromptVersion(),
-      engineVersion,
+      engineVersion: getEngineVersion(),
       digest
     }))
     .digest("hex");
@@ -3240,15 +3564,48 @@ export function scopesForJob(mode: AIAnalysisMode, scopeId: AIAnalysisScopeId | 
   const performanceEnabled = Boolean(record?.scope?.performanceAnalysis?.enabled);
   return fullAssessmentScopeOrder.filter((id) =>
     (id !== "performance" || performanceEnabled) &&
-    (id !== "operations" || operationsReady)
+    (id !== "operations" || operationsReady) &&
+    (!isTopologyPlaybookEnabled() || !FOLDED_TOPOLOGY_SCOPES.includes(id as (typeof FOLDED_TOPOLOGY_SCOPES)[number]))
   );
 }
 
 async function updateJobProgress(jobId: string) {
   const steps = await prisma.aiAnalysisJobStep.findMany({ where: { jobId } });
-  const completed = steps.filter((step) => step.status === "completed" || step.status === "skipped").length;
-  const progress = steps.length > 0 ? Math.round((completed / steps.length) * 100) : 0;
+  const progress = steps.length > 0
+    ? Math.round(steps.reduce((total, step) => total + progressValueForStep(step), 0) / steps.length)
+    : 0;
   await prisma.aiAnalysisJob.update({ where: { id: jobId }, data: { progress } });
+}
+
+async function updateRunningPhaseProgress(
+  jobId: string,
+  scopeId: AIAnalysisScopeId,
+  phase: AIAnalysisPhaseName,
+  progress: number
+) {
+  const normalizedProgress = Math.max(20, Math.min(95, Math.round(progress)));
+  await prisma.$transaction([
+    prisma.aiAnalysisJobStep.updateMany({
+      where: { jobId, scopeId, phaseName: phase, status: "running" },
+      data: { progress: normalizedProgress }
+    }),
+    prisma.aiAnalysisJob.update({
+      where: { id: jobId },
+      data: { currentPhase: `${scopeId}:${phase}` }
+    })
+  ]);
+  await updateJobProgress(jobId);
+}
+
+function partitionProgress(completedPartitions: number, totalPartitions: number) {
+  if (totalPartitions <= 0) return 20;
+  return 20 + (Math.max(0, Math.min(completedPartitions, totalPartitions)) / totalPartitions) * 70;
+}
+
+function progressValueForStep(step: { status: string; progress: number | null }) {
+  if (step.status === "completed" || step.status === "skipped") return 100;
+  if (step.status === "running") return Math.max(1, Math.min(99, Number(step.progress ?? 0)));
+  return 0;
 }
 
 async function skipScopeSteps(jobId: string, scopeId: AIAnalysisScopeId, inputHash: string, reason: string) {
@@ -3283,8 +3640,35 @@ async function cancelIfRequested(jobId: string) {
 async function failJob(jobId: string, message: string) {
   await prisma.aiAnalysisJob.update({
     where: { id: jobId },
-    data: { status: "failed", completedAt: new Date(), errorMessage: message, currentPhase: null }
+    data: { status: "failed", completedAt: new Date(), errorMessage: boundedFailureMessage(message), currentPhase: null }
   });
+}
+
+function formatFailedScopesMessage(
+  failedScopes: number,
+  completedScopes: number,
+  skippedScopes: number,
+  scopeFailures: string[]
+) {
+  const summary = `${failedScopes} ambitos fallaron; ${completedScopes} completados; ${skippedScopes} reutilizados.`;
+  const details = scopeFailures.slice(0, 3);
+  const suffix = scopeFailures.length > details.length ? ` (+${scopeFailures.length - details.length} mas)` : "";
+  return boundedFailureMessage(details.length > 0 ? `${summary} ${details.join(" | ")}${suffix}` : summary);
+}
+
+function formatScopeFailureMessage(scopeId: AIAnalysisScopeId, phaseName: string | null, message: string) {
+  const phaseLabel = phaseName ? `${scopeId}:${phaseName}` : scopeId;
+  return boundedFailureMessage(`${phaseLabel} fallo: ${message}`);
+}
+
+function errorMessageFromUnknown(error: unknown, fallback: string) {
+  return boundedFailureMessage(error instanceof Error ? error.message : fallback);
+}
+
+function boundedFailureMessage(message: string) {
+  const normalized = String(message || "").replace(/\s+/g, " ").trim();
+  if (!normalized) return "Error desconocido ejecutando analisis AI.";
+  return normalized.length > 700 ? `${normalized.slice(0, 697)}...` : normalized;
 }
 
 function jobToSnapshot(job: any): AIAnalysisJobSnapshot {

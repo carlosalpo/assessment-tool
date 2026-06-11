@@ -22,6 +22,7 @@ export type LifecycleInputDevice = {
   hostname?: string;
   model?: string;
   softwareVersion?: string;
+  site?: string;
   role?: string;
   criticality?: string;
   evidenceRefs?: string[];
@@ -68,6 +69,13 @@ export type LifecycleFinding = {
   remediationCategory: RemediationCategory;
   criticality: "critical" | "high" | "medium" | "low";
   role: string;
+  productId?: string;
+  model?: string;
+  softwareVersion?: string;
+  site?: string;
+  deviceId?: string;
+  bulletinUrl?: string;
+  bulletinNumber?: string;
   title: string;
   affectedAssets: string[];
   evidenceRefs: string[];
@@ -149,7 +157,7 @@ export function buildLifecycleFindings(
 ): LifecycleFinding[] {
   const devices = Array.isArray(contextOrDevices) ? contextOrDevices : Array.isArray(contextOrDevices?.devices) ? contextOrDevices.devices : [];
   return devices
-    .map((device) => {
+    .map((device): LifecycleFinding | null => {
       const evaluation = inferLifecycleEvaluation(device, eoxRecords);
       if (evaluation.status === "unknown" || evaluation.status === "active" || !evaluation.source) return null;
       const component = evaluation.source === "hardware" ? evaluation.hardware : evaluation.software;
@@ -162,6 +170,13 @@ export function buildLifecycleFindings(
       const remediationCategory = remediationCategoryForLifecycle(status, evaluation.source);
       const sourceLabel = evaluation.source === "hardware" ? "hardware" : "software";
       const statusLabel = lifecycleStatusLabel(status);
+      const productId = component.key;
+      const model = cleanLifecycleText(device.model);
+      const softwareVersion = cleanLifecycleText(device.softwareVersion);
+      const site = cleanLifecycleText(device.site);
+      const deviceId = cleanLifecycleText(device.id) || hostname;
+      const bulletinUrl = cleanLifecycleText(component.record?.bulletinUrl);
+      const bulletinNumber = cleanLifecycleText(component.record?.bulletinNumber);
       return {
         id: `lifecycle_${stableId(`${hostname}:${evaluation.source}:${status}:${component.key ?? ""}`)}`,
         device: hostname,
@@ -172,13 +187,43 @@ export function buildLifecycleFindings(
         remediationCategory,
         criticality,
         role,
+        productId,
+        model,
+        softwareVersion,
+        site,
+        deviceId,
+        bulletinUrl,
+        bulletinNumber,
         title: `${hostname}: riesgo lifecycle ${statusLabel} en ${sourceLabel}`,
         affectedAssets: [hostname],
-        evidenceRefs: lifecycleEvidenceRefs(device, component).slice(0, 8),
+        evidenceRefs: lifecycleEvidenceRefs(device, component, {
+          hostname,
+          role,
+          productId,
+          model,
+          softwareVersion,
+          site,
+          deviceId,
+          bulletinUrl,
+          bulletinNumber
+        }).slice(0, 8),
         confidence: component.record ? 90 : 75,
-        technical_rationale: deterministicTechnicalRationale(hostname, status, evaluation.source, component, criticality, role),
+        technical_rationale: deterministicTechnicalRationale({
+          hostname,
+          status,
+          source: evaluation.source,
+          component,
+          criticality,
+          role,
+          productId,
+          model,
+          softwareVersion,
+          site,
+          deviceId,
+          bulletinUrl
+        }),
         business_impact: deterministicBusinessImpact(status, evaluation.source, criticality, role),
-        recommendation: deterministicRecommendation(status, evaluation.source),
+        recommendation: deterministicRecommendation(status, evaluation.source, productId, softwareVersion),
         validation_questions: [
           "Confirmar si el equipo y version detectados representan el estado actual de produccion.",
           "Confirmar contrato, criticidad y ventana de remediacion antes de ejecutar cambios."
@@ -269,32 +314,59 @@ function remediationCategoryForLifecycle(status: LifecycleFinding["status"], sou
   return status === "obsolete" ? "new_technology" : "platform_upgrade";
 }
 
-function lifecycleEvidenceRefs(device: LifecycleInputDevice, component: LifecycleComponentEvaluation) {
+function lifecycleEvidenceRefs(
+  device: LifecycleInputDevice,
+  component: LifecycleComponentEvaluation,
+  context: {
+    hostname: string;
+    role: string;
+    productId?: string;
+    model?: string;
+    softwareVersion?: string;
+    site?: string;
+    deviceId?: string;
+    bulletinUrl?: string;
+    bulletinNumber?: string;
+  }
+) {
   return Array.from(new Set([
     ...(device.evidenceRefs ?? []),
     ...(device.sourceFiles ?? []),
     ...(device.evidence ?? []),
     component.record?.bulletinUrl,
     component.record?.bulletinNumber,
-    component.key
+    component.key,
+    lifecycleEvidenceNarrative(component, context)
   ].filter(Boolean) as string[]));
 }
 
-function deterministicTechnicalRationale(
-  hostname: string,
-  status: LifecycleFinding["status"],
-  source: LifecycleSource,
-  component: LifecycleComponentEvaluation,
-  criticality: LifecycleFinding["criticality"],
-  role: string
-) {
+function deterministicTechnicalRationale(input: {
+  hostname: string;
+  status: LifecycleFinding["status"];
+  source: LifecycleSource;
+  component: LifecycleComponentEvaluation;
+  criticality: LifecycleFinding["criticality"];
+  role: string;
+  productId?: string;
+  model?: string;
+  softwareVersion?: string;
+  site?: string;
+  deviceId?: string;
+  bulletinUrl?: string;
+}) {
+  const { hostname, status, source, component, criticality, role, productId, model, softwareVersion, site, deviceId, bulletinUrl } = input;
   const statusLabel = lifecycleStatusLabel(status);
-  const sourceLabel = source === "hardware" ? "hardware" : "software";
+  const assetLabel = lifecycleAssetLabel({ source, productId, model, softwareVersion });
+  const roleLabel = role || "sin rol definido";
+  const siteLabel = site || "sitio no especificado";
+  const deviceLabel = deviceId || hostname;
+  const lifecycleLabel = source === "hardware" ? "hardware" : "software";
   const dates = [
-    component.dates.endOfSaleDate ? `End-of-Sale ${component.dates.endOfSaleDate}` : "",
-    component.dates.lastDateOfSupport ? `Last Date of Support ${component.dates.lastDateOfSupport}` : ""
+    component.dates.endOfSaleDate ? `End of Sale: ${component.dates.endOfSaleDate}` : "",
+    component.dates.lastDateOfSupport ? `ultima fecha de soporte: ${component.dates.lastDateOfSupport}` : ""
   ].filter(Boolean).join("; ");
-  return `${hostname} presenta estado lifecycle ${statusLabel} en ${sourceLabel}${dates ? ` (${dates})` : ""} en un equipo de criticidad ${criticality} (rol ${role}).`;
+  const ciscoRef = bulletinUrl ? ` Ref. Cisco: ${bulletinUrl}.` : "";
+  return `${assetLabel} que opera como ${roleLabel} en el sitio ${siteLabel} - equipo ${hostname} (id ${deviceLabel}) - presenta estado lifecycle ${statusLabel} de ${lifecycleLabel}.${ciscoRef}${dates ? ` ${dates}.` : ""} Criticidad del activo: ${criticality}.`;
 }
 
 function deterministicBusinessImpact(status: LifecycleFinding["status"], source: LifecycleSource, criticality: LifecycleFinding["criticality"], role: string) {
@@ -308,13 +380,15 @@ function deterministicBusinessImpact(status: LifecycleFinding["status"], source:
   return `El fin de venta anticipa restricciones de soporte y disponibilidad de reemplazos, por lo que debe entrar al plan de renovacion.${impactContext}`;
 }
 
-function deterministicRecommendation(status: LifecycleFinding["status"], source: LifecycleSource) {
+function deterministicRecommendation(status: LifecycleFinding["status"], source: LifecycleSource, productId?: string, softwareVersion?: string) {
   if (source === "software") {
+    const versionLabel = softwareVersion ? ` ${softwareVersion}` : "";
     return status === "obsolete"
-      ? "Planificar migracion a una tecnologia o release soportado, validando compatibilidad de hardware, features y ventanas de cambio."
-      : "Planificar upgrade a un release soportado y validar matriz de compatibilidad, impacto operativo y plan de rollback.";
+      ? `Planificar migracion desde la version${versionLabel} hacia una tecnologia o release soportado, revisando compatibilidad de hardware, features y ventanas de cambio.`
+      : `Planificar upgrade de la version${versionLabel} a un release soportado con matriz de compatibilidad, impacto operativo documentado y plan de rollback.`;
   }
-  return "Planificar actualizacion de plataforma o reemplazo del componente, priorizando criticidad, redundancia y dependencias de servicio.";
+  const pidLabel = productId ? ` del PID ${productId}` : "";
+  return `Planificar reemplazo o upgrade de plataforma${pidLabel}, priorizando criticidad, redundancia, dependencias de servicio y ventana de migracion aprobada.`;
 }
 
 function lifecycleStatusLabel(status: LifecycleStatus) {
@@ -341,4 +415,48 @@ function stableId(value: string) {
     hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
   }
   return hash.toString(16).padStart(8, "0");
+}
+
+function cleanLifecycleText(value: unknown) {
+  const text = String(value ?? "").trim();
+  return text || undefined;
+}
+
+function lifecycleAssetLabel(input: { source: LifecycleSource; productId?: string; model?: string; softwareVersion?: string }) {
+  if (input.source === "software") {
+    return `La version de software ${input.softwareVersion || input.productId || "no identificada"}`;
+  }
+  const modelLabel = input.model || "El componente hardware";
+  return input.productId ? `${modelLabel} (PID ${input.productId})` : modelLabel;
+}
+
+function lifecycleEvidenceNarrative(
+  component: LifecycleComponentEvaluation,
+  context: {
+    hostname: string;
+    role: string;
+    productId?: string;
+    model?: string;
+    softwareVersion?: string;
+    site?: string;
+    deviceId?: string;
+    bulletinUrl?: string;
+    bulletinNumber?: string;
+  }
+) {
+  const assetLabel = lifecycleAssetLabel({ source: component.source, productId: context.productId, model: context.model, softwareVersion: context.softwareVersion });
+  const dates = [
+    component.dates.endOfSaleDate ? `End of Sale ${component.dates.endOfSaleDate}` : "",
+    component.dates.lastDateOfSupport ? `Last Date of Support ${component.dates.lastDateOfSupport}` : ""
+  ].filter(Boolean).join("; ");
+  const ciscoRef = [context.bulletinNumber ? `bulletin ${context.bulletinNumber}` : "", context.bulletinUrl ? `link ${context.bulletinUrl}` : ""].filter(Boolean).join(", ");
+  return [
+    `Lifecycle evidence: ${assetLabel}`,
+    `equipo ${context.hostname}`,
+    context.deviceId ? `id ${context.deviceId}` : "",
+    context.role ? `rol ${context.role}` : "",
+    context.site ? `sitio ${context.site}` : "",
+    dates,
+    ciscoRef ? `Cisco ${ciscoRef}` : ""
+  ].filter(Boolean).join("; ");
 }

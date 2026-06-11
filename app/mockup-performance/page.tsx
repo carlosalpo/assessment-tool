@@ -557,18 +557,13 @@ function buildSparseHeatmap(partial: Record<string, Partial<Record<HealthCategor
 
 export default function MockupPerformancePage() {
   const [scenarioId, setScenarioId] = useState<ScenarioId>("complete");
-  const [expandedPriorityIds, setExpandedPriorityIds] = useState<Set<string>>(new Set(["prio-1"]));
+  const [expandedPriorityId, setExpandedPriorityId] = useState<string | null>(null);
   const [diagnosticOpen, setDiagnosticOpen] = useState(false);
   const data = scenarioData[scenarioId];
   const activeScenario = scenarios.find((scenario) => scenario.id === scenarioId) ?? scenarios[0];
 
   function togglePriority(priorityId: string) {
-    setExpandedPriorityIds((current) => {
-      const next = new Set(current);
-      if (next.has(priorityId)) next.delete(priorityId);
-      else next.add(priorityId);
-      return next;
-    });
+    setExpandedPriorityId((current) => current === priorityId ? null : priorityId);
   }
 
   return (
@@ -600,7 +595,7 @@ export default function MockupPerformancePage() {
         <Header data={data} />
         <KpiStrip kpis={data.kpis} />
         <ExecutiveFilters data={data} />
-        <ActionablePriorities priorities={data.priorities} expandedPriorityIds={expandedPriorityIds} onTogglePriority={togglePriority} />
+        <ActionablePriorities priorities={data.priorities} expandedPriorityId={expandedPriorityId} onTogglePriority={togglePriority} />
         <RiskHeatmap data={data} />
         <Distributions data={data} />
         <EvidenceQualityPanel quality={data.evidenceQuality} />
@@ -713,11 +708,11 @@ function FilterControl({ icon: Icon, label, value, options }: { icon: LucideIcon
 
 function ActionablePriorities({
   priorities,
-  expandedPriorityIds,
+  expandedPriorityId,
   onTogglePriority
 }: {
   priorities: Priority[];
-  expandedPriorityIds: Set<string>;
+  expandedPriorityId: string | null;
   onTogglePriority: (priorityId: string) => void;
 }) {
   return (
@@ -731,7 +726,7 @@ function ActionablePriorities({
       </PanelHeader>
       <PanelBody className="space-y-2">
         {priorities.map((priority) => (
-          <PriorityRow key={priority.id} priority={priority} expanded={expandedPriorityIds.has(priority.id)} onToggle={() => onTogglePriority(priority.id)} />
+          <PriorityRow key={priority.id} priority={priority} expanded={expandedPriorityId === priority.id} onToggle={() => onTogglePriority(priority.id)} />
         ))}
       </PanelBody>
     </Panel>
@@ -743,28 +738,28 @@ function PriorityRow({ priority, expanded, onToggle }: { priority: Priority; exp
     <button
       className={cn(
         "group relative w-full overflow-hidden rounded-md border bg-slate-950/70 p-0 text-left transition hover:border-primary/60",
-        priority.active ? "border-primary/60 ring-1 ring-primary/30" : "border-white/10"
+        expanded ? "border-primary/60 ring-1 ring-primary/30" : "border-white/10"
       )}
       onClick={onToggle}
     >
       <span className={cn("absolute inset-y-0 left-0 w-1", severityBar(priority.severity))} />
       <div className="p-3 pl-4">
-        <div className="grid gap-3 lg:grid-cols-[minmax(260px,1.1fr)_minmax(300px,1fr)_auto] lg:items-center">
+        <div className="grid gap-3 lg:grid-cols-[minmax(220px,1fr)_520px_216px] lg:items-center">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
               <span className="rounded border border-white/10 bg-white/10 px-2 py-0.5 text-[11px] font-semibold text-slate-300">#{priority.rank}</span>
               <span className="text-xs font-semibold uppercase text-slate-400">{priority.category}</span>
-              {priority.active ? <Badge tone="info">seleccionada</Badge> : null}
+              {expanded ? <Badge tone="info">seleccionada</Badge> : null}
             </div>
             <p className="mt-1 line-clamp-2 text-sm font-semibold leading-snug text-white">{priority.title}</p>
           </div>
-          <div className="grid gap-2 sm:grid-cols-4">
+          <div className="grid gap-2 sm:grid-cols-[140px_92px_116px_160px] lg:w-[520px]">
             <InlineFact label="Activo" value={priority.affectedAsset} />
             <InlineFact label="IFs" value={priority.interfaces} />
             <InlineFact label="Metricas" value={priority.metrics} />
             <InlineFact label="Observado" value={priority.observed} strong />
           </div>
-          <div className="flex shrink-0 flex-wrap items-center gap-1 lg:justify-end">
+          <div className="flex w-full shrink-0 flex-wrap items-center gap-1 sm:w-[216px] sm:justify-end lg:w-[216px]">
             <Badge tone={severityTone(priority.severity)}>{priority.severity}</Badge>
             <Badge tone={statusTone(priority.status)}>{statusLabel(priority.status)}</Badge>
             <Badge tone={priority.confidence >= 80 ? "success" : priority.confidence >= 60 ? "warning" : "danger"}>{priority.confidence}%</Badge>

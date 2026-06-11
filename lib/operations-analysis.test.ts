@@ -11,6 +11,7 @@ import {
   buildOperationsFindings,
   isOperationalAssessmentComplete
 } from "./operations-analysis.ts";
+import { isVacuousRemediation } from "./remediation-quality.ts";
 
 function completedAssessment() {
   const base = createDefaultOperationalAssessment("assess_ops", "client_ops");
@@ -55,6 +56,7 @@ test("buildOperationsFindings creates deterministic findings from complete inter
   const monitoring = findings.find((finding) => finding.area === "monitoring");
   assert.equal(monitoring?.remediationCategory, "operational_change");
   assert.ok(["high", "critical"].includes(monitoring?.severity ?? ""));
+  assert.ok(findings.every((finding) => !isVacuousRemediation(finding.recommendation)));
   assert.deepEqual(findings, buildOperationsFindings(assessment));
 });
 

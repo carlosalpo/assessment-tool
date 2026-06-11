@@ -7,11 +7,13 @@ import {
   classifyPerformanceEvidence,
   createDefaultPerformanceScope,
   generatePerformanceFindings,
+  metricRecommendation,
   performanceFindingsToGenericFindings,
   processPerformanceEvidence,
   type PerformanceFinding,
   type PerformanceEvidenceFile
 } from "./performance-analysis.ts";
+import { isVacuousRemediation } from "./remediation-quality.ts";
 
 function evidence(content: string): PerformanceEvidenceFile {
   const classification = classifyPerformanceEvidence("core-01-show-interfaces.log", content);
@@ -82,6 +84,47 @@ test("generatePerformanceFindings creates findings only from critical metrics wi
   assert.ok(findings.length > 0);
   assert.ok(findings.every((finding) => finding.evidence.length > 0));
   assert.ok(findings.every((finding) => finding.confidence > 0));
+  assert.ok(findings.every((finding) => !isVacuousRemediation(finding.recommendation)));
+});
+
+test("metricRecommendation returns actionable root-cause actions for key metrics", () => {
+  const crc = metricRecommendation("crc_errors");
+  assert.doesNotMatch(crc, /^\s*validar\b/i);
+  assert.match(crc, /transceiver|SFP/i);
+  assert.match(crc, /conectores|patch|duplex|RMA/i);
+
+  const utilization = metricRecommendation("utilization");
+  assert.doesNotMatch(utilization, /^\s*validar\b/i);
+  assert.match(utilization, /top talkers|aplicaciones/i);
+  assert.match(utilization, /upgrade|agregacion|port-channel/i);
+
+  const cpu = metricRecommendation("cpu");
+  assert.doesNotMatch(cpu, /^\s*validar\b/i);
+  assert.match(cpu, /show processes cpu sorted/i);
+  assert.match(cpu, /CoPP|control-plane/i);
+
+  const drops = metricRecommendation("queue_drops");
+  assert.doesNotMatch(drops, /^\s*validar\b/i);
+  assert.match(drops, /QoS|marcado|colas/i);
+  assert.match(drops, /sobre-suscripcion|utilizacion/i);
+});
+
+test("generatePerformanceFindings uses category-specific root cause impact and companion metrics", () => {
+  const input = evidence("hostname core-01\nGi1/0/1 input errors 22 crc 4 drops 11 util 88%");
+  const processed = processPerformanceEvidence("assess_test", [input], "snapshot");
+  const findings = generatePerformanceFindings("assess_test", processed.metrics, processed.summary, "snapshot");
+
+  const errorFinding = findings.find((finding) => finding.performanceCategory === "errors");
+  assert.ok(errorFinding);
+  assert.match(errorFinding.probableCause, /capa fisica|transceiver|duplex/i);
+  assert.match(errorFinding.impact, /perdida de paquetes|retransmisiones/i);
+  assert.ok(errorFinding.evidence.some((item) => /Metricas companeras/.test(item)));
+  assert.match(errorFinding.probableCause, /utilizacion del enlace/i);
+
+  const saturationFinding = findings.find((finding) => finding.performanceCategory === "saturation");
+  assert.ok(saturationFinding);
+  assert.match(saturationFinding.probableCause, /capacidad insuficiente|patron de trafico/i);
+  assert.match(saturationFinding.impact, /latencia|throughput|horas pico/i);
 });
 
 test("buildPerformanceAssessment flags missing historical evidence for hybrid mode", () => {
@@ -138,4 +181,72 @@ test("performanceFindingsToGenericFindings drops findings without evidence", () 
   };
 
   assert.deepEqual(performanceFindingsToGenericFindings([incompleteFinding]), []);
+  const [genericFinding] = performanceFindingsToGenericFindings([{ ...incompleteFinding, id: "PF-WITH-EVIDENCE", evidence: ["show interface"], confidence: 0.7 }]);
+  assert.equal(genericFinding.scope, "performance");
+  assert.equal(genericFinding.category, "operations");
 });
+
+test("performanceFindingsToGenericFindings emits enriched fields when enabled", () => {
+  const finding: PerformanceFinding = {
+    id: "PF-ENRICHED",
+    assessmentId: "assess_test",
+    title: "CRC alto en uplink",
+    domain: "enterprise_lan_wan",
+    affectedDeviceIds: ["core-01"],
+    affectedInterfaceIds: ["Gi1/0/1"],
+    severity: "high",
+    performanceCategory: "errors",
+    metricRefs: ["pm_crc"],
+    evidence: ["show interfaces: crc_errors 22count"],
+    impact: "Puede provocar perdida de paquetes y retransmisiones.",
+    probableCause: "Degradacion probable de capa fisica: transceiver o cableado.",
+    recommendation: metricRecommendation("crc_errors"),
+    remediationCategory: "operational_change",
+    confidence: 0.8,
+    aiGenerated: false,
+    status: "draft",
+    relatedRiskDimensions: ["performance_capacity", "resilience_availability"]
+  };
+
+  withEnv({ AI_ENRICHED_FINDINGS: undefined }, () => {
+    const [plain] = performanceFindingsToGenericFindings([finding]) as any[];
+    assert.equal(plain.probable_cause, undefined);
+    assert.equal(plain.technical_impact, undefined);
+    assert.equal(plain.probability_of_failure, undefined);
+    assert.equal(plain.impact_if_fails, undefined);
+  });
+
+  withEnv({ AI_ENRICHED_FINDINGS: "1" }, () => {
+    const [enriched] = performanceFindingsToGenericFindings([finding]) as any[];
+    assert.equal(enriched.probable_cause, finding.probableCause);
+    assert.equal(enriched.technical_impact, finding.impact);
+    assert.equal(enriched.probability_of_failure, "likely");
+    assert.equal(enriched.impact_if_fails, "significant");
+    assert.equal(enriched.probabilityOfFailure, "likely");
+    assert.equal(enriched.impactIfFails, "significant");
+    assert.equal(enriched.aiMetadata.probableCause, finding.probableCause);
+    assert.equal(enriched.aiMetadata.technicalImpact, finding.impact);
+  });
+});
+
+function withEnv(values: Record<string, string | undefined>, run: () => void) {
+  const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+  try {
+    for (const [key, value] of Object.entries(values)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    run();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}

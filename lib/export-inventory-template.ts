@@ -19,7 +19,7 @@ const inventoryHeaders = [
   "IP Gestion",
   "Serial",
   "Modelo",
-  "Tipo de Equipo",
+  "Tipo",
   "Plataforma",
   "Rol",
   "Sitio",
@@ -29,7 +29,8 @@ const inventoryHeaders = [
 ];
 
 const exampleRows = [
-  ["core-9500-01", "10.10.10.1", "FCW2148L0AB", "C9500-48Y4C", "switch", "ios-xe", "core", "HQ", "core", "critical", "Core principal"],
+  ["core-9500-01", "10.10.10.1", "FCW2148L0AB", "C9500-48Y4C", "switch-l3", "ios-xe", "core", "HQ", "core", "critical", "Core principal"],
+  ["access-9200-01", "10.10.11.10", "FCW2209A0CD", "C9200L-48P", "switch-l2", "ios-xe", "access", "HQ", "campus", "medium", "Switch de acceso"],
   ["wan-isr-01", "10.10.20.1", "FGL2201A1BC", "ISR4431", "router", "ios-xe", "wan-edge", "HQ", "perimeter", "high", "Router WAN"],
   ["branch-isr-01", "10.30.1.11", "FJC2134C0AA", "ISR4331", "router", "ios-xe", "branch-router", "Branch-01", "branches", "medium", "Router de sucursal"]
 ];
@@ -40,8 +41,8 @@ const guideRows = [
   ["IP Gestion", "Direccion IP usada para administrar el equipo.", "10.10.10.1"],
   ["Serial", "Numero de serie del equipo o chasis.", "FCW2148L0AB"],
   ["Modelo", "Modelo o PID principal del equipo.", "C9500-48Y4C, ISR4331/K9"],
-  ["Tipo de Equipo", "Clasificacion tecnica usada para scripts y analisis.", "switch, router, nexus-switch, aci, wireless-controller, firewall, other"],
-  ["Plataforma", "Sistema operativo o familia tecnologica.", "ios-xe, ios, nx-os, aci, ftd"],
+  ["Tipo", "Clasificacion tecnica usada para asignar comandos de levantamiento y analisis.", "switch-l2, switch-l3, router, nexus-switch, firewall, aci, wireless-controller, other"],
+  ["Plataforma", "Sistema operativo o familia tecnologica soportada por comandos y analisis.", "ios-xe, ios, nx-os, asa, ftd, aci, unknown"],
   ["Rol", "Funcion del equipo dentro de la red.", "core, wan-edge, branch-router, access, leaf, spine"],
   ["Sitio", "Ubicacion fisica o logica.", "HQ, DC1, Branch-01"],
   ["Segmento Topologico", "Segmento/capa donde debe aparecer el equipo en el grafo de Topologia. Use Auto si desea que la herramienta lo infiera.", "branches, perimeter, core, datacenter, campus, other, auto"],

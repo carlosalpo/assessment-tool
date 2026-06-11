@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getCiscoApiToken } from "@/lib/server-credentials";
+import { getCiscoAccessToken } from "@/lib/server-credentials";
 
 type CiscoEoxDate = {
   value?: string;
@@ -34,11 +34,13 @@ export async function POST(request: Request) {
   }
 
   try {
-    const records = await fetchCiscoEoxByProductIds(productIds, request.headers.get("x-cisco-api-token") ?? undefined);
+    const { records, lookupErrors } = await fetchCiscoEoxByProductIds(productIds);
+    const failedCount = Object.keys(lookupErrors).length;
     return NextResponse.json({
       records,
       source: "support-api",
-      lookupResults: buildLookupResults(productIds, records, "support-api")
+      warning: failedCount > 0 ? `Cisco Support EoX omitio ${failedCount} PID(s) por respuesta no exitosa; revisa el detalle por PID.` : undefined,
+      lookupResults: buildLookupResults(productIds, records, "support-api", undefined, lookupErrors)
     });
   } catch (error) {
     const supportApiError = error instanceof Error ? error.message : "No se pudo consultar Cisco EoX.";
@@ -52,30 +54,37 @@ export async function POST(request: Request) {
   }
 }
 
-async function fetchCiscoEoxByProductIds(productIds: string[], requestToken?: string) {
-  const token = normalizeBearerToken(requestToken || await getCiscoApiToken());
-  const chunks = chunk(productIds, 20);
-  const records: ReturnType<typeof normalizeCiscoRecord>[] = [];
+async function fetchCiscoEoxByProductIds(productIds: string[]) {
+  const token = normalizeBearerToken(await getCiscoAccessToken());
+  if (!token) {
+    throw new Error("Credencial Cisco no configurada. Guarda Client ID y Client Secret en Ajustes o define CISCO_CLIENT_ID/CISCO_CLIENT_SECRET en .env.local.");
+  }
 
-  for (const productIdChunk of chunks) {
-    const encodedPids = productIdChunk.map(encodeURIComponent).join(",");
-    const response = await fetch(`${CISCO_EOX_BASE_URL}/1/${encodedPids}?responseencoding=json`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-      next: { revalidate: 60 * 60 * 24 }
+  const records: ReturnType<typeof normalizeCiscoRecord>[] = [];
+  const lookupErrors: Record<string, string> = {};
+
+  for (const productId of productIds) {
+    const response = await fetch(`${CISCO_EOX_BASE_URL}/1/${encodeURIComponent(productId)}?responseencoding=json`, {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: "no-store"
     });
+    const payload = (await response.json().catch(() => null)) as CiscoEoxResponse | any;
 
     if (!response.ok) {
-      throw new Error(
-        `Cisco EoX respondio ${response.status}. Guarda Cisco API token en Ajustes o define CISCO_API_TOKEN en .env.local.`
-      );
+      lookupErrors[productId] = ciscoEoxErrorMessage(response.status, payload);
+      continue;
     }
 
-    const payload = (await response.json()) as CiscoEoxResponse;
     const eoxRecords = Array.isArray(payload.EOXRecord) ? payload.EOXRecord : payload.EOXRecord ? [payload.EOXRecord] : [];
     records.push(...eoxRecords.map(normalizeCiscoRecord));
   }
 
-  return records.filter((record) => record.productId);
+  const filteredRecords = records.filter((record) => record.productId);
+  if (filteredRecords.length === 0 && Object.keys(lookupErrors).length === productIds.length) {
+    throw new Error(`Cisco EoX no pudo consultar ningun PID. Primer error: ${Object.entries(lookupErrors)[0]?.join(": ") || "sin detalle"}`);
+  }
+
+  return { records: filteredRecords, lookupErrors };
 }
 
 function normalizeBearerToken(value?: string) {
@@ -289,16 +298,19 @@ function buildLookupResults(
   productIds: string[],
   records: NormalizedEoxRecord[],
   source: "support-api" | "public-cisco",
-  supportApiError?: string
+  supportApiError?: string,
+  supportApiErrors: Record<string, string> = {}
 ) {
   return productIds.map((productId) => {
     const record = records.find((item) => recordMatchesProductId(item, productId));
+    const pidSupportError = supportApiErrors[productId];
     const attempts = [
       `PID solicitado: ${productId}`,
       source === "support-api"
         ? "Consulta ejecutada contra Cisco Support EoX API."
         : "Consulta ejecutada contra boletines publicos de Cisco.",
       ...(supportApiError ? [`Support API no disponible: ${supportApiError}`] : []),
+      ...(pidSupportError ? [`Support API para este PID: ${pidSupportError}`] : []),
       record
         ? `Registro encontrado para ${record.productId || record.inputValue || productId}.`
         : "No se encontro registro EoX para este PID en la fuente consultada."
@@ -308,7 +320,7 @@ function buildLookupResults(
       productId,
       normalizedProductId: productId.toUpperCase(),
       source,
-      status: record ? "matched" : "not-found",
+      status: record ? "matched" : pidSupportError ? "error" : "not-found",
       matchedProductId: record?.productId || "",
       bulletinNumber: record?.bulletinNumber || "",
       bulletinUrl: record?.bulletinUrl || "",
@@ -334,12 +346,14 @@ function isConsultableCiscoProductId(value: string) {
   return /^[A-Z0-9][A-Z0-9./_-]+=?$/.test(normalized);
 }
 
-function clean(value?: string) {
-  return value?.trim() ?? "";
+function ciscoEoxErrorMessage(status: number, payload: any) {
+  const detail = payload?.message || payload?.error_description || payload?.error || payload?.errorMessage || payload?.errors?.[0]?.message || "";
+  if (status === 400) return `Cisco EoX respondio 400 para el PID. ${detail || "El PID puede no ser valido para EOXByProductID."}`;
+  if (status === 401) return `Cisco EoX rechazo las credenciales OAuth (401). Revisa Client ID y Client Secret.${detail ? ` Detalle: ${detail}` : ""}`;
+  if (status === 403) return `Credenciales OAuth validas, pero sin permiso para Cisco Support EoX API (403).${detail ? ` Detalle: ${detail}` : ""}`;
+  return `Cisco EoX respondio ${status}.${detail ? ` Detalle: ${detail}` : ""}`;
 }
 
-function chunk<T>(items: T[], size: number) {
-  const chunks: T[][] = [];
-  for (let index = 0; index < items.length; index += size) chunks.push(items.slice(index, index + size));
-  return chunks;
+function clean(value?: string) {
+  return value?.trim() ?? "";
 }

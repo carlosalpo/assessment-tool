@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getCiscoApiToken } from "@/lib/server-credentials";
+import { getCiscoAccessToken } from "@/lib/server-credentials";
 
 type CiscoCoverageSummaryRecord = {
   sr_no?: string;
@@ -28,7 +28,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const records = await fetchCoverageSummaryBySerials(serials, request.headers.get("x-cisco-api-token") ?? undefined);
+    const records = await fetchCoverageSummaryBySerials(serials);
     return NextResponse.json({ records, source: "sn2info-summary" });
   } catch (error) {
     return NextResponse.json(
@@ -38,10 +38,10 @@ export async function POST(request: Request) {
   }
 }
 
-async function fetchCoverageSummaryBySerials(serials: string[], requestToken?: string) {
-  const token = normalizeBearerToken(requestToken || await getCiscoApiToken());
+async function fetchCoverageSummaryBySerials(serials: string[]) {
+  const token = normalizeBearerToken(await getCiscoAccessToken());
   if (!token) {
-    throw new Error("Guarda Cisco API token en Ajustes o define CISCO_API_TOKEN en .env.local para consultar soporte.");
+    throw new Error("Guarda credenciales OAuth Cisco en Ajustes o define CISCO_CLIENT_ID/CISCO_CLIENT_SECRET en .env.local para consultar soporte.");
   }
 
   const records: ReturnType<typeof normalizeCoverageSummaryRecord>[] = [];
@@ -122,7 +122,7 @@ function clean(value: unknown) {
 
 function ciscoSupportErrorMessage(status: number, payload: any) {
   const detail = payload?.message || payload?.error_description || payload?.error || payload?.errorMessage || "";
-  if (status === 401) return `Cisco SN2INFO rechazo el token (401). Genera un access token nuevo.${detail ? ` Detalle: ${detail}` : ""}`;
-  if (status === 403) return `Token OAuth valido, pero sin permiso para Cisco SN2INFO / soporte (403). Revisa entitlement de Support APIs.${detail ? ` Detalle: ${detail}` : ""}`;
+  if (status === 401) return `Cisco SN2INFO rechazo las credenciales OAuth (401). Revisa Client ID y Client Secret.${detail ? ` Detalle: ${detail}` : ""}`;
+  if (status === 403) return `Credenciales OAuth validas, pero sin permiso para Cisco SN2INFO / soporte (403). Revisa entitlement de Support APIs.${detail ? ` Detalle: ${detail}` : ""}`;
   return `Cisco SN2INFO respondio ${status}.${detail ? ` Detalle: ${detail}` : ""}`;
 }
